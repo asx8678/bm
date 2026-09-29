@@ -41,8 +41,6 @@ defmodule Bm.Workspace.Coordinator do
     prompt: &Bm.Prompts.worker/1
   ]
 
-  @output_tail 4_096
-
   ## API
 
   @doc """
@@ -87,6 +85,13 @@ defmodule Bm.Workspace.Coordinator do
   they still hold what the attempt left. `{:error, {:changed_since, paths}}` changes nothing.
   """
   def revert(path), do: call(path, :revert)
+
+  @doc """
+  Finishes the workspace's run (`:done`), which releases the workspace: the next task starts a
+  new run with a fresh baseline of the user's files. Refused while an attempt runs or the lane
+  is held.
+  """
+  def finish_run(path), do: call(path, :finish_run)
 
   @doc "Stops the coordinator and its worker."
   def stop(path) do
@@ -239,6 +244,17 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   def handle_call(:revert, _from, state), do: {:reply, {:error, :attempt_running}, state}
+
+  def handle_call(:finish_run, _from, %{run: nil} = state),
+    do: {:reply, {:error, :no_run}, state}
+
+  def handle_call(:finish_run, _from, %{lane: :free, phase: nil} = state) do
+    {:ok, run} = Runs.finish_run(Runs.get_run!(state.run.id), :done)
+    Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+    {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil}}
+  end
+
+  def handle_call(:finish_run, _from, state), do: {:reply, {:error, :lane_busy}, state}
 
   ## Admission (4.4)
 
@@ -430,6 +446,13 @@ defmodule Bm.Workspace.Coordinator do
 
     if delta > 0 or unknown_delta > 0 do
       run = Runs.add_spend(state.run, max(delta, 0.0), max(unknown_delta, 0))
+
+      Phoenix.PubSub.broadcast(
+        Bm.PubSub,
+        topic(state.root),
+        {:workspace, state.root, {:run, run}}
+      )
+
       %{state | run: run, spend_seen: %{confirmed: confirmed, unknown: unknown}}
     else
       state
@@ -713,52 +736,10 @@ defmodule Bm.Workspace.Coordinator do
     command = state.workspace.verify_command
     timeout = state.config.verify_timeout
 
-    start_job(state, :verify, fn -> run_verify(coordinator, root, command, timeout) end)
+    start_job(state, :verify, fn ->
+      Bm.Workspace.Verify.run(command, root, timeout, coordinator)
+    end)
   end
-
-  @doc false
-  # Runs `command` as the leader of its own process group; ends the whole group afterwards.
-  def run_verify(coordinator, root, command, timeout) do
-    {exe, args} = Bm.Proc.launch_args("/bin/sh", ["-c", command])
-
-    port =
-      Port.open({:spawn_executable, exe}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        :hide,
-        args: args,
-        cd: root
-      ])
-
-    {:os_pid, pgid} = Port.info(port, :os_pid)
-    send(coordinator, {:verify_started, pgid})
-    deadline = System.monotonic_time(:millisecond) + timeout
-    result = collect_output(port, "", deadline)
-    Bm.Proc.terminate_groups([pgid], 500)
-    result
-  end
-
-  defp collect_output(port, output, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^port, {:data, data}} -> collect_output(port, tail(output <> data), deadline)
-      {^port, {:exit_status, status}} -> %{"exit" => status, "output" => printable(output)}
-    after
-      remaining ->
-        Port.close(port)
-        %{"exit" => nil, "timeout" => true, "output" => printable(output)}
-    end
-  end
-
-  # Stored as JSON: invalid UTF-8 (binary output, or a character cut by `tail/1`) is replaced.
-  defp printable(output), do: String.replace_invalid(output)
-
-  defp tail(output) when byte_size(output) <= @output_tail, do: output
-
-  defp tail(output),
-    do: binary_part(output, byte_size(output) - @output_tail, @output_tail)
 
   defp verified(state, result) do
     state = %{state | verify_pgid: nil}

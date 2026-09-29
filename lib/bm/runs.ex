@@ -90,6 +90,21 @@ defmodule Bm.Runs do
 
   def get_run!(id), do: Repo.get!(Run, id)
 
+  @doc "A run with its workspace, or nil."
+  def get_run_with_workspace(id) do
+    Repo.one(from r in Run, where: r.id == ^id, preload: :workspace)
+  end
+
+  @doc "The most recently updated runs, with their workspaces."
+  def list_recent_runs(limit \\ 20) do
+    Repo.all(
+      from r in Run,
+        order_by: [desc: r.updated_at, desc: r.id],
+        limit: ^limit,
+        preload: :workspace
+    )
+  end
+
   @doc "Ends a run as `:done`, `:failed` or `:cancelled`; this releases the workspace."
   def finish_run(%Run{} = run, status) when status in [:done, :failed, :cancelled] do
     run |> Run.status_changeset(status) |> Repo.update()
@@ -199,6 +214,17 @@ defmodule Bm.Runs do
     |> Repo.update_all(push: [flags: flag], set: [updated_at: DateTime.utc_now()])
 
     {:ok, Repo.get!(Attempt, id)}
+  end
+
+  @doc "The attempts of a run with their tasks, oldest first (for display)."
+  def list_run_attempts_with_tasks(%Run{id: run_id}) do
+    Repo.all(
+      from a in Attempt,
+        join: t in assoc(a, :task),
+        where: t.run_id == ^run_id,
+        order_by: [asc: a.inserted_at, asc: a.id],
+        preload: [task: t]
+    )
   end
 
   @doc "The attempts of a run, newest first."

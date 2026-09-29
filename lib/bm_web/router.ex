@@ -18,6 +18,8 @@ defmodule BmWeb.Router do
     pipe_through :browser
 
     live "/", HomeLive
+    live "/runs/:id", RunLive
+    live "/chat", ChatLive
     live "/flow", FlowLive
   end
 

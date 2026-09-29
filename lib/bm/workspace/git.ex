@@ -132,6 +132,27 @@ defmodule Bm.Workspace.Git do
   # M (content), T (type, e.g. file ↔ symlink).
   defp status_atom(_), do: :modified
 
+  @max_diff_bytes 64 * 1024
+
+  @doc """
+  Unified diff of `path` between two trees, for display. Returns `{:ok, text}` (cut at 64 KB,
+  with a note) or `{:error, reason}`.
+  """
+  def file_diff(repo, tree_a, tree_b, path) do
+    args = ["diff", "--no-color", "--no-ext-diff", "--no-renames", tree_a, tree_b, "--", path]
+
+    with {:ok, out} <- git(repo, args) do
+      out = String.replace_invalid(out)
+
+      if byte_size(out) > @max_diff_bytes do
+        cut = out |> binary_part(0, @max_diff_bytes) |> String.replace_invalid()
+        {:ok, cut <> "\n… diff cut at 64 KB\n"}
+      else
+        {:ok, out}
+      end
+    end
+  end
+
   ## Baseline
 
   @doc """
