@@ -17,7 +17,7 @@ defmodule Bm.Pi.ProfileTest do
 
     writer = Profile.build(:writer)
     assert ~w(edit write bash submit_result) -- tools(writer) == []
-    assert writer.env == %{"PI_FABRIC_DEPTH" => "99"}
+    assert writer.env == %{}
     assert Enum.any?(writer.command, &String.ends_with?(&1, "bm_guard.ts"))
     refute Enum.any?(Profile.build(:reader).command, &String.ends_with?(&1, "bm_guard.ts"))
   end
@@ -41,13 +41,13 @@ defmodule Bm.Pi.ProfileTest do
     profile = Profile.build(:reader)
     reports = %{"profile" => %{"tools" => ~w(read grep)}}
 
-    assert {:error, {:missing_tools, ["fabric_exec"]}} =
+    assert {:error, {:missing_tools, ["submit_result"]}} =
              Profile.verify({:ok, %{model: "Fake Model", reports: reports}}, profile)
   end
 
   test "a different model fails the check" do
     profile = Profile.build(:reader)
-    reports = %{"profile" => %{"tools" => ~w(fabric_exec)}}
+    reports = %{"profile" => %{"tools" => ~w(read submit_result)}}
 
     assert {:error, {:model_mismatch, "Other"}} =
              Profile.verify({:ok, %{model: "Other", reports: reports}}, profile)

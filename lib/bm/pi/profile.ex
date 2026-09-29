@@ -6,8 +6,12 @@ defmodule Bm.Pi.Profile do
   | Role | Extensions | Tools |
   |---|---|---|
   | `:planner` | zro, bm_planner | read-only + `propose_task`, `close_plan` |
-  | `:reader` | zro, Fabric, bm_worker | read-only (+ `fabric_exec`) + `submit_result` |
-  | `:writer` | zro, Fabric, bm_worker, bm_guard | + `edit`, `write`, `bash` |
+  | `:reader` | zro, bm_worker | read-only + `submit_result` |
+  | `:writer` | zro, bm_worker, bm_guard | + `edit`, `write`, `bash` |
+
+  Workers are **Fabric-free** (decision D16): live qualification showed that `--tools` does not
+  bind Fabric's nested `pi.*` calls and that Fabric starts the user's MCP servers. Without
+  Fabric, pi's `--tools` allowlist and `bm_guard` fully cover the worker's tools.
 
   Every profile starts pi with `--no-extensions`, an explicit `-e` list, a `--tools` allowlist and
   a pinned model. `start/3` starts the agent and fails closed unless its self-reported active tools,
@@ -30,19 +34,17 @@ defmodule Bm.Pi.Profile do
       reports: ~w(profile)
     },
     reader: %{
-      fabric?: true,
+      fabric?: false,
       extensions: ~w(bm_worker),
-      tools: @read_tools ++ ~w(submit_result fabric_exec),
-      # Fabric captures extension tools: only fabric_exec is active; submit_result is reachable
-      # as extensions.submit_result inside code mode (qualified live).
-      required: ~w(fabric_exec),
+      tools: @read_tools ++ ~w(submit_result),
+      required: ~w(submit_result),
       reports: ~w(profile)
     },
     writer: %{
-      fabric?: true,
+      fabric?: false,
       extensions: ~w(bm_worker bm_guard),
-      tools: @read_tools ++ @mutating_tools ++ ~w(submit_result fabric_exec),
-      required: ~w(fabric_exec),
+      tools: @read_tools ++ @mutating_tools ++ ~w(submit_result),
+      required: ~w(submit_result edit write bash),
       reports: ~w(profile guard)
     }
   }

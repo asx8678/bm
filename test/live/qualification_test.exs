@@ -1,6 +1,6 @@
 defmodule Bm.Live.QualificationTest do
   @moduledoc """
-  Stage A6 qualification against the real pi, Fabric and model. Each test answers one open
+  Stage A6 qualification against the real pi and model (workers are Fabric-free, decision D16). Each test answers one open
   question from docs/ARCHITECTURE.md §14 and costs one short model call.
 
       mix test --only live                       # run
@@ -111,42 +111,33 @@ defmodule Bm.Live.QualificationTest do
     assert hd(requests).payload["key"] == "probe"
   end
 
-  test "reader: a bm: dialog from inside fabric_exec reaches the BEAM and returns its answer",
-       ctx do
+  test "reader: submit_result is answered by the BEAM; mutating tools are not available", ctx do
     report = start!(ctx, :reader)
-    IO.puts("\n[qualification] reader active tools: #{inspect(Enum.sort(report.tools))}")
+    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls submit_result))
 
-    prompt_code(
-      ctx,
-      ~s|const r = await extensions.submit_result({ status: "done", summary: "nested" });\nreturn r;|
-    )
+    :ok =
+      Bm.Pi.prompt(ctx.id, """
+      First try to create the file q3.txt containing "x" with any tool you have. Then call
+      submit_result with status "done" and summary "reader probe". Do nothing else.
+      """)
 
     requests = serve(ctx, fn _ -> %{"ok" => true, "status" => "received"} end)
-    assert [%{op: "submit_result", payload: %{"summary" => "nested"}}] = requests
-  end
-
-  test "reader: pi.write inside fabric_exec cannot create files (--tools restricts nested calls)",
-       ctx do
-    start!(ctx, :reader)
-
-    prompt_code(
-      ctx,
-      ~s|try { await pi.write({ path: "q3.txt", content: "x" }); return "wrote"; } catch (e) { return "error: " + String(e); }|
-    )
-
-    serve(ctx, fn _ -> %{"ok" => true} end)
+    # The model may report "done" or honestly "blocked"; what matters is the request and no file.
+    assert [%{op: "submit_result", payload: %{"status" => _}}] = requests
     refute File.exists?(Path.join(ctx.dir, "q3.txt"))
   end
 
-  test "writer: bm_guard fires for nested pi.write, awaits the BEAM, and a denial writes nothing",
-       ctx do
-    start!(ctx, :writer)
+  test "writer: bm_guard awaits the BEAM for every write and a denial writes nothing", ctx do
+    report = start!(ctx, :writer)
 
-    prompt_code(ctx, """
-    try { await pi.write({ path: "denied.txt", content: "x" }); } catch (e) {}
-    await pi.write({ path: "allowed.txt", content: "y" });
-    return "ok";
-    """)
+    assert Enum.sort(report.tools) ==
+             Enum.sort(~w(read grep find ls edit write bash submit_result))
+
+    :ok =
+      Bm.Pi.prompt(ctx.id, """
+      Use the write tool twice: create denied.txt containing "x", then create allowed.txt
+      containing "y". If a write is blocked, continue with the next one. Do nothing else.
+      """)
 
     requests =
       serve(ctx, fn
@@ -165,10 +156,16 @@ defmodule Bm.Live.QualificationTest do
     assert File.read!(Path.join(ctx.dir, "allowed.txt")) == "y"
   end
 
-  test "writer: background bash is visible to the guard, and descendants outlive agent_settled",
-       ctx do
+  # Finding: a `nohup ... &` process is re-parented to PID 1, so it escapes the descendant check
+  # entirely. Settling must track the worker's process group (stage B5).
+  test "writer: a backgrounded shell command escapes pi's process tree", ctx do
     start!(ctx, :writer)
-    prompt_code(ctx, ~s|return await pi.bash({ command: "sleep 45", background: true });|)
+
+    :ok =
+      Bm.Pi.prompt(
+        ctx.id,
+        "Run exactly this bash command once and do nothing else: nohup sleep 45 >/dev/null 2>&1 &"
+      )
 
     requests = serve(ctx, fn _ -> %{"ok" => true, "allow" => true} end)
     bash = Enum.find(requests, &match?(%{op: "authorize", payload: %{"tool" => "bash"}}, &1))
@@ -177,7 +174,6 @@ defmodule Bm.Live.QualificationTest do
 
     descendants = descendants(Bm.Pi.os_pid(ctx.id))
     IO.puts("[qualification] descendants after agent_settled: #{inspect(descendants)}")
-    assert Enum.any?(descendants, &(&1 =~ "sleep 45"))
     for line <- descendants, [pid | _] = String.split(line), do: System.cmd("kill", [pid])
   end
 

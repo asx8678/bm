@@ -39,7 +39,7 @@ real pi/Fabric before anything relies on it.
 | # | Decision | Why | Rejected |
 |---|---|---|---|
 | D1 | BEAM orchestrates; pi codes | pi+Fabric handle editing, GLM quirks and zro auth; the BEAM is best at supervision, state and messaging | Pure-Elixir LLM agents; Fabric as the orchestrator |
-| D2 | Fabric installed and unmodified; workers use a **controlled profile** | In-agent features improve with Fabric updates; no fork | Forking Fabric; managed-host mode for now (see D14) |
+| D2 | Fabric installed and unmodified; BM agents use **controlled profiles** (Fabric-free for now, D16) | In-agent features improve with Fabric updates; no fork | Forking Fabric; managed-host mode for now (see D14) |
 | D3 | Shared checkout, **no worktrees**, no merge queue | Much simpler; conflicts are prevented by scheduling instead of merged | Worktree per worker |
 | D4 | **One active run per workspace** (V1) | Removes cross-run conflicts entirely | Cross-run admission logic |
 | D5 | **One mutation lane**: at most one mutating attempt at a time; read-only attempts run in parallel | Shell commands, formatters and generators can change files without any hook seeing it; serializing mutations makes attribution exact | Parallel writers guarded only by edit/write hooks |
@@ -52,7 +52,7 @@ real pi/Fabric before anything relies on it.
 | D12 | Checkpoints are **private git commits under `refs/bm/…`**, built with a separate index | Records exactly what was verified without touching HEAD, the branch or the user's index | `git add <files> && git commit` (would include the user's staged changes) |
 | D13 | Postgres is authoritative; ETS holds live projections only | Recovery after a crash needs durable state | ETS-only claims and state |
 | D14 | Fabric's **managed-host mode** is noted, not used | It gives a clean provider boundary, but disables speculation, prewalk, repairs, entropy and native MCP, and requires the host to broker pi's core tools | Adopting it now |
-| D16 | **Pending:** how to control Fabric in workers. Options: (a) Fabric-free workers; (b) a BM-managed `PI_CODING_AGENT_DIR` with its own `fabric.json` (agents, mesh and MCP off), which needs access to the user's pi credentials; (c) guard-only control with Fabric's user config | Live A6 showed `--tools` doesn't bind Fabric and Fabric starts the user's MCP servers | — |
+| D16 | **Workers are Fabric-free** (decided 2026-09-29): planner, reader and writer run plain pi with zro and BM extensions | Live A6 showed `--tools` doesn't bind Fabric's nested calls and Fabric starts the user's MCP servers; without Fabric, `--tools` and `bm_guard` fully cover the worker's tools | A BM-managed `PI_CODING_AGENT_DIR` with its own `fabric.json` (optional later; needs access to the user's pi credentials); guard-only control with the user's Fabric config |
 | D15 | Planner runs **without** Fabric | Simplicity: the planner writes no code. (Fabric hides extension tools by default, but `capture.keepVisible` could keep them visible, so this is a choice, not a necessity) | Planner with Fabric |
 
 Revisit a decision by adding a row, not by deleting one.
@@ -98,8 +98,8 @@ are plain modules called by their owner, not separate processes.
 | Role | Extensions | Tools | Memory |
 |---|---|---|---|
 | Planner | zro, `bm_planner` | read-only pi tools + `propose_task`, `close_plan` | ~134 MB |
-| Read-only worker | zro, Fabric, `bm_worker` | `read`, `grep`, `find`, `ls` (+ Fabric code mode over them) + `submit_result` | ~260 MB |
-| Mutating worker | zro, Fabric, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash` + `submit_result` | ~260 MB |
+| Read-only worker | zro, `bm_worker` | `read`, `grep`, `find`, `ls`, `submit_result` | ~134 MB |
+| Mutating worker | zro, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash`, `submit_result` | ~134 MB |
 | Reviewer (optional) | zro, `bm_worker` | read-only + `submit_result` | ~134 MB |
 
 Every agent is started with `--no-extensions` and an explicit `-e` list, and pinned model.
@@ -280,11 +280,11 @@ may have changed files is never retried automatically.
 
 **Designed, not implemented:** everything in sections 5–11 not listed above.
 
-**Stage A progress:** A1–A5 implemented (acknowledged commands, cost, bounds, proposals,
-authoritative dialogs with persisted idempotent requests, split extensions, profiles with a
-fail-closed check, graceful shutdown). A6 qualification run live (5 tests, 4 pass; the failing one
-is finding 4). A7: live tests are in `test/live/`; recorded fixtures are not committed until an
-allowlist sanitizer exists (raw streams contain the local pi environment).
+**Stage A progress:** A1–A6 implemented (acknowledged commands, cost, bounds, proposals,
+authoritative dialogs with persisted idempotent requests, split extensions, Fabric-free profiles
+with a fail-closed check, graceful shutdown, `bm_guard`). Live qualification: 4/4 pass
+(`mix test --only live`). A7: live tests are in `test/live/`; recorded fixtures are not committed
+until an allowlist sanitizer exists (raw streams contain the local pi environment).
 
 ---
 
@@ -327,10 +327,16 @@ Answered in stage A6 (live, 2026-09-29):
 2. `bm_guard` awaits the BEAM and fires for nested `pi.write`; a denial writes nothing: **yes**.
 3. Missing guard: the writer profile requires the guard's self-report, so a worker without it is
    rejected before assignment (profile check). A guard that loads but can't reach the BEAM blocks.
-4. `--tools` restricts Fabric's nested calls: **no**. Read-only enforcement for Fabric workers needs
-   the guard (deny-all policy) or a Fabric-free profile. **Decision D16 pending.**
-5. Background shell jobs: the guard sees the `background` flag and can deny it; if allowed, the
-   process outlives `agent_settled`, so settling must check descendants (stage B5).
+4. `--tools` restricts Fabric's nested calls: **no**. Resolved by D16: workers are Fabric-free.
+   Re-qualified live with Fabric-free profiles: the reader has only read tools plus
+   `submit_result` and can't create files; the writer's every `write` goes through `bm_guard`
+   and a denied write creates nothing.
+5. Background processes: the guard sees each bash command. A `nohup … &` command is re-parented
+   to PID 1 after the shell exits, so it **escapes pi's process tree** and a descendant check
+   can't see it (reproduced live). Settling (stage B5) must track the worker's **process group**
+   (start pi as a group leader, check and kill by group) and the command policy should refuse
+   detaching patterns (`nohup`, trailing `&`, `disown`, `setsid`). Neither is a sandbox: a
+   process that creates its own session still escapes.
 
 Still open:
 6. Which settings in the user's `fabric.json` (approvals, `prewalk.alwaysRearm`, mesh, MCP) affect

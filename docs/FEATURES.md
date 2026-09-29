@@ -20,8 +20,8 @@ Make the pieces that exist trustworthy and answer the open questions before buil
 | A2 | Split `bm_bridge` into **`bm_planner`** (`propose_task`, `close_plan`) and **`bm_worker`** (`submit_result`) | S | **done** |
 | A3 | **Authoritative dialogs**: tools send a `bm:` dialog and return the BEAM's answer; the adapter persists before answering; duplicate `request_id`s return the stored outcome; identity comes from the channel | M | **done** |
 | A4 | `ToolCalls` output becomes **proposals** (UI and read-only preparation only) | S | **done** |
-| A5 | **Profiles and profile check**: planner / read-only / mutating profiles; self-report on start + `get_state`; mismatch fails closed; pinned pi and Fabric versions | M | **done** (Fabric control: decision D16 pending) |
-| A6 | **Qualification suite** for the open questions: nested dialogs, `tool_call` blocking in nested calls, denied calls cause no change, missing hooks fail closed, `--tools` restricts nested calls, background jobs | M | **run live**: 4/5 pass; `--tools` doesn't bind Fabric |
+| A5 | **Profiles and profile check**: planner / read-only / mutating profiles; self-report on start + `get_state`; mismatch fails closed; pinned pi and Fabric versions | M | **done** (workers Fabric-free, D16) |
+| A6 | **Qualification suite** for the open questions: nested dialogs, `tool_call` blocking in nested calls, denied calls cause no change, missing hooks fail closed, `--tools` restricts nested calls, background jobs | M | **done**: 4/4 live; findings in ARCHITECTURE §14 |
 | A7 | Experiment scripts and **sanitized replay fixtures** in the repository | S | partial: live tests in repo; fixtures need an allowlist sanitizer |
 
 **Exit gate:** qualification results recorded in ARCHITECTURE.md §13–14; every authoritative
@@ -37,7 +37,7 @@ Already useful on its own: "run this task" with safety, verification and a recor
 | B2 | **Tasks and attempts** in Postgres with the attempt lifecycle, attempt ids and session epoch fencing | M |
 | B3 | **Baseline and dirty-file policy** (user-owned files are never changed, staged or committed) | M |
 | B4 | **Snapshots** before/after the attempt → actual write set; compare with the declared set | M |
-| B5 | **Settling**: `agent_settled` + no running tool + no descendant processes; process-tree kill on cancel | M |
+| B5 | **Settling**: `agent_settled` + no running tool + no processes left in the worker's **process group** (pi started as a group leader; detached `nohup … &` processes escape a descendant check); group kill on cancel | M |
 | B6 | **Verification barrier and checkpoints** under `refs/bm/…` built with a separate index | M |
 | B7 | **Conditional rollback** of an attempt (only if contents still match what it produced) | M |
 | B8 | **Budget** from confirmed cost with unknown tracked; soft and hard limits | S |
@@ -70,6 +70,8 @@ one effect; routine results never interrupt the planner; the benchmark is record
 ## Optional (add later, any order)
 
 ### Parallelism and speed (stages D and E)
+
+(Includes re-adding Fabric to workers through a BM-managed config folder, see D16.)
 
 | Feature | Precondition | Size |
 |---|---|---|
