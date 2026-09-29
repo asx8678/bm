@@ -12,6 +12,7 @@ defmodule BmWeb.HomeLiveTest do
     assert has_element?(view, "#start-task-btn")
     assert has_element?(view, "#runs", "No runs yet.")
     assert has_element?(view, "#brand", "BM")
+    assert has_element?(view, "#nav-tasks[aria-current=page]")
   end
 
   test "prefills a requested repository and suggests known ones", %{conn: conn, tmp_dir: dir} do

@@ -174,7 +174,7 @@ defmodule BmWeb.RunLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
+    <Layouts.app flash={@flash} active={:tasks}>
       <div class="mx-auto max-w-4xl px-4 py-6">
         <header class="flex flex-wrap items-start gap-x-4 gap-y-2">
           <div class="min-w-0 flex-1">

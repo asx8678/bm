@@ -79,7 +79,7 @@ Added after the milestone B review (2026-09-29); plan phase 6.6.
 
 | # | Feature | Size | Plan step |
 |---|---|---|---|
-| B11 | **UI checked in a browser**; prototypes (`/chat`, flow canvas) removed | S | 6.6.1–6.6.2 |
+| B11 | **UI checked in a browser** (chat page and agent canvas kept at the user's request) | S | 6.6.1–6.6.2 |
 | B12 | **Baseline verification** at run start, shown when the checkout already fails | S | 6.6.3 |
 | B13 | **Harder benchmark** with user-owned and generated files; write-set declaration measured (open question 7) | S | 6.6.4 |
 | B14 | **Guarded read-only bash** for planner and reader (policy in read-only mode + snapshot check) | M | 6.6.5 |
@@ -142,7 +142,7 @@ Each has a precondition; don't start one before it holds.
 
 | Feature | Size |
 |---|---|
-| Live **canvas** of planner, workers and tasks (the Svelte Flow prototype was removed in 6.6.2; rebuild on run data) | M |
+| Live **canvas** of planner, workers and tasks (Svelte Flow canvas exists on the chat page) | M |
 | Run history and search | M |
 | Short labels for runs and agents (`BM-12`) | S |
 | Transcript link per attempt (pi `export_html`) | S |

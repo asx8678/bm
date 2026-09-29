@@ -69,7 +69,7 @@ Revisit a decision by adding a row, not by deleting one.
 ## 3. Structure
 
 ```
- Browser (LiveView)                                   CLI (optional, later)
+ Browser (LiveView + Svelte Flow)                     CLI (optional, later)
         │ item events ▲  commands
         ▼             │
 ┌──────────────────────────────────── BEAM ─────────────────────────────────────┐
@@ -326,7 +326,7 @@ may have changed files is never retried automatically.
 - Extensions: `bm_common` (dialog and notify helpers, `/bm-shutdown`), `bm_planner`
   (`propose_task`, `close_plan`), `bm_worker` (`submit_result`), `bm_guard` (asks the BEAM before
   every edit, write and bash call; fails closed).
-- The early chat page and canvas prototype were removed in plan step 6.6.2 (git history has them).
+- Chat page (`/chat`, not guarded by BM) with a Svelte Flow canvas showing the agent node.
 - Process groups (Phase 1, D18): `priv/pi/setsid.pl`, `Bm.Proc`; pi starts as a group leader,
   `bm_guard` records every bash command's group in `BM_PGID_FILE`, and all groups are ended when
   pi exits or the agent stops.
@@ -350,7 +350,8 @@ may have changed files is never retried automatically.
   application start and coordinator start (`Bm.Workspace.Recovery`).
 
 - UI (Phase 6): Tasks page and run page (live attempts, diffs, verification, Stop / Keep /
-  Revert / Finish), checked in a browser (docs/screenshots). Milestone B exit gate passed live;
+  Revert / Finish), checked in a browser (docs/screenshots); the chat page at `/chat` is not
+  guarded by BM. Milestone B exit gate passed live;
   `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
 
 **Not implemented yet:** the planner flow (milestone C, D20). Phase 6.6 (browser-checked UI,
@@ -471,6 +472,7 @@ supervisor agents before the basic system is reliable.
 | `priv/pi/extensions/bm_worker.ts` | `submit_result` |
 | `priv/pi/extensions/bm_guard.ts` | Asks the BEAM before edit, write and bash |
 | `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Tasks page, run page, badges / diffs / time helpers |
+| `lib/bm_web/live/chat_live.ex`, `lib/bm_web/live/flow_live.ex`, `assets/svelte/` | Chat with pi (not guarded) and the agent canvas |
 | `test/support/fake_pi.mjs` | Scripted pi stand-in |
 | `test/live/qualification_test.exs` | Live qualification suite (`mix test --only live`) |
 

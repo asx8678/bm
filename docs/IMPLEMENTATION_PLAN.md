@@ -393,10 +393,9 @@ in a browser. Fix layout and state bugs found. Nothing in Phase 6 was ever looke
 Verify: screenshots of the Tasks page and of a run page with a held attempt attached to the
 commit message or docs; the LiveView tests still pass.
 
-**6.6.2 Remove the prototypes.** Delete `ChatLive` (`/chat`), `FlowLive` and the Svelte Flow
-assets they need, and their routes. They are unguarded and confuse what BM guarantees; the canvas
-is an optional feature and will be rebuilt on the run data if it is ever wanted.
-Verify: `mix precommit` passes; the router has only `/`, `/runs/:id` and the dev routes.
+**6.6.2 Remove the prototypes.** ~~Delete `ChatLive` (`/chat`), `FlowLive` and the Svelte Flow
+assets.~~ **Reversed (2026-09-30) at the user's request:** the chat page with its agent canvas is
+in use and stays. It keeps its "not guarded by BM" notice; the canvas can later show run data.
 
 **6.6.3 Baseline verification.** At run start, after the baseline snapshot, run the workspace's
 verify command once and store the result on the run (`baseline_verify`). The run page shows
@@ -435,8 +434,8 @@ below ~485 px). Fixed or added while looking: the run page never showed the task
 runs had no time or spend, a finished run was a dead end (now "New task here" prefills the
 repository via `/?path=`), the repository field suggests known workspaces, the held-lane message
 names the reason (verification failed / timed out / interrupted), the brand read "BEAM". No
-horizontal overflow at 390 px. Prototypes, Svelte and its build plugin removed; `mix precommit`
-152 tests. `config/dev.exs` now honours `PORT`.
+horizontal overflow at 390 px. The chat and flow pages were removed here and restored on
+2026-09-30 at the user's request (see 6.6.2). `config/dev.exs` now honours `PORT`.
 
 **Status: 6.6.3 and 6.6.5 done (2026-09-29).**
 - 6.6.3: the first attempt of a run goes through a `:baseline` phase: the verify command runs

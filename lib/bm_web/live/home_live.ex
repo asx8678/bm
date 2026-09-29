@@ -153,7 +153,7 @@ defmodule BmWeb.HomeLive do
       )
 
     ~H"""
-    <Layouts.app flash={@flash}>
+    <Layouts.app flash={@flash} active={:tasks}>
       <div class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <section aria-labelledby="new-task-title" class="min-w-0">
           <h1 id="new-task-title" class="text-lg font-semibold">New task</h1>
