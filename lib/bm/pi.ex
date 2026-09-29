@@ -23,6 +23,9 @@ defmodule Bm.Pi do
   @doc "Sends a user prompt. While the agent is working, it is queued as a follow-up."
   def prompt(id, text), do: GenServer.call(via(id), {:prompt, text})
 
+  @doc "Clears the agent's pi session so a warm process can take a new task."
+  def new_session(id), do: GenServer.call(via(id), :new_session)
+
   @doc "Aborts the agent's current run."
   def abort(id), do: GenServer.call(via(id), :abort)
 

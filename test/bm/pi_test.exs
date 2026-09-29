@@ -66,4 +66,52 @@ defmodule Bm.PiTest do
     assert %{transcript: transcript} = settle(id)
     assert %{role: :assistant, text: "echo: again"} = List.last(transcript)
   end
+
+  test "streamed tool calls are reported one by one, before the message ends", %{id: id} do
+    Bm.Pi.prompt(id, "plan")
+
+    for task <- ["a", "b", "c"] do
+      assert_receive {:pi, ^id,
+                      {:tool_call_ready, %{name: "add_task", arguments: %{"id" => ^task}}}, _},
+                     5_000
+    end
+
+    settle(id)
+    refute_received {:pi, ^id, {:tool_call_ready, _}, _}
+  end
+
+  test "bridge reports arrive as events", %{id: id} do
+    Bm.Pi.prompt(id, "report")
+
+    assert_receive {:pi, ^id, {:bridge, "result", %{"status" => "done", "summary" => "probe"}},
+                    _},
+                   5_000
+  end
+
+  test "new_session clears the transcript and keeps the process", %{id: id} do
+    Bm.Pi.prompt(id, "hello")
+    settle(id)
+
+    assert :ok = Bm.Pi.new_session(id)
+    assert %{transcript: [], summary: %{status: :idle}} = Bm.Pi.snapshot(id)
+
+    Bm.Pi.prompt(id, "again")
+    assert %{transcript: [_, %{role: :assistant, text: "echo: again"}]} = settle(id)
+  end
+end
+
+defmodule Bm.PiOptionsTest do
+  use ExUnit.Case, async: true
+
+  @tag :tmp_dir
+  test "extra environment reaches pi and raw output is logged", %{tmp_dir: dir} do
+    id = "opts-#{System.unique_integer([:positive])}"
+    log = Path.join(dir, "raw.jsonl")
+    Bm.Pi.subscribe(id)
+    {:ok, _} = Bm.Pi.ensure_agent(id, env: %{"PI_FABRIC_DEPTH" => "99"}, raw_log: log)
+    on_exit(fn -> Bm.Pi.stop(id) end)
+
+    assert_receive {:pi, ^id, :status, %{status: :idle}}, 5_000
+    assert File.read!(log) =~ ~s("sessionName":"depth-99")
+  end
 end

@@ -12,6 +12,7 @@ defmodule Bm.Pi.Agent do
 
   require Logger
 
+  alias Bm.Pi.ToolCalls
   alias Bm.Pi.Transcript
 
   # pi dialogs block until answered; this client has no dialog UI yet, so it declines them.
@@ -30,6 +31,11 @@ defmodule Bm.Pi.Agent do
       id: Keyword.fetch!(opts, :id),
       command: opts[:command] || Keyword.fetch!(config, :command),
       cwd: opts[:cwd] || config[:cwd] || File.cwd!(),
+      # Extra OS environment for the pi process, e.g. %{"PI_FABRIC_DEPTH" => "99"}.
+      env: opts[:env] || config[:env] || %{},
+      # When set, every stdout line from pi is appended to this file (for debugging and replay).
+      raw_log: opts[:raw_log],
+      tool_calls: ToolCalls.new(),
       port: nil,
       buffer: "",
       status: :starting,
@@ -65,6 +71,14 @@ defmodule Bm.Pi.Agent do
     else
       {:reply, {:error, :not_running}, state}
     end
+  end
+
+  def handle_call(:new_session, _from, %{port: nil} = state),
+    do: {:reply, {:error, :not_running}, state}
+
+  def handle_call(:new_session, _from, state) do
+    state = %{state | tool_calls: ToolCalls.new()}
+    {:reply, :ok, state |> emit(:reset) |> send_command(%{type: "new_session"})}
   end
 
   def handle_call(:abort, _from, %{port: nil} = state), do: {:reply, :ok, state}
@@ -118,7 +132,8 @@ defmodule Bm.Pi.Agent do
             :hide,
             {:line, @max_line_bytes},
             {:args, args},
-            {:cd, state.cwd}
+            {:cd, state.cwd},
+            {:env, Enum.map(state.env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)}
           ])
 
         %{state | port: port, status: :starting}
@@ -141,6 +156,8 @@ defmodule Bm.Pi.Agent do
   defp handle_line(state, ""), do: state
 
   defp handle_line(state, line) do
+    if state.raw_log, do: File.write(state.raw_log, [line, "\n"], [:append])
+
     case JSON.decode(line) do
       {:ok, record} when is_map(record) ->
         handle_record(state, record)
@@ -179,14 +196,21 @@ defmodule Bm.Pi.Agent do
     do: emit(%{state | status: :idle, tool: nil}, :status)
 
   defp handle_record(state, %{"type" => "message_start", "message" => %{"role" => "assistant"}}),
-    do: emit(state, :assistant_start)
+    do: emit(%{state | tool_calls: ToolCalls.new()}, :assistant_start)
 
   defp handle_record(state, %{"type" => "message_update"} = record) do
     state = if usage = record["usage"], do: %{state | usage: usage_summary(usage)}, else: state
 
     case record["assistantMessageEvent"] do
-      %{"type" => "text_delta", "delta" => delta} -> emit(state, {:assistant_delta, delta})
-      _ -> state
+      %{"type" => "text_delta", "delta" => delta} ->
+        emit(state, {:assistant_delta, delta})
+
+      %{"type" => "toolcall_" <> _} = event ->
+        {tool_calls, ready} = ToolCalls.apply(state.tool_calls, event)
+        Enum.reduce(ready, %{state | tool_calls: tool_calls}, &emit(&2, {:tool_call_ready, &1}))
+
+      _ ->
+        state
     end
   end
 
@@ -224,6 +248,17 @@ defmodule Bm.Pi.Agent do
     state
     |> send_record(%{type: "extension_ui_response", id: request["id"], cancelled: true})
     |> emit({:notice, "Declined pi dialog: #{request["title"] || method}"})
+  end
+
+  # The bm_bridge extension reports its tool calls as `bm:`-prefixed notify records.
+  defp handle_record(
+         state,
+         %{"type" => "extension_ui_request", "method" => "notify", "message" => "bm:" <> json}
+       ) do
+    case JSON.decode(json) do
+      {:ok, %{"event" => event, "data" => data}} -> emit(state, {:bridge, event, data})
+      _ -> state
+    end
   end
 
   defp handle_record(state, %{"type" => "extension_error"} = record) do

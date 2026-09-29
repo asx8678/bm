@@ -35,3 +35,6 @@ bm-*.tar
 npm-debug.log
 /assets/node_modules/
 
+
+# pi / Fabric runtime state written when agents run in this directory
+/.pi/

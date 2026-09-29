@@ -3,6 +3,8 @@
 //   "fail"      -> the assistant message ends with an error
 //   "dialog"    -> asks a confirm dialog and answers with how it was resolved
 //   "crash"     -> exits with status 3
+//   "report"    -> reports a result through a bm: notify record, as the bm_bridge extension does
+//   "plan"      -> streams three add_task calls OpenAI-style (all toolcall_end events at the end)
 //   anything    -> answers "echo: <message>"
 let buffer = ""
 let waitingDialog = null
@@ -18,10 +20,33 @@ function answer(text, stopReason = "stop", errorMessage) {
   send({type: "agent_settled"})
 }
 
+function streamPlan() {
+  const update = event => send({type: "message_update", usage, assistantMessageEvent: event})
+  const calls = ["a", "b", "c"].map((id, index) => ({index, id, args: JSON.stringify({id, title: `Task ${id}`})}))
+  send({type: "message_start", message: {role: "assistant", content: [], stopReason: "pending"}})
+  for (const call of calls) {
+    update({type: "toolcall_start", contentIndex: call.index, id: `call-${call.id}`, toolName: "add_task"})
+    const middle = Math.floor(call.args.length / 2)
+    update({type: "toolcall_delta", contentIndex: call.index, delta: call.args.slice(0, middle)})
+    update({type: "toolcall_delta", contentIndex: call.index, delta: call.args.slice(middle)})
+  }
+  for (const call of calls) {
+    update({type: "toolcall_end", contentIndex: call.index,
+            toolCall: {type: "toolCall", id: `call-${call.id}`, name: "add_task", arguments: JSON.parse(call.args)}})
+  }
+  send({type: "message_end", message: {role: "assistant", stopReason: "toolUse"}})
+  send({type: "agent_end", messages: [], willRetry: false})
+  send({type: "agent_settled"})
+}
+
 function handle(command) {
   if (command.type === "get_state") {
     send({id: command.id, type: "response", command: "get_state", success: true,
-          data: {model: {id: "fake-model", name: "Fake Model"}, isStreaming: false}})
+          data: {model: {id: "fake-model", name: "Fake Model"}, isStreaming: false,
+                 // Echo the environment guard so tests can check it reached the process.
+                 sessionName: process.env.PI_FABRIC_DEPTH ? `depth-${process.env.PI_FABRIC_DEPTH}` : undefined}})
+  } else if (command.type === "new_session") {
+    send({id: command.id, type: "response", command: "new_session", success: true, data: {cancelled: false}})
   } else if (command.type === "abort") {
     send({id: command.id, type: "response", command: "abort", success: true})
   } else if (command.type === "extension_ui_response" && waitingDialog === command.id) {
@@ -39,6 +64,12 @@ function handle(command) {
     if (message === "dialog") {
       waitingDialog = "ui-1"
       send({type: "extension_ui_request", id: "ui-1", method: "confirm", title: "Allow?", message: "Really?"})
+    } else if (message === "report") {
+      send({type: "extension_ui_request", id: "n-1", method: "notify", notifyType: "info",
+            message: `bm:${JSON.stringify({event: "result", data: {status: "done", summary: "probe"}})}`})
+      answer("reported")
+    } else if (message === "plan") {
+      streamPlan()
     } else if (message === "fail") {
       answer("", "error", "boom")
     } else if (message.startsWith("tool")) {

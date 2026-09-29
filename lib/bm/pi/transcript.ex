@@ -43,6 +43,10 @@ defmodule Bm.Pi.Transcript do
   def apply(entries, {:error, text}), do: entries ++ [%{role: :error, text: text}]
   def apply(entries, {:notice, text}), do: entries ++ [%{role: :notice, text: text}]
 
-  # Status-only updates leave the transcript unchanged.
+  def apply(_entries, :reset), do: []
+
+  # Status updates and streamed tool calls (acted on by the orchestrator) leave it unchanged.
   def apply(entries, :status), do: entries
+  def apply(entries, {:tool_call_ready, _call}), do: entries
+  def apply(entries, {:bridge, _event, _data}), do: entries
 end
