@@ -89,7 +89,31 @@ defmodule Bm.PolicyTest do
             {"rm escape/f.txt", :deny},
             {"npm publish", :deny},
             {"mix hex.publish", :deny},
-            {"cd lib && gh release create v1", :deny}
+            {"cd lib && gh release create v1", :deny},
+            # Files a shell command writes follow the same rules as edit/write.
+            {"echo x > lib/a.ex", :allow},
+            {"mix test > /tmp/out.log 2>&1", :allow},
+            {"cmd >/dev/null 2>&1", :allow},
+            {"echo x >> new_file.txt", :allow},
+            {"printf 'more\\n' >> mine.txt", :deny},
+            {"echo x > mine.txt", :deny},
+            {"echo x &> mine.txt", :deny},
+            {"echo x > \"mine.txt\"", :deny},
+            {"echo x > /etc/passwd", :deny},
+            {"echo x > ../outside.txt", :deny},
+            {"echo x > $HOME/.bashrc", :deny},
+            {"cat a | tee -a mine.txt", :deny},
+            {"cat a | tee lib/copy.txt", :allow},
+            {"sed -i 's/a/b/' mine.txt", :deny},
+            {"sed -i.bak -e 's/a/b/' mine.txt", :deny},
+            {"sed -i 's/a/b/' lib/a.ex", :allow},
+            {"sed 's/a/b/' mine.txt", :allow},
+            {"cp lib/a.ex mine.txt", :deny},
+            {"mv mine.txt lib/moved.txt", :deny},
+            {"mv lib/a.ex lib/b.ex", :allow},
+            {"mv lib/a.ex ../away.ex", :deny},
+            {"rm mine.txt", :deny},
+            {"echo x > .git/HEAD", :deny}
           ] do
         assert decision(Policy.authorize("bash", %{"command" => command}, ctx)) == expected,
                command

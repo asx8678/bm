@@ -49,18 +49,21 @@ defmodule Bm.Policy do
   end
 
   def authorize("bash", %{"command" => command}, ctx) when is_binary(command) do
-    command
-    |> segments()
-    |> Enum.find_value(:allow, fn tokens ->
-      case check_segment(tokens, ctx) do
-        :allow -> nil
-        deny -> deny
-      end
+    checks =
+      Enum.map(redirect_targets(command), &{:write_target, &1}) ++
+        Enum.map(segments(command), &{:segment, &1})
+
+    Enum.find_value(checks, :allow, fn
+      {:write_target, target} -> denied(check_write_target(target, ctx))
+      {:segment, tokens} -> denied(check_segment(tokens, ctx))
     end)
   end
 
   def authorize("bash", _input, _ctx), do: {:deny, "bash needs a command."}
   def authorize(tool, _input, _ctx), do: {:deny, "BM does not allow the #{tool} tool here."}
+
+  defp denied(:allow), do: nil
+  defp denied(deny), do: deny
 
   ## Paths
 
@@ -157,15 +160,38 @@ defmodule Bm.Policy do
   end
 
   # Deleting is fine inside the workspace and in temp directories, nowhere else.
-  defp check_command("rm", args, ctx) do
-    outside =
-      args
-      |> Enum.reject(&String.starts_with?(&1, "-"))
-      |> Enum.reject(&(inside_root?(&1, ctx) or temporary?(&1)))
+  # Deleting is fine inside the workspace (except the user's files) and in temp directories.
+  defp check_command("rm", args, ctx), do: check_write_targets(operands(args), ctx)
 
-    if outside == [],
-      do: :allow,
-      else: {:deny, "rm outside the workspace (#{Enum.join(outside, ", ")}) is not allowed."}
+  # Commands that write the files named in their arguments.
+  defp check_command("tee", args, ctx), do: check_write_targets(operands(args), ctx)
+
+  defp check_command("sed", args, ctx) do
+    if Enum.any?(
+         args,
+         &(&1 in ["-i", "--in-place"] or String.starts_with?(&1, ["-i", "--in-place="]))
+       ) do
+      # Without -e the first operand is the script; the rest are the files it rewrites.
+      files =
+        if Enum.any?(args, &(&1 in ["-e", "--expression"])),
+          do: operands(args),
+          else: Enum.drop(operands(args), 1)
+
+      check_write_targets(files, ctx)
+    else
+      :allow
+    end
+  end
+
+  # mv removes its sources and writes its destination.
+  defp check_command("mv", args, ctx), do: check_write_targets(operands(args), ctx)
+
+  # The destination is the last operand.
+  defp check_command(cmd, args, ctx) when cmd in ~w(cp install ln) do
+    case operands(args) do
+      [_ | _] = operands -> check_write_targets([List.last(operands)], ctx)
+      [] -> :allow
+    end
   end
 
   defp check_command(cmd, args, _ctx) do
@@ -210,12 +236,37 @@ defmodule Bm.Policy do
   defp git_write?("stash", rest), do: not match?([sub | _] when sub in ~w(list show), rest)
   defp git_write?(_sub, _rest), do: false
 
-  # Unexpanded variables ($HOME, ${X}) can point anywhere, so they count as outside.
-  defp inside_root?("$" <> _, _ctx), do: false
+  defp operands(args), do: Enum.reject(args, &String.starts_with?(&1, "-"))
 
-  defp inside_root?(target, ctx) do
-    root = real_path(ctx.root)
-    target |> pi_path() |> Path.expand(root) |> real_path() |> inside?(root)
+  defp check_write_targets(targets, ctx) do
+    Enum.find_value(targets, :allow, &denied(check_write_target(&1, ctx)))
+  end
+
+  # A file a shell command writes or deletes: temp files and devices are fine; everything else
+  # follows the rules for edit/write.
+  defp check_write_target(target, ctx) do
+    cond do
+      target in ~w(/dev/null /dev/stdout /dev/stderr /dev/tty) ->
+        :allow
+
+      String.starts_with?(target, "$") ->
+        {:deny, "Writing to #{target} (a variable) is not allowed; name the file."}
+
+      temporary?(target) ->
+        :allow
+
+      true ->
+        authorize_path(target, ctx)
+    end
+  end
+
+  # Targets of output redirections anywhere in the command: `> f`, `>> f`, `&> f`, `2> f`,
+  # `>| f`. Duplications like `2>&1` are not files.
+  defp redirect_targets(command) do
+    ~r/(?:^|[^<>&\d])(?:\d|&)?>>?\|?\s*("[^"]+"|'[^']+'|[^\s;&|<>()]+)/
+    |> Regex.scan(command, capture: :all_but_first)
+    |> Enum.map(fn [target] -> String.trim(target, "\"") |> String.trim("'") end)
+    |> Enum.reject(&String.starts_with?(&1, "&"))
   end
 
   defp temporary?(target) do
