@@ -267,6 +267,14 @@ with that file in `actual_writes`.
   answering the worker and can cancel at any phase; the coordinator monitors the pi adapter and
   ends recorded groups itself if the adapter dies.
 
+**Review (2026-09-29).** Fixed after a re-check: files changed by the verify command (formatters,
+generators) now belong to the attempt and its checkpoint (flag `verify_changed_files`), and
+changes to the user's files by verification hold the lane; verify output is stored as valid
+UTF-8 (invalid bytes crashed the coordinator); a cancel during start ends as `cancelled`; an
+adapter that dies right after start no longer crashes the coordinator; admission is one
+transaction, so a failed admission leaves no task, attempt or run. Open for phase 5: a restarted
+coordinator must recover in-flight attempts before it frees the lane (step 5.4).
+
 ---
 
 ## Phase 5: limits, revert, recovery

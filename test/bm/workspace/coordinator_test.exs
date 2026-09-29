@@ -101,6 +101,19 @@ defmodule Bm.Workspace.CoordinatorTest do
       await_status(:cancelled)
     end
 
+    test "a failed admission leaves no task, attempt or run behind", %{repo: repo} do
+      # BM's private index directory can't be created: the snapshot fails.
+      File.write!(Path.join(repo, ".git/bm"), "not a directory")
+
+      assert {:error, {:private_dir, _}} =
+               Coordinator.run_task(repo, %{title: "t", goal: "[]", verify_command: "true"})
+
+      assert Repo.all(Runs.Task) == [] and Repo.all(Runs.Attempt) == [] and
+               Repo.all(Runs.Run) == []
+
+      assert %{lane: :free, phase: nil} = Coordinator.state(repo)
+    end
+
     test "a workspace needs a verify command", %{repo: repo} do
       assert {:error, :no_verify_command} =
                Coordinator.run_task(repo, %{title: "t", goal: "[]"})
@@ -214,6 +227,53 @@ defmodule Bm.Workspace.CoordinatorTest do
 
       assert attempt.error == "verify_timeout"
       assert {_, 1} = System.cmd("pgrep", ["-f", marker])
+    end
+  end
+
+  describe "verification side effects (review)" do
+    test "files the verify command changes belong to the attempt and its checkpoint",
+         %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], verify_command: "echo generated > gen.txt")
+      {attempt, :free} = await_status(:accepted)
+
+      assert Enum.map(attempt.actual_writes, & &1["path"]) |> Enum.sort() == ["a.txt", "gen.txt"]
+      assert "verify_changed_files" in attempt.flags
+      assert git!(repo, ["cat-file", "-p", "#{attempt.checkpoint_ref}:gen.txt"]) == "generated"
+    end
+
+    test "a verify command that changes the user's files holds the lane", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()],
+        verify_command: "echo reformatted > notes.txt"
+      )
+
+      {attempt, lane} = await_status(:held)
+
+      assert attempt.error =~ "notes.txt"
+      assert lane == {:held, attempt.id}
+    end
+
+    test "verify output that is not valid UTF-8 is stored", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()],
+        verify_command: "printf 'ok \\377\\376 bytes\\n'; exit 1"
+      )
+
+      {attempt, _lane} = await_status(:held)
+      assert String.valid?(attempt.verify["output"])
+      assert attempt.verify["output"] =~ "ok"
+    end
+  end
+
+  describe "read-only tasks" do
+    test "run with the reader profile and are accepted without changes", %{repo: repo} do
+      run!(repo, [done()], mutates: false)
+      {attempt, :free} = await_status(:accepted)
+      assert attempt.role == :reader
+    end
+
+    test "fail when files change", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], mutates: false)
+      {attempt, _lane} = await_status(:failed)
+      assert attempt.error =~ "read-only"
     end
   end
 

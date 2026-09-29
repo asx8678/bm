@@ -186,9 +186,13 @@ defmodule Bm.Workspace.Coordinator do
     do: {:reply, {:error, :lane_busy}, state}
 
   def handle_call({:run_task, attrs}, _from, state) do
-    case admit(state, attrs) do
-      {:ok, state} -> {:reply, {:ok, state.attempt}, state}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+    case Bm.Repo.transaction(fn -> admit_records(state, attrs) end) do
+      {:ok, records} ->
+        state = start_attempt(state, records)
+        {:reply, {:ok, state.attempt}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -205,7 +209,8 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Admission (4.4)
 
-  defp admit(state, attrs) do
+  # Everything admission records, in one transaction: nothing is left behind if a step fails.
+  defp admit_records(state, attrs) do
     with {:ok, workspace} <- maybe_set_verify_command(state.workspace, attrs),
          :ok <- if(workspace.verify_command, do: :ok, else: {:error, :no_verify_command}),
          {:ok, run} <- ensure_run(state, attrs),
@@ -215,35 +220,41 @@ defmodule Bm.Workspace.Coordinator do
          {:ok, attempt} <-
            Runs.transition_attempt(attempt, :admitted, %{tree_before: tree_before}),
          {:ok, task} <- Runs.update_task_status(task, :running) do
-      agent_id = "attempt-#{attempt.id}"
-      Bm.Pi.subscribe(agent_id)
-
-      state = %{
-        state
-        | workspace: workspace,
-          run: run,
-          task: task,
-          attempt: attempt,
-          agent_id: agent_id,
-          lane: {:busy, attempt.id},
-          phase: :starting,
-          seen_running?: false,
-          cancel?: false,
-          flags: [],
-          assignment: nil
-      }
-
-      coordinator = self()
-      root = state.root
-      role = attempt.role
-
-      state =
-        start_job(state, :start, fn ->
-          Profile.start(agent_id, role, owner: coordinator, cwd: root)
-        end)
-
-      {:ok, broadcast_attempt(state)}
+      %{workspace: workspace, run: run, task: task, attempt: attempt}
+    else
+      {:error, reason} -> Bm.Repo.rollback(reason)
     end
+  end
+
+  defp start_attempt(state, %{workspace: workspace, run: run, task: task, attempt: attempt}) do
+    agent_id = "attempt-#{attempt.id}"
+    Bm.Pi.subscribe(agent_id)
+
+    state = %{
+      state
+      | workspace: workspace,
+        run: run,
+        task: task,
+        attempt: attempt,
+        agent_id: agent_id,
+        lane: {:busy, attempt.id},
+        phase: :starting,
+        seen_running?: false,
+        cancel?: false,
+        flags: [],
+        assignment: nil
+    }
+
+    coordinator = self()
+    root = state.root
+    role = attempt.role
+
+    state =
+      start_job(state, :start, fn ->
+        Profile.start(agent_id, role, owner: coordinator, cwd: root)
+      end)
+
+    broadcast_attempt(state)
   end
 
   defp maybe_set_verify_command(workspace, %{verify_command: command}) when is_binary(command),
@@ -384,9 +395,32 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Start
 
-  defp job_done(state, :start, {:ok, _report}) do
+  defp job_done(state, :start, {:ok, report}) do
+    case Registry.lookup(Bm.Pi.Registry, state.agent_id) do
+      [{agent_pid, _}] -> worker_started(state, agent_pid)
+      [] -> job_done(state, :start, {:error, {:agent_gone_after_start, report}})
+    end
+  end
+
+  defp job_done(state, :start, error) do
+    Bm.Pi.unsubscribe(state.agent_id)
+
+    reason =
+      case error do
+        {:error, reason} -> reason
+        other -> other
+      end
+
+    if state.cancel?,
+      do: finish(state, :cancelled, %{}),
+      else: finish(state, :failed, %{error: "worker did not start: #{inspect(reason)}"})
+  end
+
+  defp job_done(state, :stop, _result), do: stopped(state)
+  defp job_done(state, :verify, result), do: verified(state, result)
+
+  defp worker_started(state, agent_pid) do
     summary = Bm.Pi.snapshot(state.agent_id).summary
-    [{agent_pid, _}] = Registry.lookup(Bm.Pi.Registry, state.agent_id)
 
     # seen_running? restarts here: a start-up status event may arrive after the start result.
     state = %{
@@ -418,21 +452,6 @@ defmodule Bm.Workspace.Coordinator do
         stop_worker(%{state | flags: ["prompt_failed" | state.flags]})
     end
   end
-
-  defp job_done(state, :start, error) do
-    Bm.Pi.unsubscribe(state.agent_id)
-
-    reason =
-      case error do
-        {:error, reason} -> reason
-        other -> other
-      end
-
-    finish(state, :failed, %{error: "worker did not start: #{inspect(reason)}"})
-  end
-
-  defp job_done(state, :stop, _result), do: stopped(state)
-  defp job_done(state, :verify, result), do: verified(state, result)
 
   ## Settling (4.6)
 
@@ -521,7 +540,7 @@ defmodule Bm.Workspace.Coordinator do
 
     with {:ok, tree_after} <- Git.snapshot(state.root),
          {:ok, entries} <- Git.diff(state.root, attempt.tree_before, tree_after) do
-      writes = Enum.map(entries, &%{"path" => &1.path, "status" => Atom.to_string(&1.status)})
+      writes = Enum.map(entries, &write_entry/1)
       paths = Enum.map(entries, & &1.path)
       touched_user_files = Enum.filter(paths, &(&1 in user_owned(state)))
       undeclared = if state.task.writes == [], do: [], else: paths -- state.task.writes
@@ -615,13 +634,16 @@ defmodule Bm.Workspace.Coordinator do
 
     receive do
       {^port, {:data, data}} -> collect_output(port, tail(output <> data), deadline)
-      {^port, {:exit_status, status}} -> %{"exit" => status, "output" => output}
+      {^port, {:exit_status, status}} -> %{"exit" => status, "output" => printable(output)}
     after
       remaining ->
         Port.close(port)
-        %{"exit" => nil, "timeout" => true, "output" => output}
+        %{"exit" => nil, "timeout" => true, "output" => printable(output)}
     end
   end
+
+  # Stored as JSON: invalid UTF-8 (binary output, or a character cut by `tail/1`) is replaced.
+  defp printable(output), do: String.replace_invalid(output)
 
   defp tail(output) when byte_size(output) <= @output_tail, do: output
 
@@ -637,32 +659,74 @@ defmodule Bm.Workspace.Coordinator do
         other -> %{"exit" => nil, "output" => "verification crashed: #{inspect(other)}"}
       end
 
-    cond do
-      state.cancel? ->
-        finish(state, :cancelled, %{verify: verify})
-
-      verify["exit"] == 0 ->
-        checkpoint(state, verify)
-
-      verify["timeout"] ->
-        finish(state, :held, %{verify: verify, error: "verify_timeout"})
-
-      true ->
-        finish(state, :held, %{verify: verify, error: "verify_failed"})
+    case reattribute_after_verify(state) do
+      {:ok, changes} -> verified_outcome(state, verify, changes)
+      {:error, attrs} -> finish(state, :held, Map.put(attrs, :verify, verify))
     end
   end
 
+  defp verified_outcome(state, verify, changes) do
+    cond do
+      state.cancel? ->
+        finish(state, :cancelled, Map.put(changes, :verify, verify))
+
+      verify["exit"] == 0 ->
+        checkpoint(state, verify, changes)
+
+      verify["timeout"] ->
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: "verify_timeout"}))
+
+      true ->
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: "verify_failed"}))
+    end
+  end
+
+  # The verify command may change files itself (formatters, generators). Those changes become
+  # part of the attempt and of its checkpoint; changes to the user's files hold the lane.
+  defp reattribute_after_verify(state) do
+    attempt = Runs.get_attempt!(state.attempt.id)
+
+    with {:ok, tree} <- Git.snapshot(state.root),
+         {:ok, by_verify} <- Git.diff(state.root, attempt.tree_after, tree),
+         {:ok, entries} <- Git.diff(state.root, attempt.tree_before, tree) do
+      touched = for entry <- by_verify, entry.path in user_owned(state), do: entry.path
+
+      changes =
+        if by_verify == [],
+          do: %{},
+          else: %{
+            tree_after: tree,
+            actual_writes: Enum.map(entries, &write_entry/1),
+            flags: attempt.flags ++ ["verify_changed_files"]
+          }
+
+      if touched == [] do
+        {:ok, changes}
+      else
+        error = "verification changed the user's uncommitted files: #{Enum.join(touched, ", ")}"
+        flags = Map.get(changes, :flags, attempt.flags) ++ ["user_owned_writes"]
+        {:error, Map.merge(changes, %{error: error, flags: flags})}
+      end
+    else
+      error -> {:error, %{error: "snapshot after verification failed: #{inspect(error)}"}}
+    end
+  end
+
+  defp write_entry(entry), do: %{"path" => entry.path, "status" => Atom.to_string(entry.status)}
+
   ## Checkpoint and completion (4.8)
 
-  defp checkpoint(state, verify) do
+  defp checkpoint(state, verify, changes) do
     attempt = Runs.get_attempt!(state.attempt.id)
+    attempt = %{attempt | tree_after: Map.get(changes, :tree_after, attempt.tree_after)}
 
     case record_checkpoint(state, attempt, "verified") do
       {:ok, ref} ->
-        finish(state, :accepted, %{verify: verify, checkpoint_ref: ref})
+        finish(state, :accepted, Map.merge(changes, %{verify: verify, checkpoint_ref: ref}))
 
       {:error, reason} ->
-        finish(state, :held, %{verify: verify, error: "checkpoint failed: #{inspect(reason)}"})
+        error = "checkpoint failed: #{inspect(reason)}"
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: error}))
     end
   end
 

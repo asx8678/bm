@@ -43,9 +43,9 @@ defmodule Bm.Workspace.Git do
   end
 
   defp private_index(repo) do
-    with {:ok, git_dir} <- git_dir(repo) do
-      dir = Path.join(git_dir, "bm")
-      File.mkdir_p!(dir)
+    with {:ok, git_dir} <- git_dir(repo),
+         dir = Path.join(git_dir, "bm"),
+         :ok <- File.mkdir_p(dir) |> tag_error(:private_dir) do
       {:ok, Path.join(dir, "index")}
     end
   end
@@ -523,6 +523,9 @@ defmodule Bm.Workspace.Git do
       File.rm(path)
     end
   end
+
+  defp tag_error(:ok, _tag), do: :ok
+  defp tag_error({:error, reason}, tag), do: {:error, {tag, reason}}
 
   defp trimmed({:ok, out}), do: {:ok, String.trim(out)}
   defp trimmed(error), do: error
