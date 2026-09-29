@@ -182,6 +182,12 @@ didn't accept write sets as stored in Postgres (string keys); ARCHITECTURE.md §
 old attempt lifecycle. Restore now deletes deepest-first before writing, and replaces a directory
 only if every file in it is being deleted.
 
+**Follow-up fixes (2026-09-29).** Restore is all or nothing also against concurrent edits
+(move aside, re-check, exclusive create, undo on failure). Process groups: `Bm.Pi.process_groups/1`
+returns live groups and never returns a group seen empty (reused ids); attempts store `boot_id`
+so recovery never signals groups from an earlier boot. Checked: `bm_guard`'s command prefix is not
+visible to the model or in BM's transcript (pi hooks run on a clone of the arguments).
+
 ---
 
 ## Phase 4: workspace coordinator (fake pi)
@@ -269,7 +275,8 @@ Verify: revert a held attempt → files back to `tree_before`; edit a file after
 refuses and the file keeps the user's edit.
 
 **5.4 Minimal recovery.** `Bm.Workspace.Recovery.run/0` at application start (before the endpoint):
-for every attempt in `admitted | running | result_received | settling | verifying`: group-kill pi's
+for every attempt in `admitted | running | result_received | settling | verifying`: if the
+attempt's `boot_id` equals `Bm.Proc.boot_id()`, group-kill pi's
 group and every group in its `pgid_file` that still has members, snapshot, compare with `tree_before`: no change → `failed`
 (reason `interrupted`, safe to re-run); change → `needs_reconciliation` with the write set. The run
 becomes `paused`.

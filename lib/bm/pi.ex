@@ -46,6 +46,13 @@ defmodule Bm.Pi do
   """
   def respond(id, dialog_id, reply), do: GenServer.cast(via(id), {:respond, dialog_id, reply})
 
+  @doc """
+  Process groups of the agent's pi process that still have processes: pi's own and every bash
+  command's (decision D18). A group found empty once is never returned again, since its id may be
+  reused by an unrelated program. Empty when pi is not running.
+  """
+  def process_groups(id), do: GenServer.call(via(id), :process_groups)
+
   @doc "OS pid of the agent's current pi process, or nil."
   def os_pid(id), do: GenServer.call(via(id), :os_pid)
 

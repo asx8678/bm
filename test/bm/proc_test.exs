@@ -39,6 +39,18 @@ defmodule Bm.ProcTest do
     assert Proc.terminate_groups([999_999_999]) == :ok
   end
 
+  test "live_groups keeps only groups that still have processes" do
+    {_port, pgid} = launch("sleep 30")
+    assert Proc.live_groups([pgid, 999_999_999]) == [pgid]
+    Proc.terminate_groups([pgid])
+    assert Proc.live_groups([pgid]) == []
+  end
+
+  test "boot_id is stable within a boot" do
+    assert is_binary(Proc.boot_id())
+    assert Proc.boot_id() == Proc.boot_id()
+  end
+
   @tag :tmp_dir
   test "read_pgid_file parses recorded group ids", %{tmp_dir: dir} do
     path = Path.join(dir, "pgids")

@@ -220,7 +220,9 @@ chooses Keep or Revert. Note: `refs/bm/…` include untracked non-ignored files 
 **Revert (core).** Only the latest attempt can be reverted: restore its write set from its
 `tree_before`, only if every file still equals its content in `tree_after`; created files are
 removed and deleted files restored under the same check. Any newer or external change stops the
-revert and asks the user. Per-task rollback with dependency handling is optional.
+revert and asks the user. The revert is all or nothing even against edits made while it runs:
+files are moved aside atomically, re-checked, and the old contents written with exclusive create;
+any failure undoes every step (`Bm.Workspace.Git.restore/5`). Per-task rollback with dependency handling is optional.
 
 **Freshness (optional, from fx).** A later addition: `bm_guard` would record the content hash of
 every file the worker reads and block `edit`/`write` when the file changed since. Not in the core,
@@ -235,7 +237,7 @@ because with one writer the snapshots already catch concurrent user edits after 
 | No two BM workers change files at the same time | Mutation lane (D5) | — |
 | Read-only workers can't change files through pi tools | Tool allowlist per profile | MCP tools or extensions outside the profile (profiles exclude them) |
 | Every change a mutating attempt makes is attributed to it | Before/after snapshots | Changes the *user* makes during that attempt are also attributed to it; the UI warns (the optional freshness check would catch edits to files the worker read) |
-| No process started by a worker outlives its attempt | Recorded process groups (D18), group kill on settle/stop/recovery | A command that starts a **new session** itself (`setsid`, double fork + setsid) escapes; the policy refuses `setsid`, but this is not a sandbox |
+| No process started by a worker outlives its attempt | Recorded process groups (D18), group kill on settle/stop/recovery; a group seen empty is never signalled again, and recovery ignores groups from an earlier boot (reused ids) | A command that starts a **new session** itself (`setsid`, double fork + setsid) escapes; the policy refuses `setsid`, but this is not a sandbox |
 | User changes are never committed, stashed or overwritten by BM | Baseline policy, private-index checkpoints, conditional rollback | A shell command inside a mutating attempt could still overwrite a user-owned file; it is detected (snapshot) and the attempt fails, but the overwrite already happened |
 | Accepted means verified | Verification barrier + checkpoint id | Test coverage decides what "verified" catches |
 | Stale messages can't affect a new attempt | Attempt ids + session epoch | — |
@@ -371,6 +373,7 @@ Measured 2026-09-29: pi 0.87.1, Fabric 0.97.0 (source read at 0.98.1), GLM 5.3 v
 | A plain `git status` rewrites the user's `.git/index` (stat-cache refresh); `GIT_OPTIONAL_LOCKS=0` prevents it | 2026-09-29, scratch repo and `Bm.Workspace.GitTest` |
 | Snapshot of this repository (private index, `add -A` + `write-tree`): first 47 ms, second 31 ms | `mix test --only perf`, 2026-09-29 |
 | `git add -A` from a subdirectory snapshots only that subdirectory (and fails if the parent repo ignores it), so the git layer requires the repository's top level | `Bm.Workspace.GitTest` |
+| A `tool_call` hook's in-place change of `event.input` affects only execution: pi validates into a `structuredClone` before hooks run and emits `tool_execution_start` with the model's original arguments, so the model's history and BM's transcript keep the original bash command | pi-agent-core `agent-loop.js` (`executeToolCallsSequential`, `prepareToolCall`), pi-ai `validation.js:281` |
 
 ---
 

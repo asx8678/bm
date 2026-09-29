@@ -48,6 +48,7 @@ defmodule Bm.Runs.Attempt do
     # Process groups (decision D18): pi's own, and the file where bm_guard records the others.
     field :pgid, :integer
     field :pgid_file, :string
+    field :boot_id, :string
     # Snapshot trees (decision D19) and the resulting write set.
     field :tree_before, :string
     field :tree_after, :string
@@ -72,7 +73,7 @@ defmodule Bm.Runs.Attempt do
   def allowed?(from, to), do: to in Map.get(@transitions, from, [])
 
   # Fields a transition may set along with the new status.
-  @transition_fields ~w(agent_id session_epoch pgid pgid_file tree_before tree_after
+  @transition_fields ~w(agent_id session_epoch pgid pgid_file boot_id tree_before tree_after
                         actual_writes flags result verify checkpoint_ref error)a
 
   @doc "Changeset for a new attempt; `task_id` and `number` are set by the caller."

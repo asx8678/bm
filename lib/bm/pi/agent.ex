@@ -65,6 +65,8 @@ defmodule Bm.Pi.Agent do
       # Every group is ended when pi exits or the agent stops (decision D18).
       pgid: nil,
       pgid_file: nil,
+      # Groups seen empty once are never signalled again: their ids may be reused.
+      dead_groups: MapSet.new(),
       pgid_dir: opts[:pgid_dir] || config[:pgid_dir] || Path.join(System.tmp_dir!(), "bm/pgids"),
       buffer: "",
       # Incremented every time the pi session is replaced (new process or confirmed new_session).
@@ -110,6 +112,11 @@ defmodule Bm.Pi.Agent do
   end
 
   def handle_call(:os_pid, _from, state), do: {:reply, state.os_pid, state}
+
+  def handle_call(:process_groups, _from, state) do
+    {live, state} = live_groups(state)
+    {:reply, live, state}
+  end
 
   def handle_call(_command, _from, %{port: nil} = state),
     do: {:reply, {:error, :not_running}, state}
@@ -213,7 +220,7 @@ defmodule Bm.Pi.Agent do
   defp end_groups(%{pgid: nil} = state), do: state
 
   defp end_groups(state) do
-    groups = [state.pgid | Bm.Proc.read_pgid_file(state.pgid_file)]
+    {groups, state} = live_groups(state)
 
     case Bm.Proc.terminate_groups(groups) do
       :ok ->
@@ -223,7 +230,21 @@ defmodule Bm.Pi.Agent do
         Logger.error("pi agent #{state.id}: processes survived a group kill: #{inspect(pids)}")
     end
 
-    %{state | pgid: nil, pgid_file: nil}
+    %{state | pgid: nil, pgid_file: nil, dead_groups: MapSet.new()}
+  end
+
+  # pi's group and every group bm_guard recorded that still has processes; the empty ones are
+  # remembered as dead so a later reuse of their ids is never signalled.
+  defp live_groups(%{pgid: nil} = state), do: {[], state}
+
+  defp live_groups(state) do
+    known =
+      [state.pgid | Bm.Proc.read_pgid_file(state.pgid_file)]
+      |> Enum.reject(&MapSet.member?(state.dead_groups, &1))
+
+    live = Bm.Proc.live_groups(known)
+    dead = MapSet.union(state.dead_groups, MapSet.new(known -- live))
+    {live, %{state | dead_groups: dead}}
   end
 
   defp new_pgid_file(state) do

@@ -87,6 +87,14 @@ defmodule Bm.PiTest do
       refute File.exists?(file)
     end
 
+    test "live groups are reported, and a group seen empty is never reported again", %{id: id} do
+      {[pgid, bash_group] = groups, _file} = spawn_children(id)
+      assert Bm.Pi.process_groups(id) == groups
+
+      Bm.Proc.terminate_groups([bash_group])
+      assert Bm.Pi.process_groups(id) == [pgid]
+    end
+
     test "processes left behind are ended when pi exits by itself", %{id: id} do
       {groups, _file} = spawn_children(id)
 

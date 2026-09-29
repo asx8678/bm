@@ -8,6 +8,11 @@ defmodule Bm.Proc do
   (`read_pgid_file/1`). Background jobs keep their group id even after they are re-parented to
   PID 1, so these group ids find everything a worker left running. Only a process that starts a
   new session itself escapes; this is a safety net, not a sandbox.
+
+  **Reused ids.** Once a group is empty its id can be reused by an unrelated program. Callers
+  therefore stop tracking a group the first time `live_groups/1` finds it empty (see
+  `Bm.Pi.process_groups/1`), and recovery ignores groups recorded before the last boot
+  (`boot_id/0`).
   """
 
   @poll_interval 50
@@ -37,6 +42,43 @@ defmodule Bm.Proc do
 
       {out, status} ->
         raise "ps failed with status #{status}: #{out}"
+    end
+  end
+
+  @doc "The groups among `pgids` that still have at least one process."
+  def live_groups(pgids) do
+    wanted = MapSet.new(pgids)
+
+    case System.cmd("ps", ["-A", "-o", "pgid="], stderr_to_stdout: true) do
+      {out, 0} ->
+        live =
+          for line <- String.split(out, "\n", trim: true),
+              pgid <- [String.to_integer(String.trim(line))],
+              MapSet.member?(wanted, pgid),
+              into: MapSet.new(),
+              do: pgid
+
+        Enum.filter(pgids, &MapSet.member?(live, &1))
+
+      {out, status} ->
+        raise "ps failed with status #{status}: #{out}"
+    end
+  end
+
+  @doc """
+  Identifies the current boot. Group ids recorded before a reboot mean nothing afterwards (every
+  pid may belong to another program now), so recovery only signals groups from the same boot.
+  """
+  def boot_id do
+    case File.read("/proc/sys/kernel/random/boot_id") do
+      {:ok, id} ->
+        String.trim(id)
+
+      {:error, _} ->
+        # macOS: "{ sec = 1790091645, usec = 528289 } Tue Sep 22 17:40:45 2026"
+        {out, 0} = System.cmd("sysctl", ["-n", "kern.boottime"])
+        [_, sec, usec] = Regex.run(~r/sec = (\d+), usec = (\d+)/, out)
+        "#{sec}.#{usec}"
     end
   end
 

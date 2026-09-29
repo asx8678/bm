@@ -175,25 +175,35 @@ defmodule Bm.Workspace.Git do
   `{:error, {:changed_since, paths}}` and changes nothing. Files absent in `from_tree` are
   deleted. Used to revert an attempt: `from_tree` is its `tree_before`, `expected_tree` its
   `tree_after`.
+
+  **All or nothing, also against concurrent edits.** Everything is read from git first. Then each
+  file to replace is moved aside (an atomic rename into `<git-dir>/bm/restore-*`), the moved
+  copies are checked again (an editor saving to the path now creates a new file instead of
+  changing ours), and the old contents are written with exclusive create, so a file that appears
+  meanwhile is never overwritten. On any failure every step is undone. If the user created a
+  file at a moved path in that window, their file is kept, BM's copy stays in the stash and the
+  result is `{:error, {:interrupted, reason, stash: dir}}`.
+
+  `opts[:after_move]` (tests only) runs after the files are moved aside.
   """
-  @spec restore(Path.t(), [entry | %{String.t() => String.t()} | String.t()], tree, tree) ::
-          :ok | {:error, {:changed_since, [String.t()]}} | {:error, term()}
-  def restore(repo, entries, from_tree, expected_tree) do
+  @spec restore(
+          Path.t(),
+          [entry | %{String.t() => String.t()} | String.t()],
+          tree,
+          tree,
+          keyword()
+        ) :: :ok | {:error, term()}
+  def restore(repo, entries, from_tree, expected_tree, opts \\ []) do
     paths = entries |> Enum.map(&entry_path/1) |> Enum.uniq()
 
-    with {:ok, expected} <- ls_tree(repo, expected_tree, paths),
+    with {:ok, git_dir} <- git_dir(repo),
+         {:ok, expected} <- ls_tree(repo, expected_tree, paths),
          {:ok, from} <- ls_tree(repo, from_tree, paths),
          {:ok, current} <- current_objects(repo, paths),
          deletes = Enum.filter(paths, &(from[&1] == nil and current[&1] != :directory)),
-         [] <- changed_paths(repo, paths, current, expected, MapSet.new(deletes)) do
-      # Deletions first, deepest first, so a directory is empty before a file takes its place
-      # (an attempt that turned file `a` into `a/b` is reverted by removing `a/b`, then `a`).
-      deletes |> Enum.sort_by(&depth/1, :desc) |> Enum.each(&delete_file(repo, &1))
-
-      paths
-      |> Enum.filter(&from[&1])
-      |> Enum.sort_by(&depth/1)
-      |> Enum.each(&write_file(repo, &1, from[&1]))
+         [] <- changed_paths(repo, paths, current, expected, MapSet.new(deletes)),
+         {:ok, contents} <- read_contents(repo, from) do
+      swap(repo, git_dir, paths, expected, contents, opts)
     else
       changed when is_list(changed) -> {:error, {:changed_since, changed}}
       error -> error
@@ -243,66 +253,218 @@ defmodule Bm.Workspace.Git do
     end
   end
 
-  # %{path => {mode, blob}} for the paths that exist in the working tree, hashed as git would.
+  # %{path => {mode, blob} | :directory} for the paths that exist, hashed as git would.
   defp current_objects(repo, paths) do
     Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, acc} ->
-      full = Path.join(repo, path)
-
-      case File.lstat(full) do
-        # :enotdir: a parent is a file, so this path doesn't exist either.
-        {:error, reason} when reason in [:enoent, :enotdir] ->
-          {:cont, {:ok, acc}}
-
-        {:ok, %File.Stat{type: :symlink}} ->
-          {:ok, target} = File.read_link(full)
-          hash_result(repo, ["hash-object", "--stdin"], target, "120000", path, acc)
-
-        {:ok, %File.Stat{type: :regular, mode: mode}} ->
-          file_mode = if Bitwise.band(mode, 0o111) != 0, do: "100755", else: "100644"
-          hash_result(repo, ["hash-object", "--", path], nil, file_mode, path, acc)
-
-        {:ok, %File.Stat{type: :directory}} ->
-          {:cont, {:ok, Map.put(acc, path, :directory)}}
-
-        {:ok, %File.Stat{type: type}} ->
-          {:halt, {:error, {:unsupported_file_type, path, type}}}
+      case object_at(repo, Path.join(repo, path), path) do
+        {:ok, nil} -> {:cont, {:ok, acc}}
+        {:ok, object} -> {:cont, {:ok, Map.put(acc, path, object)}}
+        error -> {:halt, error}
       end
     end)
   end
 
-  defp hash_result(repo, args, input, mode, path, acc) do
-    case git(repo, args, input: input) |> trimmed() do
-      {:ok, blob} -> {:cont, {:ok, Map.put(acc, path, {mode, blob})}}
-      error -> {:halt, error}
-    end
-  end
-
-  defp delete_file(repo, path) do
-    full = Path.join(repo, path)
-    File.rm(full)
-    remove_empty_parents(repo, Path.dirname(full))
-  end
-
-  defp write_file(repo, path, {mode, blob}) do
-    full = Path.join(repo, path)
-    File.mkdir_p!(Path.dirname(full))
-
+  # The git object for the file at `full`, hashed with the attributes of repository path `path`
+  # (so a file moved into the stash hashes as it did in place). nil if absent.
+  defp object_at(repo, full, path) do
     case File.lstat(full) do
-      {:ok, %File.Stat{type: :directory}} -> File.rmdir!(full)
-      {:ok, _} -> File.rm!(full)
-      {:error, _absent} -> :ok
-    end
+      # :enotdir: a parent is a file, so this path doesn't exist either.
+      {:error, reason} when reason in [:enoent, :enotdir] ->
+        {:ok, nil}
 
-    case mode do
-      "120000" ->
-        {:ok, target} = git(repo, ["cat-file", "blob", blob])
-        File.ln_s!(target, full)
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:ok, target} = File.read_link(full)
+        hash(repo, ["hash-object", "--stdin"], target, "120000")
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        file_mode = if Bitwise.band(mode, 0o111) != 0, do: "100755", else: "100644"
+        hash(repo, ["hash-object", "--path=#{path}", "--", Path.expand(full)], nil, file_mode)
+
+      {:ok, %File.Stat{type: :directory}} ->
+        {:ok, :directory}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:unsupported_file_type, path, type}}
+
+      {:error, reason} ->
+        {:error, {:lstat, path, reason}}
+    end
+  end
+
+  defp hash(repo, args, input, mode) do
+    with {:ok, blob} <- git(repo, args, input: input) |> trimmed(), do: {:ok, {mode, blob}}
+  end
+
+  # Contents to write, read before any file is touched: %{path => {:file, data, mode} | {:link, target}}.
+  defp read_contents(repo, from) do
+    Enum.reduce_while(from, {:ok, %{}}, fn
+      {path, {"120000", blob}}, {:ok, acc} ->
+        case git(repo, ["cat-file", "blob", blob]) do
+          {:ok, target} -> {:cont, {:ok, Map.put(acc, path, {:link, target})}}
+          error -> {:halt, error}
+        end
+
+      {path, {mode, blob}}, {:ok, acc} ->
+        # --filters applies the checkout conversions (eol, smudge) for this path.
+        case git(repo, ["cat-file", "--filters", "--path=#{path}", blob]) do
+          {:ok, data} -> {:cont, {:ok, Map.put(acc, path, {:file, data, mode})}}
+          error -> {:halt, error}
+        end
+    end)
+  end
+
+  defp swap(repo, git_dir, paths, expected, contents, opts) do
+    stash = Path.join([git_dir, "bm", "restore-#{System.unique_integer([:positive])}"])
+    File.mkdir_p!(stash)
+    journal = %{moved: [], written: []}
+
+    result =
+      with {:ok, journal} <- move_aside(repo, stash, paths, journal),
+           _ = if(hook = opts[:after_move], do: hook.()),
+           :ok <- verify_moved(repo, paths, expected, journal),
+           {:ok, journal} <- write_all(repo, contents, journal) do
+        {:ok, journal}
+      end
+
+    case result do
+      {:ok, _journal} ->
+        File.rm_rf!(stash)
+        :ok
+
+      {:error, reason, journal} ->
+        case undo(repo, journal) do
+          [] ->
+            File.rm_rf!(stash)
+            {:error, reason}
+
+          _kept ->
+            {:error, {:interrupted, reason, stash: stash}}
+        end
+    end
+  end
+
+  # Deepest first, so directories empty out before files take their place.
+  defp move_aside(repo, stash, paths, journal) do
+    paths
+    |> Enum.sort_by(&depth/1, :desc)
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, journal}, fn {path, i}, {:ok, journal} ->
+      full = Path.join(repo, path)
+      aside = Path.join(stash, Integer.to_string(i))
+
+      case File.lstat(full) do
+        {:ok, %File.Stat{type: type}} when type in [:regular, :symlink] ->
+          case File.rename(full, aside) do
+            :ok ->
+              remove_empty_parents(repo, Path.dirname(full))
+              {:cont, {:ok, %{journal | moved: [{path, aside} | journal.moved]}}}
+
+            {:error, reason} ->
+              {:halt, {:error, {:move_aside, path, reason}, journal}}
+          end
+
+        _directory_or_absent ->
+          {:cont, {:ok, journal}}
+      end
+    end)
+  end
+
+  # The moved copies must still be what the attempt left, and nothing may have appeared at the
+  # paths that were absent.
+  defp verify_moved(repo, paths, expected, journal) do
+    moved = Map.new(journal.moved)
+
+    changed =
+      Enum.reject(paths, fn path ->
+        case Map.fetch(moved, path) do
+          {:ok, aside} -> object_at(repo, aside, path) == {:ok, expected[path]}
+          :error -> expected[path] == nil and absent_or_directory?(Path.join(repo, path))
+        end
+      end)
+
+    if changed == [], do: :ok, else: {:error, {:changed_since, changed}, journal}
+  end
+
+  defp absent_or_directory?(full) do
+    case File.lstat(full) do
+      {:ok, %File.Stat{type: :directory}} -> true
+      {:ok, _} -> false
+      {:error, _} -> true
+    end
+  end
+
+  # Shallowest first; exclusive create never overwrites a file that appeared meanwhile.
+  defp write_all(repo, contents, journal) do
+    contents
+    |> Enum.sort_by(fn {path, _} -> depth(path) end)
+    |> Enum.reduce_while({:ok, journal}, fn {path, content}, {:ok, journal} ->
+      case write_new(Path.join(repo, path), content) do
+        :ok ->
+          {:cont, {:ok, %{journal | written: [path | journal.written]}}}
+
+        {:error, :eexist} ->
+          {:halt, {:error, {:changed_since, [path]}, journal}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:write, path, reason}, journal}}
+      end
+    end)
+  end
+
+  defp write_new(full, content) do
+    with :ok <- File.mkdir_p(Path.dirname(full)),
+         :ok <- remove_empty_dir(full) do
+      case content do
+        {:link, target} ->
+          File.ln_s(target, full)
+
+        {:file, data, mode} ->
+          with {:ok, io} <- File.open(full, [:write, :exclusive, :binary]) do
+            IO.binwrite(io, data)
+            File.close(io)
+            File.chmod(full, if(mode == "100755", do: 0o755, else: 0o644))
+          end
+      end
+    end
+  end
+
+  # A directory the attempt created where a file must return; it is empty by now or the write
+  # fails (a file inside it appeared meanwhile).
+  defp remove_empty_dir(full) do
+    case File.lstat(full) do
+      {:ok, %File.Stat{type: :directory}} ->
+        case File.rmdir(full) do
+          :ok -> :ok
+          {:error, _} -> {:error, :eexist}
+        end
 
       _ ->
-        # --filters applies the checkout conversions (eol, smudge) for this path.
-        {:ok, content} = git(repo, ["cat-file", "--filters", "--path=#{path}", blob])
-        File.write!(full, content)
-        File.chmod!(full, if(mode == "100755", do: 0o755, else: 0o644))
+        :ok
+    end
+  end
+
+  # Removes what was written and moves the stashed files back. Returns the paths that could not
+  # be moved back because something now occupies them (their copies stay in the stash).
+  defp undo(repo, journal) do
+    for path <- journal.written do
+      full = Path.join(repo, path)
+      File.rm(full)
+      remove_empty_parents(repo, Path.dirname(full))
+    end
+
+    journal.moved
+    |> Enum.reverse()
+    |> Enum.reject(fn {path, aside} -> move_back(Path.join(repo, path), aside) == :ok end)
+    |> Enum.map(fn {path, _aside} -> path end)
+  end
+
+  defp move_back(full, aside) do
+    with :ok <- File.mkdir_p(Path.dirname(full)),
+         {:error, _absent} <- File.lstat(full) do
+      File.rename(aside, full)
+    else
+      {:ok, _occupied} -> {:error, :occupied}
+      error -> error
     end
   end
 

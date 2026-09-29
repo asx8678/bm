@@ -307,6 +307,40 @@ defmodule Bm.Workspace.GitTest do
       assert read(repo, "dir/f.txt") == {:ok, "in dir\n"}
     end
 
+    test "an edit that lands during the restore is never overwritten", ctx do
+      repo = fixture!(ctx)
+      {before, after_tree, entries} = attempt!(repo)
+
+      # The attempt deleted untracked.txt; the revert recreates it. The user saves a new
+      # untracked.txt after the checks passed, while the restore is running.
+      racing_edit = fn -> write!(repo, "untracked.txt", "the user's racing edit\n") end
+
+      assert {:error, {:changed_since, ["untracked.txt"]}} =
+               Git.restore(repo, entries, before, after_tree, after_move: racing_edit)
+
+      assert read(repo, "untracked.txt") == {:ok, "the user's racing edit\n"}
+
+      # Everything else is exactly as the attempt left it, and no stash is left behind.
+      File.rm!(Path.join(repo, "untracked.txt"))
+      assert {:ok, ^after_tree} = Git.snapshot(repo)
+      assert Path.wildcard(Path.join(repo, ".git/bm/restore-*")) == []
+    end
+
+    test "a file saved at a moved path during the restore is kept, BM's copy is stashed", ctx do
+      repo = fixture!(ctx)
+      {before, after_tree, entries} = attempt!(repo)
+
+      # tracked.txt is moved aside; the user saves the path again before BM writes it back.
+      racing_edit = fn -> write!(repo, "tracked.txt", "the user's racing edit\n") end
+
+      assert {:error, {:interrupted, {:changed_since, ["tracked.txt"]}, stash: stash}} =
+               Git.restore(repo, entries, before, after_tree, after_move: racing_edit)
+
+      assert read(repo, "tracked.txt") == {:ok, "the user's racing edit\n"}
+      assert [kept] = File.ls!(stash)
+      assert File.read!(Path.join(stash, kept)) == "changed by the attempt\n"
+    end
+
     test "a file recreated after the attempt deleted it counts as changed", ctx do
       repo = fixture!(ctx)
       {before, after_tree, entries} = attempt!(repo)
