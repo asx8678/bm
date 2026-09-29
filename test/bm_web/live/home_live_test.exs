@@ -11,7 +11,17 @@ defmodule BmWeb.HomeLiveTest do
     assert has_element?(view, "#task-form textarea[name='task[goal]']")
     assert has_element?(view, "#start-task-btn")
     assert has_element?(view, "#runs", "No runs yet.")
-    assert has_element?(view, "#nav-tasks[aria-current=page]")
+    assert has_element?(view, "#brand", "BM")
+  end
+
+  test "prefills a requested repository and suggests known ones", %{conn: conn, tmp_dir: dir} do
+    repo = repo!(dir)
+    {:ok, workspace} = Bm.Runs.ensure_workspace(repo, %{verify_command: "true"})
+
+    {:ok, view, _html} = live(conn, ~p"/?path=#{repo}")
+    assert has_element?(view, "#task-form input[name='task[path]'][value='#{workspace.path}']")
+    assert has_element?(view, "#task-form input[name='task[verify_command]'][value='true']")
+    assert has_element?(view, "#workspaces option[value='#{workspace.path}']")
   end
 
   test "explains what is missing", %{conn: conn, tmp_dir: dir} do

@@ -19,8 +19,6 @@ defmodule BmWeb.Router do
 
     live "/", HomeLive
     live "/runs/:id", RunLive
-    live "/chat", ChatLive
-    live "/flow", FlowLive
   end
 
   # Other scopes may use custom stacks.

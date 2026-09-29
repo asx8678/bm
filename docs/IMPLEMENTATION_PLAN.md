@@ -428,6 +428,16 @@ Verify: policy tests for read-only mode; a reader attempt whose fake pi runs `ec
 refused, and one that writes through an interpreter is failed by attribution with the file
 listed; the live qualification suite passes with the new profiles.
 
+**Status: 6.6.1–6.6.2 done (2026-09-29).** Screenshots in `docs/screenshots/` (Tasks and run
+page, desktop and phone; headless Chrome with device emulation, since the desktop window can't go
+below ~485 px). Fixed or added while looking: the run page never showed the task text (now a
+"Task" fold with the declared files), attempts had no time, duration or checkpoint ref, recent
+runs had no time or spend, a finished run was a dead end (now "New task here" prefills the
+repository via `/?path=`), the repository field suggests known workspaces, the held-lane message
+names the reason (verification failed / timed out / interrupted), the brand read "BEAM". No
+horizontal overflow at 390 px. Prototypes, Svelte and its build plugin removed; `mix precommit`
+152 tests. `config/dev.exs` now honours `PORT`.
+
 ---
 
 ## Phase 7: planner (fake pi)

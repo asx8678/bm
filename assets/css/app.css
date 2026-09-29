@@ -193,32 +193,3 @@ body {
 .bm-prose td code, .bm-prose th code { white-space: nowrap; }
 .bm-prose th, .bm-prose td { border: 1px solid var(--bm-line); padding: 0.2em 0.5em; text-align: left; }
 .bm-prose th { font-weight: 600; background: var(--bm-raised); }
-
-/* Svelte Flow, themed from the same tokens (the canvas follows data-theme, not only the OS) */
-.svelte-flow {
-  --xy-background-color: var(--bm-bg);
-  --xy-background-pattern-color: var(--bm-line);
-  --xy-edge-stroke: var(--bm-muted);
-  --xy-handle-background-color: var(--bm-muted);
-  --xy-handle-border-color: var(--bm-surface);
-  --xy-controls-button-background-color: var(--bm-surface);
-  --xy-controls-button-background-color-hover: var(--bm-raised);
-  --xy-controls-button-color: var(--bm-text);
-  --xy-controls-button-color-hover: var(--bm-text);
-  --xy-controls-button-border-color: var(--bm-line);
-  --xy-attribution-background-color: transparent;
-  font-family: var(--font-sans);
-}
-.svelte-flow .svelte-flow__controls {
-  border: 1px solid var(--bm-line);
-  border-radius: 6px;
-  overflow: hidden;
-  box-shadow: none;
-}
-.svelte-flow .svelte-flow__controls-button {
-  width: 20px;
-  height: 20px;
-  padding: 4px;
-}
-.svelte-flow .svelte-flow__attribution a { color: var(--bm-muted); font-size: 9px; }
-

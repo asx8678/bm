@@ -1,7 +1,52 @@
 defmodule BmWeb.RunComponents do
-  @moduledoc "Components for runs and attempts: status badges and diffs."
+  @moduledoc "Components for runs and attempts: status badges, diffs, time and money."
 
   use Phoenix.Component
+
+  @doc "A time as `3 min ago`, `2 h ago`, `yesterday` or a date; hover shows the exact time."
+  attr :at, :any, required: true
+  attr :rest, :global
+
+  def ago(assigns) do
+    ~H"""
+    <time :if={@at} datetime={DateTime.to_iso8601(@at)} title={exact(@at)} {@rest}>{relative(@at)}</time>
+    """
+  end
+
+  @doc false
+  def relative(%DateTime{} = at, now \\ DateTime.utc_now()) do
+    seconds = DateTime.diff(now, at, :second)
+
+    cond do
+      seconds < 45 -> "just now"
+      seconds < 90 -> "1 min ago"
+      seconds < 3_600 -> "#{div(seconds, 60)} min ago"
+      seconds < 5_400 -> "1 h ago"
+      seconds < 86_400 -> "#{div(seconds, 3_600)} h ago"
+      seconds < 172_800 -> "yesterday"
+      seconds < 30 * 86_400 -> "#{div(seconds, 86_400)} days ago"
+      true -> Calendar.strftime(at, "%-d %b %Y")
+    end
+  end
+
+  defp exact(at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M:%S UTC")
+
+  @doc "A duration between two times as `4 s`, `2 min 5 s` or `1 h 3 min`; nil without an end."
+  def duration(%DateTime{} = from, %DateTime{} = to) do
+    seconds = max(DateTime.diff(to, from, :second), 0)
+
+    cond do
+      seconds < 60 -> "#{seconds} s"
+      seconds < 3_600 -> "#{div(seconds, 60)} min #{rem(seconds, 60)} s"
+      true -> "#{div(seconds, 3_600)} h #{div(rem(seconds, 3_600), 60)} min"
+    end
+  end
+
+  def duration(_from, _to), do: nil
+
+  @doc "Money in USD with four decimals, the precision of model pricing."
+  def money(nil), do: "–"
+  def money(amount), do: "$" <> :erlang.float_to_binary(amount * 1.0, decimals: 4)
 
   # Amber marks activity or a decision to make; sage is accepted; coral is failed.
   @attempt_labels %{

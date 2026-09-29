@@ -139,7 +139,7 @@ Each has a precondition; don't start one before it holds.
 
 | Feature | Size |
 |---|---|
-| Live **canvas** of planner, workers and tasks (Svelte Flow already present) | M |
+| Live **canvas** of planner, workers and tasks (the Svelte Flow prototype was removed in 6.6.2; rebuild on run data) | M |
 | Run history and search | M |
 | Short labels for runs and agents (`BM-12`) | S |
 | Transcript link per attempt (pi `export_html`) | S |

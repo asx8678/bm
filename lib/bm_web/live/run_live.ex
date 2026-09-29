@@ -174,16 +174,23 @@ defmodule BmWeb.RunLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:tasks}>
+    <Layouts.app flash={@flash}>
       <div class="mx-auto max-w-4xl px-4 py-6">
         <header class="flex flex-wrap items-start gap-x-4 gap-y-2">
           <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-bm-muted">
               <.run_status id="run-status" status={@run.status} />
-              <span class="font-mono text-[11px] text-bm-muted">run #{@run.id}</span>
+              <span class="font-mono">run #{@run.id}</span>
+              <span>·</span>
+              <span>started <.ago at={@run.inserted_at} /></span>
+              <span :if={@run.finished_at}>·</span>
+              <span :if={@run.finished_at}>took {duration(@run.inserted_at, @run.finished_at)}</span>
             </div>
             <h1 id="run-goal" class="mt-1.5 text-lg font-semibold leading-snug">{@run.goal}</h1>
-            <p class="mt-0.5 truncate font-mono text-[11px] text-bm-muted" title={@root}>{@root}</p>
+            <p class="mt-1 flex min-w-0 items-baseline gap-1.5 text-[11px]" title={@root}>
+              <span class="flex-none font-mono font-medium">{Path.basename(@root)}</span>
+              <span class="min-w-0 truncate font-mono text-bm-muted">{@root}</span>
+            </p>
           </div>
           <dl id="run-spend" class="text-right">
             <dt class="text-[11px] text-bm-muted">Spent</dt>
@@ -198,7 +205,7 @@ defmodule BmWeb.RunLive do
           </dl>
         </header>
 
-        <.action_bar lane={@lane} latest={@latest} run={@run} form={@form} />
+        <.action_bar lane={@lane} latest={@latest} run={@run} root={@root} form={@form} />
 
         <ol id="attempts" phx-update="stream" class="mt-6 space-y-4">
           <li
@@ -219,6 +226,7 @@ defmodule BmWeb.RunLive do
   attr :lane, :any, required: true
   attr :latest, :any, required: true
   attr :run, :any, required: true
+  attr :root, :string, required: true
   attr :form, :any, required: true
 
   defp action_bar(assigns) do
@@ -242,7 +250,8 @@ defmodule BmWeb.RunLive do
           <div class="flex flex-wrap items-center gap-3">
             <p class="min-w-0 flex-1 text-xs">
               <span class="font-semibold text-bm-run">Your decision:</span>
-              the last attempt left changes BM could not accept. Keep them as they are, or revert them.
+              {held_reason(@latest)} Keep the files as they are, or revert them to how they were
+              before the attempt.
             </p>
             <.action id="revert-btn" event="revert" style={:secondary} disable_with="Reverting…">
               Revert
@@ -252,7 +261,19 @@ defmodule BmWeb.RunLive do
             </.action>
           </div>
         <% :finished -> %>
-          <p class="text-xs text-bm-muted">This run is finished. Start a new task from Tasks.</p>
+          <div class="flex flex-wrap items-center gap-3">
+            <p class="min-w-0 flex-1 text-xs text-bm-muted">
+              This run is finished. Accepted changes are in your working tree and checkpointed
+              under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+            </p>
+            <.link
+              id="new-task-link"
+              navigate={~p"/?path=#{@root}"}
+              class="rounded-md bg-bm-text px-3 py-1.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
+            >
+              New task here
+            </.link>
+          </div>
         <% _free -> %>
           <.form
             for={@form}
@@ -302,6 +323,18 @@ defmodule BmWeb.RunLive do
   defp revertable?(%{status: :accepted, actual_writes: [_ | _]}), do: true
   defp revertable?(_attempt), do: false
 
+  defp held_reason(%{status: :needs_reconciliation}),
+    do: "BM was interrupted while an attempt was changing files, so its result is unknown."
+
+  defp held_reason(%{verify: %{"timeout" => true}}),
+    do: "the last attempt's changes could not be verified: the verify command timed out."
+
+  defp held_reason(%{verify: %{"exit" => code}}) when is_integer(code) and code != 0,
+    do: "the last attempt's changes failed verification."
+
+  defp held_reason(%{error: error}) when is_binary(error), do: "the last attempt #{error}."
+  defp held_reason(_attempt), do: "the last attempt left changes BM could not accept."
+
   attr :id, :string, required: true
   attr :event, :string, required: true
   attr :style, :atom, default: :secondary
@@ -337,13 +370,41 @@ defmodule BmWeb.RunLive do
     <article class="overflow-hidden rounded-xl border border-bm-line bg-bm-surface">
       <header class="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-bm-line px-4 py-2.5">
         <.attempt_status id={"attempt-#{@attempt.id}-status"} status={@attempt.status} />
-        <h2 class="min-w-0 flex-1 truncate text-[13px] font-semibold">{@task.title}</h2>
-        <span class="font-mono text-[10px] text-bm-muted">
+        <h2 class="min-w-0 flex-1 truncate text-[13px] font-semibold" title={@task.title}>
+          {@task.title}
+        </h2>
+        <span class="basis-full font-mono text-[10px] text-bm-muted sm:basis-auto">
           {@task.key} · attempt {@attempt.number} · {@attempt.role}
         </span>
       </header>
 
       <div class="space-y-3 px-4 py-3">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-bm-muted">
+          <span>started <.ago at={@attempt.inserted_at} /></span>
+          <span :if={terminal?(@attempt.status)}>·</span>
+          <span :if={terminal?(@attempt.status)}>
+            took {duration(@attempt.inserted_at, @attempt.updated_at)}
+          </span>
+          <span :if={@attempt.checkpoint_ref}>·</span>
+          <span :if={@attempt.checkpoint_ref} class="flex items-center gap-1">
+            checkpoint
+            <code class="rounded bg-bm-raised px-1 font-mono">{@attempt.checkpoint_ref}</code>
+          </span>
+        </div>
+
+        <details :if={@task.goal != @task.title} id={"task-#{@attempt.id}"} class="group">
+          <summary class="flex cursor-pointer list-none items-center gap-2 text-xs">
+            <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
+            <span class="font-medium">Task</span>
+            <span :if={@task.writes != []} class="font-mono text-[11px] text-bm-muted">
+              {Enum.join(@task.writes, ", ")}
+            </span>
+          </summary>
+          <p class="mt-2 whitespace-pre-wrap rounded-md bg-bm-bg px-3 py-2 text-xs leading-relaxed">
+            {@task.goal}
+          </p>
+        </details>
+
         <p :if={@result["summary"]} class="text-[13px] leading-relaxed">
           <span class="text-bm-muted">Worker:</span> {@result["summary"]}
         </p>
@@ -402,6 +463,9 @@ defmodule BmWeb.RunLive do
     """
   end
 
+  defp terminal?(status),
+    do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]
+
   defp verify_label(%{"skipped" => reason}), do: "skipped (#{reason})"
   defp verify_label(%{"timeout" => true}), do: "timed out"
   defp verify_label(%{"exit" => 0}), do: "passed"
@@ -428,6 +492,4 @@ defmodule BmWeb.RunLive do
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
   defp flag_help(_flag), do: nil
-
-  defp money(amount), do: "$" <> :erlang.float_to_binary(amount * 1.0, decimals: 4)
 end

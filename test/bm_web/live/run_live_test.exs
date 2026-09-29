@@ -129,6 +129,26 @@ defmodule BmWeb.RunLiveTest do
     assert has_element?(view, "#actions", "This run is finished")
   end
 
+  test "a finished run links to a new task in the same repository", %{conn: conn, repo: repo} do
+    {run_id, _id} = run_task!(repo, [done()])
+    await_status(:accepted)
+    {:ok, _run} = Coordinator.finish_run(repo)
+
+    {:ok, view, _html} = live(conn, ~p"/runs/#{run_id}")
+    assert has_element?(view, "#new-task-link")
+    refute has_element?(view, "#next-task-form")
+  end
+
+  test "an attempt shows its task text and checkpoint", %{conn: conn, repo: repo} do
+    steps = [%{write: ["a.txt", "hello\n"]}, done()]
+    {run_id, id} = run_task!(repo, steps, %{title: "Write a file", goal: JSON.encode!(steps)})
+    await_status(:accepted)
+
+    {:ok, view, _html} = live(conn, ~p"/runs/#{run_id}")
+    assert has_element?(view, "#task-#{id}", "a.txt")
+    assert has_element?(view, "#attempts", "refs/bm/runs/#{run_id}/1")
+  end
+
   test "an unknown run goes back to Tasks", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/"}}} = live(conn, ~p"/runs/999999")
   end

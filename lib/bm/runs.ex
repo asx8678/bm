@@ -95,6 +95,11 @@ defmodule Bm.Runs do
     Repo.one(from r in Run, where: r.id == ^id, preload: :workspace)
   end
 
+  @doc "Every known workspace, most recently used first."
+  def list_workspaces do
+    Repo.all(from w in Workspace, order_by: [desc: w.updated_at, desc: w.id])
+  end
+
   @doc "The most recently updated runs, with their workspaces."
   def list_recent_runs(limit \\ 20) do
     Repo.all(

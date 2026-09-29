@@ -12,21 +12,27 @@ defmodule BmWeb.HomeLive do
   alias Bm.Workspace.Coordinator
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(params, _session, socket) do
     runs = Runs.list_recent_runs()
+    workspaces = Runs.list_workspaces()
 
     {:ok,
      socket
-     |> assign(page_title: "Tasks", runs_empty?: runs == [], form: default_form(runs))
+     |> assign(
+       page_title: "Tasks",
+       runs_empty?: runs == [],
+       workspaces: workspaces,
+       form: default_form(workspaces, params["path"])
+     )
      |> stream(:runs, runs)}
   end
 
-  # Prefills the last workspace and its verify command.
-  defp default_form(runs) do
+  # Prefills the requested workspace (`?path=`) or the last used one, with its verify command.
+  defp default_form(workspaces, requested) do
     {path, verify} =
-      case runs do
-        [%{workspace: workspace} | _] -> {workspace.path, workspace.verify_command}
-        [] -> {File.cwd!(), nil}
+      case Enum.find(workspaces, &(&1.path == requested)) || List.first(workspaces) do
+        %{path: path, verify_command: verify} -> {path, verify}
+        nil -> {requested || File.cwd!(), nil}
       end
 
     to_form(
@@ -147,9 +153,9 @@ defmodule BmWeb.HomeLive do
       )
 
     ~H"""
-    <Layouts.app flash={@flash} active={:tasks}>
-      <div class="mx-auto grid max-w-5xl gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <section aria-labelledby="new-task-title">
+    <Layouts.app flash={@flash}>
+      <div class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section aria-labelledby="new-task-title" class="min-w-0">
           <h1 id="new-task-title" class="text-lg font-semibold">New task</h1>
           <p class="mt-1 text-xs leading-relaxed text-bm-muted">
             One guarded worker does the task in your checkout. BM checks every file write and
@@ -179,10 +185,19 @@ defmodule BmWeb.HomeLive do
               <.input
                 field={@form[:path]}
                 label="Repository"
+                list="workspaces"
+                autocomplete="off"
                 class={[@input, "font-mono text-xs"]}
                 error_class="border-bm-error"
               />
-              <.hint>Top level of a git checkout.</.hint>
+              <datalist id="workspaces">
+                <option :for={workspace <- @workspaces} value={workspace.path}>
+                  {Path.basename(workspace.path)}
+                </option>
+              </datalist>
+              <.hint>
+                Top level of a git checkout. Earlier repositories are suggested as you type.
+              </.hint>
             </div>
             <div class="grid gap-4 sm:grid-cols-2">
               <div>
@@ -229,21 +244,26 @@ defmodule BmWeb.HomeLive do
           </.form>
         </section>
 
-        <section aria-labelledby="runs-title">
+        <section aria-labelledby="runs-title" class="min-w-0">
           <h2 id="runs-title" class="text-sm font-semibold">Recent runs</h2>
-          <ol id="runs" phx-update="stream" class="mt-3 space-y-1.5">
+          <ol id="runs" phx-update="stream" class="mt-3 space-y-1">
             <li id="runs-empty" class="hidden text-xs text-bm-muted only:block">No runs yet.</li>
             <li :for={{dom_id, run} <- @streams.runs} id={dom_id}>
               <.link
                 navigate={~p"/runs/#{run.id}"}
-                class="group block rounded-lg border border-transparent px-3 py-2 transition-colors hover:border-bm-line hover:bg-bm-surface"
+                class="group block rounded-lg border border-transparent px-3 py-2 transition-colors hover:border-bm-line hover:bg-bm-surface focus-visible:outline-2 focus-visible:outline-bm-text"
               >
                 <div class="flex items-center gap-2">
                   <.run_status status={run.status} />
-                  <span class="truncate text-[13px] font-medium">{run.goal}</span>
+                  <span class="min-w-0 flex-1 truncate text-[13px] font-medium">{run.goal}</span>
                 </div>
-                <div class="mt-0.5 truncate font-mono text-[10px] text-bm-muted">
-                  {Path.basename(run.workspace.path)} · #{run.id}
+                <div class="mt-1 flex items-center gap-2 text-[11px] text-bm-muted">
+                  <span class="min-w-0 truncate font-mono" title={run.workspace.path}>
+                    {Path.basename(run.workspace.path)}
+                  </span>
+                  <span class="flex-none">·</span>
+                  <.ago at={run.updated_at} class="flex-none" />
+                  <span class="ml-auto flex-none font-mono tabular-nums">{money(run.spent_usd)}</span>
                 </div>
               </.link>
             </li>
