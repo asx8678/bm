@@ -462,9 +462,17 @@ defmodule Bm.Workspace.Coordinator do
   def handle_info(:settle_check, %{phase: :settling} = state), do: {:noreply, settle_check(state)}
   def handle_info(:settle_check, state), do: {:noreply, state}
 
+  # The baseline verify command is recorded on the attempt like the attempt's own verification
+  # (overwritten later), so recovery can end it if this coordinator dies.
   def handle_info({:verify_started, pgid}, %{phase: :baseline} = state) do
     if state.cancel?, do: Bm.Proc.terminate_groups([pgid])
-    {:noreply, %{state | verify_pgid: pgid}}
+
+    attempt =
+      Runs.update_attempt_fields(state.attempt, %{
+        verify: %{"pgid" => pgid, "boot_id" => Bm.Proc.boot_id(), "baseline" => true}
+      })
+
+    {:noreply, %{state | verify_pgid: pgid, attempt: attempt}}
   end
 
   def handle_info({:verify_started, pgid}, %{phase: :verifying} = state) do

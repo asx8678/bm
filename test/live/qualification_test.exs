@@ -123,7 +123,8 @@ defmodule Bm.Live.QualificationTest do
             {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
           end
 
-        _request -> %{"ok" => true, "status" => "received"}
+        _request ->
+          %{"ok" => true, "status" => "received"}
       end)
 
     # The model may report "done" or honestly "blocked"; what matters is the request and no file.

@@ -454,6 +454,27 @@ horizontal overflow at 390 px. Prototypes, Svelte and its build plugin removed; 
   4/4 with the new profiles (the reader tried a shell redirect and was refused). `mix precommit`
   160 tests.
 
+**Status: 6.6.4 done (2026-09-29); Phase 6.6 complete.** `mix bm.bench` now runs five easy
+tasks once and three hard ones (`stats`: three files; `dirty`: the task needs a file the user
+has uncommitted changes in; `sub`: the verify command regenerates `api.md`) three times per
+mode, and for every BM run a planner-profile pi first declares the write set (`propose_task`),
+which becomes the task's `writes`. Results (docs/BENCHMARK.md, 28 runs, ≈$0.40):
+- **Write sets (open question 7): exact in 11 of 11 runs that changed files**, including the
+  three-file task and `api.md` for `sub` (the planner read `gen.py` and declared the generated
+  file; the worker then ran the generator itself, so the verify-changed-files path was not
+  exercised by the model). The three `dirty` runs declared `text.py` and changed nothing.
+  **Decision for 7.1: keep `writes` required and non-empty for mutating tasks**; an undeclared
+  write stays a flag, not a failure.
+- **The user's file:** plain pi overwrote the user's uncommitted `text.py` in 3 of 3 runs; BM
+  refused in 3 of 3, the worker reported `blocked` and the file was intact. This is the
+  difference the benchmark was meant to show.
+- **Success:** BM 11/14 (the three misses are the intended `dirty` refusals), plain pi 13/14
+  (one `fix_add` run failed its check). Cost BM $0.22 vs $0.18, wall time 139 s vs 111 s: the
+  planner declaration and the guarded start cost about a fifth more. Acceptable for the core;
+  warm reuse stays optional.
+- Recovery gap found on review: a verify command started in the baseline phase was not
+  recorded on the attempt; it now is (`verify.baseline = true`), like the attempt's own.
+
 ---
 
 ## Phase 7: planner (fake pi)
@@ -468,7 +489,7 @@ They talk by messages; the coordinator never calls the model. Reason: the coordi
 **7.1 Plan validation (pure).** `Bm.Plan.validate(proposal, ctx)` with `ctx = %{tasks,
 user_owned, root, budget_left, plan_open}`: required fields; `key` format and unique in the run;
 `depends_on` refers to existing keys; no cycles; `writes` inside the root and not user-owned;
-`writes` required and non-empty when `mutates` **unless 6.6.4 made it advisory**; optional
+`writes` required and non-empty when `mutates` (confirmed by 6.6.4: exact in 11/11); optional
 `check` (a shell command, see 7.7) is a non-empty string; plan must be open.
 Returns `{:ok, task_attrs}` or `{:error, reason}` with a reason the model can act on.
 Verify: table-driven tests for each rule, including a three-task cycle.

@@ -84,6 +84,9 @@ Added after the milestone B review (2026-09-29); plan phase 6.6.
 | B13 | **Harder benchmark** with user-owned and generated files; write-set declaration measured (open question 7) | S | 6.6.4 |
 | B14 | **Guarded read-only bash** for planner and reader (policy in read-only mode + snapshot check) | M | 6.6.5 |
 
+**Status: done (2026-09-29).** Benchmark in [BENCHMARK.md](BENCHMARK.md): write sets declared
+exactly in 11/11 runs; plain pi overwrote the user's dirty file 3/3, BM 0/3.
+
 ### Milestone C: planner, sequential tasks
 
 | # | Feature | Size | Plan phase |

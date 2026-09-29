@@ -153,7 +153,7 @@ proposed ──▶ validated ──▶ accepted ──▶ scheduled
 ```
 
 - *Validated*: schema, stable key, dependencies exist, no cycles, declared write set present for
-  mutating tasks (or advisory, decided by plan step 6.6.4), optional `check` command, budget
+  mutating tasks (kept required after plan step 6.6.4), optional `check` command, budget
   admits it, current planner generation.
 - *Accepted*: the BEAM persisted it and answered the planner's dialog. Accepted task definitions are
   immutable; changes are new revisions.
@@ -353,8 +353,8 @@ may have changed files is never retried automatically.
   Revert / Finish), checked in a browser (docs/screenshots). Milestone B exit gate passed live;
   `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
 
-**Not implemented yet:** the planner flow (milestone C, D20) and the harder benchmark of plan step
-6.6.4. Baseline verification (6.6.3) and read-only bash for planner and reader (6.6.5) are in.
+**Not implemented yet:** the planner flow (milestone C, D20). Phase 6.6 (browser-checked UI,
+baseline verification, harder benchmark, read-only bash for planner and reader) is in.
 A7 (replay fixtures) is optional (D17).
 
 ---
@@ -421,11 +421,16 @@ Answered in stage A6 (live, 2026-09-29):
 6. Which settings in the user's `fabric.json` affect workers: **moot** while workers are
    Fabric-free (D16); reopen if Fabric is re-added.
 
+Answered in plan step 6.6.4 (live, 2026-09-29):
+7. How well does GLM 5.3 declare write sets? **Exactly**, in 11 of 11 benchmark runs that
+   changed files, including a three-file task and a generated file; see docs/BENCHMARK.md.
+   `writes` stays required for mutating tasks (plan 7.1); undeclared writes remain a flag.
+8. Cost, time and success versus a single pi: on the harder tasks BM costs about a fifth more
+   (planner declaration + guarded start) and refuses what plain pi silently does — plain pi
+   overwrote the user's uncommitted file in 3 of 3 runs, BM in 0 of 3. Multi-step goals are
+   measured in plan step 8.3.
+
 Still open:
-7. How well does GLM 5.3 declare write sets? (Affects the undeclared-write flag and, later,
-   parallel writers.)
-8. Cost, time and success versus a single pi on the same tasks (benchmarks in plan steps 6.5 and
-   8.3).
 9. Prefixing the bash command in `bm_guard`'s `tool_call` hook works under real pi: **yes**
    (live, 2026-09-29). The BEAM authorizes the model's original command, the model sees the
    command's normal output, the recorded group is not pi's, a `nohup … &` job is still found

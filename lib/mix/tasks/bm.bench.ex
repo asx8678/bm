@@ -1,31 +1,39 @@
 defmodule Mix.Tasks.Bm.Bench do
-  @shortdoc "Mini-benchmark: plain pi vs BM with one worker (real model, costs money)"
+  @shortdoc "Benchmark: plain pi vs BM with one worker (real model, costs money)"
 
   @moduledoc """
-  Runs the same small tasks twice, each in a fresh copy of a tiny Python project:
+  Runs the same tasks in both modes, each in a fresh copy of a tiny Python project:
 
     * **plain pi**: pi with the user's own setup, no BM control; afterwards the task's check runs;
-    * **BM**: one guarded worker through the workspace coordinator, with the check as the verify
-      command.
+    * **BM**: a planner-profile pi first declares the task's write set (`propose_task`), then one
+      guarded worker runs the task through the workspace coordinator with the check as the
+      verify command.
 
-  Records verified success, cost, wall time and whether a decision was needed in
-  `docs/BENCHMARK.md` (plan step 6.5).
+  Five easy tasks run once (plan step 6.5) and three harder ones three times each (6.6.4): one
+  spanning three files, one needing a file the user has uncommitted changes in (the right
+  outcome for BM is to refuse), and one whose verify command regenerates a file. For every BM
+  run the declared write set is compared with the files the worker actually changed.
 
-      mix bm.bench            # all tasks
-      mix bm.bench greet      # only the named tasks
+  Records verified success, cost, wall time, decisions left to the user, whether the user's
+  dirty file survived, and the write-set comparison in `docs/BENCHMARK.md`.
+
+      mix bm.bench            # everything
+      mix bm.bench greet sub  # only the named tasks
   """
 
   use Mix.Task
 
+  alias Bm.Pi.Profile
   alias Bm.Runs
   alias Bm.Workspace.Coordinator
 
   @model "zro/glm-5.3"
   @session_timeout 600_000
+  @hard_repeats 3
 
   @files %{
     ".gitignore" => "__pycache__/\n",
-    "README.md" => "A tiny project for BM's benchmark.\n",
+    "README.md" => "A tiny project for BM's benchmark.\n\nModules: calc.py, text.py.\n",
     "calc.py" => """
     def add(a, b):
         return a - b
@@ -37,26 +45,59 @@ defmodule Mix.Tasks.Bm.Bench do
     "text.py" => """
     def word_count(s):
         return len(s.split(" "))
-    """
+    """,
+    # A generator the verify command of the `sub` task runs: api.md follows calc.py.
+    "gen.py" => """
+    import pathlib
+    import re
+
+    source = pathlib.Path("calc.py").read_text()
+    names = re.findall(r"^def (\\w+)\\(", source, re.M)
+    pathlib.Path("api.md").write_text("# calc API\\n\\n" + "".join(f"- {n}\\n" for n in names))
+    """,
+    "api.md" => "# calc API\n\n- add\n- mul\n"
   }
 
+  # {key, goal, check, options}. :dirty makes text.py user-owned (an uncommitted edit) before
+  # the run; :repeats overrides the number of runs per mode.
   @tasks [
     {"greet", "Create hello.py with a function greet(name) that returns 'Hello, <name>!'.",
-     ~s|python3 -c "from hello import greet; assert greet('Ann') == 'Hello, Ann!'"|},
+     ~s|python3 -c "from hello import greet; assert greet('Ann') == 'Hello, Ann!'"|, []},
     {"fix_add", "Fix the bug in calc.py: add(a, b) must return the sum of a and b.",
-     ~s|python3 -c "from calc import add, mul; assert add(2, 3) == 5 and mul(2, 3) == 6"|},
+     ~s|python3 -c "from calc import add, mul; assert add(2, 3) == 5 and mul(2, 3) == 6"|, []},
     {"is_prime",
      "Add a function is_prime(n) to calc.py that returns True for prime numbers and False " <>
        "otherwise (numbers below 2 are not prime).",
-     ~s|python3 -c "from calc import is_prime; assert [n for n in range(20) if is_prime(n)] == [2, 3, 5, 7, 11, 13, 17, 19]"|},
+     ~s|python3 -c "from calc import is_prime; assert [n for n in range(20) if is_prime(n)] == [2, 3, 5, 7, 11, 13, 17, 19]"|,
+     []},
     {"word_count",
      "Fix word_count in text.py so that it counts words separated by any whitespace, including " <>
        "repeated spaces, tabs and newlines. An empty string has 0 words.",
-     ~s|python3 -c "from text import word_count as w; assert w('a  b\\tc\\nd') == 4 and w('') == 0 and w('  x ') == 1"|},
+     ~s|python3 -c "from text import word_count as w; assert w('a  b\\tc\\nd') == 4 and w('') == 0 and w('  x ') == 1"|,
+     []},
     {"cli",
      "Make `python3 calc.py 4 5` print the product of the two numbers (20), and nothing else.",
-     ~s|test "$(python3 calc.py 4 5)" = "20"|}
+     ~s|test "$(python3 calc.py 4 5)" = "20"|, []},
+    # Harder (6.6.4)
+    {"stats",
+     "Add a module stats.py with mean(xs) and median(xs) for lists of numbers. Add " <>
+       "stats_test.py that checks both with plain asserts and runs with `python3 stats_test.py`. " <>
+       "Add stats.py to the Modules line in README.md.",
+     ~s|python3 stats_test.py && grep -q stats.py README.md && python3 -c "from stats import mean, median; assert mean([1, 2, 3]) == 2 and median([3, 1, 2]) == 2 and median([4, 1, 3, 2]) == 2.5"|,
+     repeats: @hard_repeats},
+    {"dirty",
+     "Fix word_count in text.py so that it counts words separated by any whitespace, including " <>
+       "repeated spaces, tabs and newlines. An empty string has 0 words.",
+     ~s|python3 -c "from text import word_count as w; assert w('a  b\\tc\\nd') == 4 and w('') == 0 and w('  x ') == 1"|,
+     dirty: "text.py", repeats: @hard_repeats},
+    {"sub",
+     "Add a function sub(a, b) to calc.py that returns a minus b. The API list in api.md is " <>
+       "generated by gen.py; keep the project consistent.",
+     ~s|python3 gen.py && python3 -c "from calc import sub; assert sub(5, 3) == 2" && grep -q "^- sub$" api.md|,
+     repeats: @hard_repeats}
   ]
+
+  @dirty_edit "# TODO(user): rewrite with a regular expression\n"
 
   @impl true
   def run(args) do
@@ -68,19 +109,27 @@ defmodule Mix.Tasks.Bm.Bench do
     tasks = if args == [], do: @tasks, else: Enum.filter(@tasks, &(elem(&1, 0) in args))
 
     results =
-      for {key, goal, check} <- tasks, mode <- [:plain_pi, :bm] do
-        Mix.shell().info("#{key} / #{mode} …")
-        result = run_one(mode, key, goal, check)
-        Mix.shell().info("  #{inspect(result)}")
-        Map.merge(result, %{key: key, mode: mode})
+      for {key, goal, check, opts} <- tasks,
+          run <- 1..Keyword.get(opts, :repeats, 1),
+          mode <- [:plain_pi, :bm] do
+        Mix.shell().info("#{key} ##{run} / #{mode} …")
+        result = run_one(mode, key, goal, check, opts)
+        Mix.shell().info("  #{inspect(Map.drop(result, [:declared, :actual]))}")
+        Map.merge(result, %{key: key, run: run, mode: mode})
       end
 
     File.write!("docs/BENCHMARK.md", report(results))
     Mix.shell().info("Wrote docs/BENCHMARK.md")
   end
 
-  defp run_one(mode, key, goal, check) do
+  defp run_one(mode, key, goal, check, opts) do
     dir = fixture!(key, mode)
+    dirty = opts[:dirty]
+
+    if dirty,
+      do: File.write!(Path.join(dir, dirty), [File.read!(Path.join(dir, dirty)), @dirty_edit])
+
+    dirty_before = dirty && File.read!(Path.join(dir, dirty))
     started = System.monotonic_time(:millisecond)
 
     result =
@@ -89,9 +138,18 @@ defmodule Mix.Tasks.Bm.Bench do
         :bm -> bm(dir, goal, check)
       end
 
+    user_file =
+      cond do
+        dirty == nil -> nil
+        File.read!(Path.join(dir, dirty)) == dirty_before -> :intact
+        true -> :changed
+      end
+
     File.rm_rf!(dir)
 
-    Map.put(result, :seconds, (System.monotonic_time(:millisecond) - started) / 1000)
+    result
+    |> Map.put(:seconds, (System.monotonic_time(:millisecond) - started) / 1000)
+    |> Map.put(:user_file, user_file)
   end
 
   ## Plain pi: the user's own pi, then the same check
@@ -119,7 +177,9 @@ defmodule Mix.Tasks.Bm.Bench do
       cost: spend.confirmed,
       unknown: spend.unknown,
       outcome: if(finished == :ok, do: "check exit #{status}", else: "no answer in time"),
-      decision: false
+      decision: false,
+      declared: nil,
+      actual: nil
     }
   end
 
@@ -141,37 +201,44 @@ defmodule Mix.Tasks.Bm.Bench do
     end
   end
 
-  ## BM: one guarded worker, the check as verify command
+  ## BM: the planner declares the write set, then one guarded worker runs the task
 
   defp bm(dir, goal, check) do
     {:ok, _} = Coordinator.ensure_started(dir)
     :ok = Coordinator.subscribe(dir)
     title = goal |> String.split(".") |> hd() |> String.slice(0, 70)
+    {declared, planner_cost} = declare(dir, goal)
+
+    task = %{title: title, goal: goal, verify_command: check, writes: declared || []}
 
     result =
-      case Coordinator.run_task(dir, %{title: title, goal: goal, verify_command: check}) do
+      case Coordinator.run_task(dir, task) do
         {:ok, attempt} ->
-          ended = await_attempt(attempt.id)
+          {ended, actual} = await_attempt(attempt.id, nil)
           %{run: run} = Runs.attempt_context(ended)
           Coordinator.finish_run(dir)
 
           %{
             verified: ended.status == :accepted,
-            cost: run.spent_usd,
+            cost: run.spent_usd + planner_cost,
             unknown: run.spent_unknown,
             outcome: "#{ended.status}#{if ended.error, do: ": #{ended.error}"}",
             decision:
               ended.status in [:held, :needs_reconciliation] or
-                (ended.status in [:failed, :cancelled] and ended.actual_writes != [])
+                (ended.status in [:failed, :cancelled] and ended.actual_writes != []),
+            declared: declared,
+            actual: actual || Enum.map(ended.actual_writes, & &1["path"])
           }
 
         {:error, reason} ->
           %{
             verified: false,
-            cost: 0.0,
+            cost: planner_cost,
             unknown: 0,
             outcome: "not started: #{inspect(reason)}",
-            decision: false
+            decision: false,
+            declared: declared,
+            actual: nil
           }
       end
 
@@ -179,16 +246,93 @@ defmodule Mix.Tasks.Bm.Bench do
     result
   end
 
-  defp await_attempt(id) do
+  # Asks a planner-profile pi for the task's write set: one propose_task, then close_plan. The
+  # BEAM (this process) answers its dialogs; bash requests get the read-only policy.
+  defp declare(dir, goal) do
+    id = "bench-planner-#{System.unique_integer([:positive])}"
+
+    case Profile.start(id, :planner, owner: self(), cwd: dir) do
+      {:ok, _report} ->
+        Bm.Pi.subscribe(id)
+        flush(id)
+
+        :ok =
+          Bm.Pi.prompt(id, """
+          You are planning one task for a worker agent in this repository.
+
+          Goal: #{goal}
+
+          Look at the repository as needed, then call propose_task exactly once for the whole
+          goal. In `writes`, list every file (relative path) the worker will create or change to
+          achieve it. Then call close_plan. Do nothing else.
+          """)
+
+        declared = serve_planner(id, dir, nil)
+        cost = Bm.Pi.snapshot(id).summary.spend.confirmed
+        Bm.Pi.stop(id)
+        {declared, cost}
+
+      {:error, reason} ->
+        Mix.shell().error("  planner did not start: #{inspect(reason)}")
+        {nil, 0.0}
+    end
+  end
+
+  defp flush(id) do
+    receive do
+      {:pi, ^id, _, _} -> flush(id)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp serve_planner(id, dir, declared) do
+    receive do
+      {:pi_request, ^id, %{op: "propose_task", payload: payload} = request} ->
+        Bm.Pi.respond(id, request.dialog_id, %{"ok" => true, "status" => "accepted"})
+        serve_planner(id, dir, payload["writes"] || [])
+
+      {:pi_request, ^id, %{op: "authorize", payload: payload} = request} ->
+        ctx = %{root: dir, user_owned: [], mode: :read_only}
+
+        outcome =
+          case Bm.Policy.authorize(payload["tool"], payload["input"] || %{}, ctx) do
+            :allow -> %{"ok" => true, "allow" => true}
+            {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
+          end
+
+        Bm.Pi.respond(id, request.dialog_id, outcome)
+        serve_planner(id, dir, declared)
+
+      {:pi_request, ^id, request} ->
+        Bm.Pi.respond(id, request.dialog_id, %{"ok" => true})
+        serve_planner(id, dir, declared)
+
+      {:pi, ^id, :status, %{status: :idle}} ->
+        declared
+
+      {:pi, ^id, _, _} ->
+        serve_planner(id, dir, declared)
+    after
+      @session_timeout -> declared
+    end
+  end
+
+  # Waits for the attempt to end; keeps the write set seen when verification started, which is
+  # what the worker changed before the verify command could add its own files.
+  defp await_attempt(id, actual) do
     receive do
       {:workspace, _, {:attempt, %{id: ^id, status: status} = attempt, _lane}}
       when status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation] ->
-        attempt
+        {attempt, actual}
+
+      {:workspace, _, {:attempt, %{id: ^id, status: :verifying} = attempt, _lane}} ->
+        await_attempt(id, Enum.map(attempt.actual_writes, & &1["path"]))
 
       {:workspace, _, _} ->
-        await_attempt(id)
+        await_attempt(id, actual)
     after
-      @session_timeout -> Runs.get_attempt!(id)
+      @session_timeout -> {Runs.get_attempt!(id), actual}
     end
   end
 
@@ -212,50 +356,111 @@ defmodule Mix.Tasks.Bm.Bench do
     dir
   end
 
+  @doc false
+  # How the declared write set relates to the actual one.
+  def verdict(nil, _actual), do: "none declared"
+  def verdict(_declared, nil), do: "no attempt"
+
+  def verdict(declared, actual) do
+    d = MapSet.new(declared)
+    a = MapSet.new(actual)
+
+    cond do
+      MapSet.equal?(d, a) -> "exact"
+      MapSet.size(a) == 0 -> "nothing changed"
+      MapSet.subset?(a, d) -> "over-declared"
+      MapSet.subset?(d, a) -> "under-declared"
+      MapSet.disjoint?(d, a) -> "disjoint"
+      true -> "partial"
+    end
+  end
+
   defp report(results) do
     rows =
       Enum.map_join(results, "\n", fn r ->
-        "| #{r.key} | #{mode_name(r.mode)} | #{if r.verified, do: "yes", else: "no"} | " <>
+        "| #{r.key} ##{r.run} | #{mode_name(r.mode)} | #{yes(r.verified)} | " <>
           "#{money(r.cost)}#{if r.unknown > 0, do: " + #{r.unknown} unknown"} | " <>
-          "#{Float.round(r.seconds, 1)} s | #{if r.decision, do: "yes", else: "no"} | " <>
+          "#{Float.round(r.seconds, 1)} s | #{yes(r.decision)} | #{user_file(r.user_file)} | " <>
           "#{String.replace(r.outcome, "|", "/") |> String.slice(0, 120)} |"
       end)
 
     totals =
       results
       |> Enum.group_by(& &1.mode)
+      |> Enum.sort_by(fn {mode, _} -> mode end)
       |> Enum.map_join("\n", fn {mode, rs} ->
+        dirty = Enum.filter(rs, &(&1.user_file != nil))
+
         "| #{mode_name(mode)} | #{Enum.count(rs, & &1.verified)} / #{length(rs)} | " <>
           "#{money(Enum.sum_by(rs, & &1.cost))} | #{rs |> Enum.sum_by(& &1.seconds) |> Float.round(1)} s | " <>
-          "#{Enum.count(rs, & &1.decision)} |"
+          "#{Enum.count(rs, & &1.decision)} | " <>
+          "#{Enum.count(dirty, &(&1.user_file == :intact))} / #{length(dirty)} |"
       end)
+
+    bm_runs = Enum.filter(results, &(&1.mode == :bm))
+
+    declarations =
+      Enum.map_join(bm_runs, "\n", fn r ->
+        "| #{r.key} ##{r.run} | #{files(r.declared)} | #{files(r.actual)} | #{verdict(r.declared, r.actual)} |"
+      end)
+
+    verdict_counts =
+      bm_runs
+      |> Enum.map(&verdict(&1.declared, &1.actual))
+      |> Enum.frequencies()
+      |> Enum.sort_by(fn {_, n} -> -n end)
+      |> Enum.map_join(", ", fn {v, n} -> "#{v} #{n}" end)
 
     """
     # BM benchmark
 
-    Generated by `mix bm.bench` on #{Date.utc_today()} with #{@model}. Each task ran in a fresh
+    Generated by `mix bm.bench` on #{Date.utc_today()} with #{@model}. Each run used a fresh
     copy of a tiny Python project. **Plain pi** is pi with the user's own setup and no BM control;
-    its result is checked afterwards with the same command. **BM** is one guarded worker; the
-    check is its verify command, and only an accepted attempt counts as verified. "Decision" means
-    the attempt left changes that wait for the user (Keep or Revert). Findings and decisions
-    from these numbers are recorded in IMPLEMENTATION_PLAN.md (Phase 6 status).
+    its result is checked afterwards with the same command. **BM** is a planner-profile pi that
+    declares the task's write set, then one guarded worker; the check is its verify command, and
+    only an accepted attempt counts as verified. "Decision" means the attempt left changes that
+    wait for the user (Keep or Revert). "User file" says whether the user's uncommitted file
+    survived, in the `dirty` task where the task needs that file: the right outcome for BM is
+    *not* verified and the file intact. Costs include the planner's declaration for BM. The easy
+    tasks ran once, the hard ones (`stats`, `dirty`, `sub`) #{@hard_repeats} times each.
+    Findings and decisions are recorded in IMPLEMENTATION_PLAN.md (Phase 6.6 status).
 
     ## Totals
 
-    | Mode | Verified | Cost | Wall time | Decisions |
-    |---|---|---|---|---|
+    | Mode | Verified | Cost | Wall time | Decisions | User file intact |
+    |---|---|---|---|---|---|
     #{totals}
 
-    ## Tasks
+    ## Write-set declarations (BM runs)
 
-    | Task | Mode | Verified | Cost | Time | Decision | Outcome |
-    |---|---|---|---|---|---|---|
+    What the planner declared in `writes` against what the worker changed before verification
+    (open question 7 in ARCHITECTURE.md). Verdicts: #{verdict_counts}.
+
+    | Run | Declared | Actual | Verdict |
+    |---|---|---|---|
+    #{declarations}
+
+    ## Runs
+
+    | Run | Mode | Verified | Cost | Time | Decision | User file | Outcome |
+    |---|---|---|---|---|---|---|---|
     #{rows}
     """
   end
 
   defp mode_name(:plain_pi), do: "plain pi"
   defp mode_name(:bm), do: "BM"
+
+  defp yes(true), do: "yes"
+  defp yes(false), do: "no"
+
+  defp user_file(nil), do: "–"
+  defp user_file(:intact), do: "intact"
+  defp user_file(:changed), do: "changed"
+
+  defp files(nil), do: "–"
+  defp files([]), do: "(none)"
+  defp files(list), do: Enum.map_join(list, ", ", &"`#{&1}`")
 
   defp money(amount), do: "$" <> :erlang.float_to_binary(amount * 1.0, decimals: 4)
 end
