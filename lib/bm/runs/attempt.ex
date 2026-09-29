@@ -84,6 +84,9 @@ defmodule Bm.Runs.Attempt do
     |> unique_constraint([:task_id, :number])
   end
 
+  @doc "Changeset setting transition fields without changing the status."
+  def fields_changeset(attempt, attrs), do: cast(attempt, attrs, @transition_fields)
+
   @doc """
   Changeset moving `attempt` to `to` and setting `attrs`. Invalid (with an error on `:status`)
   if the move is not in `transitions/0`.

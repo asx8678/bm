@@ -78,7 +78,9 @@ function runShell(command) {
 // Steps: {"authorize": {tool, input}} stops the work when denied; {"bash": cmd} authorizes, then
 // runs cmd (stops when denied); {"write": [path, text]} writes directly, as a tool would;
 // {"spawn": cmd} starts cmd in the background like a bash tool call; {"submit": {status, summary},
-// "request_id"?: id}; {"hang": true} waits until aborted.
+// "request_id"?: id}; {"hang": true} waits until aborted; {"message": text, "cost"?: false} sends
+// an assistant message (with a cost unless cost is false) without finishing; {"busy": ms} keeps
+// streaming text for ms.
 async function runWork(steps) {
   workAborted = false
   for (const step of steps) {
@@ -100,6 +102,17 @@ async function runWork(steps) {
       await new Promise(resolve => setTimeout(resolve, 100))
     } else if (step.submit) {
       await bmRequest("submit_result", step.submit, step.request_id)
+    } else if (step.message !== undefined) {
+      send({type: "message_start", message: {role: "assistant", content: [], stopReason: "pending"}})
+      send({type: "message_update", usage, assistantMessageEvent: {type: "text_delta", contentIndex: 0, delta: step.message}})
+      send({type: "message_end", message: {role: "assistant", stopReason: "toolUse", ...(step.cost === false ? {} : {usage: finalUsage})}})
+    } else if (step.busy) {
+      const until = Date.now() + step.busy
+      while (Date.now() < until && !workAborted) {
+        send({type: "message_update", usage, assistantMessageEvent: {type: "text_delta", contentIndex: 0, delta: "."}})
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+      if (workAborted) return answer("aborted", "aborted")
     } else if (step.hang) {
       if (!workAborted) await new Promise(resolve => { abortWork = resolve })
       return answer("aborted", "aborted")

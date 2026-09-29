@@ -141,9 +141,56 @@ defmodule Bm.Runs do
 
   def get_attempt!(id), do: Repo.get!(Attempt, id)
 
-  @doc "Attempts that may still have a live pi process or be changing files."
+  @doc "Attempts that may still have a live pi process or be changing files (optionally of one workspace)."
   def list_in_flight_attempts do
     Repo.all(from a in Attempt, where: a.status in ^Attempt.in_flight_statuses(), order_by: a.id)
+  end
+
+  def list_in_flight_attempts(%Workspace{id: workspace_id}) do
+    Repo.all(
+      from a in Attempt,
+        join: t in assoc(a, :task),
+        join: r in assoc(t, :run),
+        where: r.workspace_id == ^workspace_id and a.status in ^Attempt.in_flight_statuses(),
+        order_by: a.id
+    )
+  end
+
+  @doc "The run and workspace an attempt belongs to."
+  def attempt_context(%Attempt{task_id: task_id}) do
+    task = Repo.get!(Task, task_id)
+    run = Repo.get!(Run, task.run_id)
+    %{task: task, run: run, workspace: Repo.get!(Workspace, run.workspace_id)}
+  end
+
+  @doc """
+  Adds spend to a run: `confirmed` USD, and `unknown` usage entries that came without a cost
+  (never counted as 0). Atomic in the database; returns the updated run.
+  """
+  def add_spend(%Run{id: id}, confirmed, unknown) do
+    from(r in Run, where: r.id == ^id)
+    |> Repo.update_all(
+      inc: [spent_usd: confirmed, spent_unknown: unknown],
+      set: [updated_at: DateTime.utc_now()]
+    )
+
+    Repo.get!(Run, id)
+  end
+
+  @doc "True when the run has a budget and its confirmed spend reached it."
+  def budget_exhausted?(%Run{budget_usd: nil}), do: false
+  def budget_exhausted?(%Run{budget_usd: budget, spent_usd: spent}), do: spent >= budget
+
+  @doc "Sets attempt fields without a status change (e.g. the verify command's process group)."
+  def update_attempt_fields(%Attempt{} = attempt, attrs) do
+    changeset = Attempt.fields_changeset(attempt, attrs)
+
+    from(a in Attempt, where: a.id == ^attempt.id)
+    |> Repo.update_all(
+      set: Map.to_list(Map.put(changeset.changes, :updated_at, DateTime.utc_now()))
+    )
+
+    Repo.get!(Attempt, attempt.id)
   end
 
   @doc "Adds `flag` to an attempt without changing its status (e.g. \"kept\")."

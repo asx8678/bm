@@ -306,6 +306,23 @@ becomes `paused`.
 Verify: insert a `running` attempt with a live `sleep` group and a modified file; `Recovery.run/0`
 kills the group and marks it `needs_reconciliation`; an untouched one becomes `failed`.
 
+**Status: Phase 5 done (2026-09-29).** Notes:
+- Budget: the run's budget is set with the first task (`budget_usd`); spend is added from the
+  worker's summaries as it arrives, and an assistant message that crosses the budget cancels the
+  attempt (`cancelled by BM: budget`). The plan's example (budget 0.005, second attempt refused)
+  was off: admission refuses only once confirmed spend has reached the budget.
+- Time limits: `max_duration` and `stall_timeout` are coordinator options; a running tool is never
+  a stall.
+- Revert: `Coordinator.revert/1` reverts the run's latest attempt if it left changes (held,
+  failed, cancelled, reconciliation or accepted); a reverted latest attempt means nothing is left
+  to revert.
+- Recovery runs at application start (off in tests) **and when a coordinator starts**, so a
+  coordinator that died mid-attempt is recovered by its successor. It stops the orphaned pi
+  adapter, ends the recorded groups of the current boot (pi's, bash commands', and the verify
+  command's, now recorded on the attempt), and marks the attempt. An interrupted attempt holds the
+  lane and the run stays paused until the user keeps or reverts it; then the run resumes.
+- Coordinator jobs are now linked tasks: they die with the coordinator.
+
 ---
 
 ## Phase 6: run page and milestone B gate

@@ -336,8 +336,12 @@ may have changed files is never retried automatically.
   attribution → verify command (own process group, timeout) → checkpoint; cancel and Keep; the
   lane is held after changes BM could not accept. Tested with the scripted fake pi.
 
-**Not implemented yet:** limits, revert of the latest attempt, recovery and the run page
-(milestone B), and the planner flow (milestone C). The coordinator is not yet reachable from the
+- Limits, revert, recovery (Phase 5): hard budget cap from confirmed spend (unknown tracked),
+  attempt time limit and stall timeout, revert of the latest attempt, and minimal recovery at
+  application start and coordinator start (`Bm.Workspace.Recovery`).
+
+**Not implemented yet:** the run page and the milestone B gate (Phase 6), and the planner flow
+(milestone C). The coordinator is not yet reachable from the
 UI. A7 (replay fixtures) is optional (D17).
 
 ---
@@ -435,6 +439,7 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/proc.ex`, `priv/pi/setsid.pl` | Process groups: launcher, members, group kill, `BM_PGID_FILE` |
 | `lib/bm/workspace/git.ex` | Snapshots, write sets, baseline, checkpoints, conditional restore |
 | `lib/bm/workspace/coordinator.ex` | Workspace coordinator: mutation lane and the attempt lifecycle |
+| `lib/bm/workspace/recovery.ex` | Recovery of attempts left in flight |
 | `lib/bm/policy.ex` | Decides the worker's edit/write paths and bash commands |
 | `lib/bm/prompts.ex` | Worker prompt |
 | `lib/bm/runs.ex`, `lib/bm/runs/` | Workspaces, runs, tasks, attempts (Postgres) and the attempt state machine |

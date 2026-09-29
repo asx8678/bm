@@ -34,6 +34,10 @@ defmodule Bm.Workspace.Coordinator do
     settle_interval: 200,
     settle_timeout: 10_000,
     verify_timeout: 600_000,
+    # Limits per attempt (5.2): total time running, and time without any pi event while no
+    # tool runs.
+    max_duration: 20 * 60_000,
+    stall_timeout: 3 * 60_000,
     prompt: &Bm.Prompts.worker/1
   ]
 
@@ -43,8 +47,9 @@ defmodule Bm.Workspace.Coordinator do
 
   @doc """
   Starts the coordinator for the checkout at `path` (its top level) unless it runs already.
-  Options (first start only): `:settle_interval`, `:settle_timeout`, `:verify_timeout` (ms) and
-  `:prompt` (a function from the task to the worker prompt).
+  Options (first start only): `:settle_interval`, `:settle_timeout`, `:verify_timeout`,
+  `:max_duration`, `:stall_timeout` (ms) and `:prompt` (a function from the task to the worker
+  prompt).
   """
   def ensure_started(path, opts \\ []) do
     with {:ok, root} <- Runs.canonical_path(path),
@@ -62,7 +67,8 @@ defmodule Bm.Workspace.Coordinator do
 
   @doc """
   Runs one task. `attrs`: task fields (`:title`, `:goal`, `:mutates`, `:writes`, `:done_when`,
-  optional `:key`), optional `:verify_command` (saved on the workspace) and `:run_goal`.
+  optional `:key`), optional `:verify_command` (saved on the workspace), and for a new run
+  `:run_goal` and `:budget_usd`.
   Returns `{:ok, attempt}` once admitted; the attempt continues asynchronously.
   """
   def run_task(path, attrs), do: call(path, {:run_task, Map.new(attrs)})
@@ -75,6 +81,12 @@ defmodule Bm.Workspace.Coordinator do
 
   @doc "Accepts the held attempt's changes as they are (recorded as unverified) and frees the lane."
   def keep(path), do: call(path, :keep)
+
+  @doc """
+  Reverts the run's latest attempt (held or not): its files go back to `tree_before`, only if
+  they still hold what the attempt left. `{:error, {:changed_since, paths}}` changes nothing.
+  """
+  def revert(path), do: call(path, :revert)
 
   @doc "Stops the coordinator and its worker."
   def stop(path) do
@@ -140,9 +152,18 @@ defmodule Bm.Workspace.Coordinator do
       settle_deadline: nil,
       # The one blocking job in progress: {task ref, kind}.
       job: nil,
-      verify_pgid: nil
+      verify_pgid: nil,
+      # Why BM cancels the attempt (budget, stall, max_duration); nil when the user cancels.
+      cancel_reason: nil,
+      # The worker's spend already added to the run, its running tool, and time bookkeeping.
+      spend_seen: %{confirmed: 0.0, unknown: 0},
+      tool: nil,
+      running_since: nil,
+      last_event_at: nil
     }
 
+    # Attempts left in flight by an earlier coordinator have nobody looking after them.
+    Bm.Workspace.Recovery.recover_workspace(state.workspace)
     {:ok, restore_lane(state)}
   end
 
@@ -164,6 +185,9 @@ defmodule Bm.Workspace.Coordinator do
         %{state | run: run, lane: if(held, do: {:held, held.id}, else: :free)}
     end
   end
+
+  # Changes BM could not accept wait for the user; so does every interrupted attempt.
+  defp holds?(%Attempt{status: :needs_reconciliation, flags: flags}), do: "kept" not in flags
 
   defp holds?(%Attempt{actual_writes: writes, flags: flags}),
     do: writes != [] and "kept" not in flags
@@ -199,13 +223,22 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call(:cancel, _from, %{phase: nil} = state),
     do: {:reply, {:error, :nothing_running}, state}
 
-  def handle_call(:cancel, _from, state), do: {:reply, :ok, request_cancel(state)}
+  def handle_call(:cancel, _from, state), do: {:reply, :ok, request_cancel(state, nil)}
 
   def handle_call(:keep, _from, %{lane: {:held, attempt_id}} = state) do
     {:reply, :ok, keep_attempt(state, Runs.get_attempt!(attempt_id))}
   end
 
   def handle_call(:keep, _from, state), do: {:reply, {:error, :nothing_held}, state}
+
+  def handle_call(:revert, _from, %{phase: nil} = state) do
+    case revert_latest(state) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:revert, _from, state), do: {:reply, {:error, :attempt_running}, state}
 
   ## Admission (4.4)
 
@@ -241,8 +274,13 @@ defmodule Bm.Workspace.Coordinator do
         phase: :starting,
         seen_running?: false,
         cancel?: false,
+        cancel_reason: nil,
         flags: [],
-        assignment: nil
+        assignment: nil,
+        spend_seen: %{confirmed: 0.0, unknown: 0},
+        tool: nil,
+        running_since: nil,
+        last_event_at: nil
     }
 
     coordinator = self()
@@ -262,13 +300,18 @@ defmodule Bm.Workspace.Coordinator do
 
   defp maybe_set_verify_command(workspace, _attrs), do: {:ok, workspace}
 
-  defp ensure_run(%{run: %{status: :active} = run}, _attrs), do: {:ok, run}
+  defp ensure_run(%{run: %{status: :active} = run}, _attrs) do
+    run = Runs.get_run!(run.id)
+    if Runs.budget_exhausted?(run), do: {:error, :budget_exhausted}, else: {:ok, run}
+  end
+
   defp ensure_run(%{run: %{status: :paused}}, _attrs), do: {:error, :run_paused}
 
   defp ensure_run(state, attrs) do
     with {:ok, baseline} <- Git.baseline(state.root) do
       Runs.start_run(state.workspace, %{
         goal: attrs[:run_goal] || attrs[:title] || "Task",
+        budget_usd: attrs[:budget_usd],
         baseline: %{
           "head" => baseline.head,
           "tree" => baseline.tree,
@@ -296,7 +339,8 @@ defmodule Bm.Workspace.Coordinator do
   ## Jobs
 
   defp start_job(state, kind, fun) do
-    %Task{ref: ref} = Task.Supervisor.async_nolink(Bm.TaskSupervisor, fun)
+    # Linked: if the coordinator dies, its jobs die with it (recovery handles the attempt).
+    %Task{ref: ref} = Task.Supervisor.async(Bm.TaskSupervisor, fun)
     %{state | job: {ref, kind}}
   end
 
@@ -318,20 +362,14 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Worker events and requests (4.5, 4.6)
 
-  def handle_info({:pi, id, :status, %{status: :running}}, %{agent_id: id} = state),
-    do: {:noreply, %{state | seen_running?: true}}
+  def handle_info({:pi, id, event, summary}, %{agent_id: id} = state) do
+    state =
+      %{state | tool: summary[:tool], last_event_at: now()}
+      |> track_spend(summary)
+      |> enforce_budget()
 
-  def handle_info(
-        {:pi, id, :status, %{status: :idle}},
-        %{agent_id: id, phase: :running, seen_running?: true} = state
-      ),
-      do: {:noreply, begin_settling(state)}
-
-  def handle_info(
-        {:pi, id, _event, %{status: :exited}},
-        %{agent_id: id, phase: :running} = state
-      ),
-      do: {:noreply, begin_settling(%{state | flags: ["pi_exited" | state.flags]})}
+    {:noreply, worker_event(state, event, summary)}
+  end
 
   def handle_info({:pi, _id, _event, _summary}, state), do: {:noreply, state}
 
@@ -347,15 +385,84 @@ defmodule Bm.Workspace.Coordinator do
     {:noreply, state}
   end
 
+  def handle_info(:limits_check, %{phase: :running, cancel?: false} = state),
+    do: {:noreply, check_limits(state)}
+
+  def handle_info(:limits_check, state), do: {:noreply, state}
+
   def handle_info(:settle_check, %{phase: :settling} = state), do: {:noreply, settle_check(state)}
   def handle_info(:settle_check, state), do: {:noreply, state}
 
   def handle_info({:verify_started, pgid}, %{phase: :verifying} = state) do
     if state.cancel?, do: Bm.Proc.terminate_groups([pgid])
-    {:noreply, %{state | verify_pgid: pgid}}
+
+    # Recorded so that recovery can end the verify command if this coordinator dies.
+    attempt =
+      Runs.update_attempt_fields(state.attempt, %{
+        verify: %{"pgid" => pgid, "boot_id" => Bm.Proc.boot_id()}
+      })
+
+    {:noreply, %{state | verify_pgid: pgid, attempt: attempt}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
+
+  defp worker_event(state, :status, %{status: :running}), do: %{state | seen_running?: true}
+
+  defp worker_event(%{phase: :running, seen_running?: true} = state, :status, %{status: :idle}),
+    do: begin_settling(state)
+
+  defp worker_event(%{phase: :running} = state, _event, %{status: :exited}),
+    do: begin_settling(%{state | flags: ["pi_exited" | state.flags]})
+
+  defp worker_event(state, _event, _summary), do: state
+
+  ## Limits (5.1, 5.2)
+
+  defp now, do: System.monotonic_time(:millisecond)
+
+  # Adds what the worker spent since the last summary to the run: confirmed USD, and usage
+  # entries without a cost as unknown (never as 0).
+  defp track_spend(state, %{spend: %{confirmed: confirmed, unknown: unknown}}) do
+    seen = state.spend_seen
+    delta = confirmed - seen.confirmed
+    unknown_delta = unknown - seen.unknown
+
+    if delta > 0 or unknown_delta > 0 do
+      run = Runs.add_spend(state.run, max(delta, 0.0), max(unknown_delta, 0))
+      %{state | run: run, spend_seen: %{confirmed: confirmed, unknown: unknown}}
+    else
+      state
+    end
+  end
+
+  defp track_spend(state, _summary), do: state
+
+  defp enforce_budget(%{phase: phase, cancel?: false} = state)
+       when phase in [:starting, :running] do
+    if Runs.budget_exhausted?(state.run), do: request_cancel(state, "budget"), else: state
+  end
+
+  defp enforce_budget(state), do: state
+
+  defp schedule_limits_check(state) do
+    interval = min(state.config.max_duration, state.config.stall_timeout) |> div(4)
+    Process.send_after(self(), :limits_check, interval |> min(1_000) |> max(10))
+    state
+  end
+
+  defp check_limits(state) do
+    cond do
+      now() - state.running_since >= state.config.max_duration ->
+        request_cancel(state, "max_duration")
+
+      state.tool == nil and now() - state.last_event_at >= state.config.stall_timeout ->
+        request_cancel(state, "stall")
+
+      true ->
+        schedule_limits_check(state)
+    end
+  end
 
   defp handle_request(state, request) do
     Bm.Bridge.handle(:worker, state.agent_id, request, state.assignment, fn request ->
@@ -439,7 +546,10 @@ defmodule Bm.Workspace.Coordinator do
         boot_id: Bm.Proc.boot_id()
       })
 
-    state = broadcast_attempt(%{state | attempt: attempt, phase: :running})
+    state =
+      %{state | attempt: attempt, phase: :running, running_since: now(), last_event_at: now()}
+      |> broadcast_attempt()
+      |> schedule_limits_check()
 
     cond do
       state.cancel? ->
@@ -755,6 +865,11 @@ defmodule Bm.Workspace.Coordinator do
   defp finish(state, status, attrs) do
     attempt = Runs.get_attempt!(state.attempt.id)
 
+    attrs =
+      if status == :cancelled and state.cancel_reason,
+        do: Map.put_new(attrs, :error, "cancelled by BM: #{state.cancel_reason}"),
+        else: attrs
+
     attempt =
       case Runs.transition_attempt(attempt, status, attrs) do
         {:ok, attempt} ->
@@ -790,7 +905,8 @@ defmodule Bm.Workspace.Coordinator do
         phase: nil,
         agent_id: nil,
         assignment: nil,
-        cancel?: false
+        cancel?: false,
+        cancel_reason: nil
     })
   end
 
@@ -810,16 +926,69 @@ defmodule Bm.Workspace.Coordinator do
     broadcast_attempt(%{state | attempt: attempt, task: task, lane: :free})
   end
 
-  # A failed or cancelled attempt's changes stay in the workspace; the attempt keeps its status.
+  # A failed, cancelled or interrupted attempt's changes stay in the workspace; the attempt keeps
+  # its status.
   defp keep_attempt(state, attempt) do
     {:ok, attempt} = Runs.add_attempt_flag(attempt, "kept")
-    broadcast_attempt(%{state | attempt: attempt, lane: :free})
+    broadcast_attempt(resume_if_reconciled(%{state | attempt: attempt, lane: :free}))
+  end
+
+  ## Revert (5.3)
+
+  defp revert_latest(%{run: nil}), do: {:error, :nothing_to_revert}
+
+  defp revert_latest(state) do
+    case Runs.list_run_attempts(state.run) do
+      [%Attempt{status: :reverted} | _] ->
+        {:error, :nothing_to_revert}
+
+      [%Attempt{actual_writes: [_ | _], tree_before: from, tree_after: expected} = attempt | _]
+      when is_binary(from) and is_binary(expected) ->
+        if Attempt.allowed?(attempt.status, :reverted),
+          do: restore_attempt(state, attempt),
+          else: {:error, {:not_revertable, attempt.status}}
+
+      _ ->
+        {:error, :nothing_to_revert}
+    end
+  end
+
+  defp restore_attempt(state, attempt) do
+    with :ok <-
+           Git.restore(state.root, attempt.actual_writes, attempt.tree_before, attempt.tree_after),
+         {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted) do
+      {:ok, task} = attempt.task_id |> Runs.get_task!() |> Runs.update_task_status(:cancelled)
+      state = %{state | attempt: attempt, task: task, lane: :free}
+      {:ok, broadcast_attempt(resume_if_reconciled(state))}
+    end
+  end
+
+  # A run paused by recovery resumes once no interrupted attempt waits for the user.
+  defp resume_if_reconciled(%{run: %{id: id}} = state) do
+    run = Runs.get_run!(id)
+
+    waiting? =
+      run
+      |> Runs.list_run_attempts()
+      |> Enum.any?(&(&1.status == :needs_reconciliation and "kept" not in &1.flags))
+
+    case run do
+      %{status: :paused} when not waiting? ->
+        {:ok, run} = Runs.resume_run(run)
+        %{state | run: run}
+
+      run ->
+        %{state | run: run}
+    end
   end
 
   ## Cancel (4.9)
 
-  defp request_cancel(state) do
-    state = %{state | cancel?: true}
+  # `reason`: nil when the user cancels; "budget", "stall" or "max_duration" when BM does.
+  defp request_cancel(%{cancel?: true} = state, _reason), do: state
+
+  defp request_cancel(state, reason) do
+    state = %{state | cancel?: true, cancel_reason: reason}
 
     case state.phase do
       # Handled when pi has started (job_done :start) or stopped (attribute).

@@ -342,6 +342,98 @@ defmodule Bm.Workspace.CoordinatorTest do
     end
   end
 
+  describe "budget (5.1)" do
+    test "a message crossing the budget cancels the attempt; admission then refuses",
+         %{repo: repo} do
+      run!(repo, [%{message: "thinking"}, %{hang: true}], budget_usd: 0.002)
+      {attempt, :free} = await_status(:cancelled)
+
+      assert attempt.error == "cancelled by BM: budget"
+      %{run_id: run_id} = Coordinator.state(repo)
+      assert %{spent_usd: 0.003} = Runs.get_run!(run_id)
+
+      assert {:error, :budget_exhausted} =
+               Coordinator.run_task(repo, %{title: "t", goal: "[]"})
+    end
+
+    test "usage without a cost counts as unknown, never as 0", %{repo: repo} do
+      run!(repo, [%{message: "no cost", cost: false}, %{write: ["a.txt", "a\n"]}, done()])
+      await_status(:accepted)
+
+      %{run_id: run_id} = Coordinator.state(repo)
+      # The final answer costs 0.003; the first message came without a cost.
+      assert %{spent_usd: 0.003, spent_unknown: 1} = Runs.get_run!(run_id)
+    end
+  end
+
+  describe "time limits (5.2)" do
+    @tag coordinator: [stall_timeout: 200]
+    test "a worker without events is cancelled as stalled", %{repo: repo} do
+      run!(repo, [%{hang: true}])
+      {attempt, _lane} = await_status(:cancelled)
+      assert attempt.error == "cancelled by BM: stall"
+    end
+
+    @tag coordinator: [stall_timeout: 200]
+    test "a running tool is not a stall", %{repo: repo} do
+      run!(repo, [%{bash: "sleep 0.6"}, done()])
+      assert {_attempt, :free} = await_status(:accepted)
+    end
+
+    @tag coordinator: [max_duration: 300]
+    test "a busy worker is cancelled after the maximum duration", %{repo: repo} do
+      run!(repo, [%{busy: 5_000}])
+      {attempt, _lane} = await_status(:cancelled)
+      assert attempt.error == "cancelled by BM: max_duration"
+    end
+  end
+
+  describe "revert (5.3)" do
+    test "reverts a held attempt and frees the lane", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, %{write: ["README.md", "changed\n"]}, done()],
+        verify_command: "false"
+      )
+
+      {held, {:held, _}} = await_status(:held)
+
+      assert :ok = Coordinator.revert(repo)
+      {reverted, :free} = await_status(:reverted)
+      assert reverted.id == held.id
+      refute File.exists?(Path.join(repo, "a.txt"))
+      assert File.read!(Path.join(repo, "README.md")) == "readme\n"
+      assert Runs.get_task!(held.task_id).status == :cancelled
+    end
+
+    test "reverts the latest accepted attempt", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()])
+      await_status(:accepted)
+
+      assert :ok = Coordinator.revert(repo)
+      await_status(:reverted)
+      refute File.exists?(Path.join(repo, "a.txt"))
+      assert {:error, :nothing_to_revert} = Coordinator.revert(repo)
+    end
+
+    test "refuses when a file changed since, and changes nothing", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], verify_command: "false")
+      {held, {:held, _}} = await_status(:held)
+      File.write!(Path.join(repo, "a.txt"), "the user's edit\n")
+
+      assert {:error, {:changed_since, ["a.txt"]}} = Coordinator.revert(repo)
+      assert File.read!(Path.join(repo, "a.txt")) == "the user's edit\n"
+      assert %{lane: {:held, id}} = Coordinator.state(repo)
+      assert id == held.id
+    end
+
+    test "is refused while an attempt runs", %{repo: repo} do
+      run!(repo, [%{hang: true}])
+      await_status(:running)
+      assert {:error, :attempt_running} = Coordinator.revert(repo)
+      Coordinator.cancel(repo)
+      await_status(:cancelled)
+    end
+  end
+
   defp eventually(fun, attempts \\ 100) do
     cond do
       fun.() -> true
