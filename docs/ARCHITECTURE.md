@@ -1,304 +1,387 @@
 # BM architecture
 
-Status: design, revised 2026-09-29. Milestone 1 experiment done (see [Verified facts](#11-verified-facts)).
+Revised 2026-09-29 (second revision, after an external design review).
+The prioritized roadmap is in [FEATURES.md](FEATURES.md).
 
-BM is a multi-agent coding system. The **BEAM** (this Phoenix app) plans, dispatches, supervises and
-limits the work and shows it in the browser. **pi** agents, driven over pi's RPC mode, do the coding,
-with **pi-fabric** kept installed for its in-agent features. Workers share **one checkout**; there
-are no git worktrees.
+BM is a multi-agent coding system. The **BEAM** (this Phoenix app) plans, authorizes, schedules,
+supervises, verifies and records work, and shows it in the browser. **pi** agents, driven over pi's
+RPC mode, do the coding. **pi-fabric** stays installed, unmodified, for its in-agent features.
+All agents share **one checkout**; there are no git worktrees.
+
+> **Core rule:** the planner *proposes* work; the BEAM *authorizes* effects; workers *report*
+> outcomes; *verification* decides acceptance.
+
+This document separates three kinds of statements. **Implemented** means code and tests exist.
+**Designed** means decided but not built. **Assumption** means it must still be qualified against
+real pi/Fabric before anything relies on it.
 
 ---
 
-## 1. Goals and principles
+## 1. Principles
 
-**Goal:** turn one request into a plan, run its independent parts on several pi agents at once,
-and deliver the combined result, with everything visible and controllable in the browser.
-
-**Principles**
-
-1. **Coordination by code, not by prompts.** The BEAM decides who works on what, when, and what
-   happens on failure. Models only plan, code and report.
-2. **Don't rebuild what pi or Fabric already do.** pi owns model calls, tools, sessions, retries and
-   compaction. Fabric owns in-agent work (code mode, speculation, argument repairs, background jobs).
-3. **One owner per job.** Fabric's own agent spawning is off in BEAM-managed processes; the BEAM is
-   the only thing that starts, stops or assigns agents.
-4. **Prevent conflicts early instead of resolving them late.** Files are claimed before they are
-   edited; overlapping tasks are not run at the same time.
-5. **Small, verifiable steps.** Every milestone works on its own and is checked against real pi.
+1. **Coordination by code, not by prompts.** Models plan, code and report. The BEAM decides.
+2. **Don't rebuild pi or Fabric.** pi owns model calls, tools, sessions, retries and compaction.
+   Fabric owns in-agent features (code mode, speculation, argument repairs).
+3. **One authority for agents.** Only the BEAM starts, assigns and stops agents. No hidden
+   recursive orchestration.
+4. **Conservative before parallel.** V1 allows parallel *read-only* work and exactly **one mutating
+   worker at a time**. More mutating workers come only after their safety tests pass.
+5. **Never touch the user's git state.** BM never moves your branch, never changes your index or
+   staged changes, never stashes, and never overwrites a file it didn't change.
+6. **Honest guarantees.** Each guarantee states what enforces it (section 8). Blocklists and prompts
+   are not sandboxes.
+7. **Smallest reliable slice first.** Every stage works on its own and is measured.
 
 ---
 
 ## 2. Decisions
 
-| # | Decision | Why | Rejected alternatives |
+| # | Decision | Why | Rejected |
 |---|---|---|---|
-| D1 | BEAM orchestrates, pi codes | pi+Fabric already handle editing, GLM quirks, zro auth; the BEAM is best at supervision, messaging and state | Pure-Elixir "nano" agents (would rebuild edit tools, retries, arg repair, zro auth); Fabric as orchestrator (file-based mesh, invisible to the BEAM) |
-| D2 | Keep Fabric installed and unmodified | In-agent features improve with every Fabric update; no fork to maintain; personal pi sessions unchanged | Stripping/forking Fabric |
-| D3 | Fabric's orchestration is **not used** in BEAM-managed processes | Avoids two coordinators and hidden agents/cost | Letting workers spawn Fabric sub-agents |
-| D4 | **No worktrees.** All workers share one checkout; the BEAM prevents conflicts with scheduling + file claims, and owns all git writes | Much simpler: no merge queue, no per-worker copies, no merge conflicts to resolve | Worktree per worker + merge queue (was in the earlier plan) |
-| D5 | Planner runs **without** Fabric | Fabric's code mode hides extension tools from the model, which would hide `add_task` from the stream | Planner with Fabric |
-| D6 | Streaming dispatch from `toolcall_delta` | GLM via zro uses pi's openai-completions path: every `toolcall_end` arrives only at the end of the message | Waiting for the whole plan |
-| D7 | Worker → BEAM results via `bm:` notify records | Tool calls made inside `fabric_exec` emit no RPC events (Fabric's trace drops their arguments) | Reading results from tool events |
-| D8 | Warm worker pool, reused with `new_session` | pi start costs 0.2–2 s and 134–405 MB; reuse avoids both | One process per task |
-| D9 | Postgres for runs/tasks history, ETS for live claims and counters | Durable, queryable history; fast hot state | Files (Fabric's approach) |
+| D1 | BEAM orchestrates; pi codes | pi+Fabric handle editing, GLM quirks and zro auth; the BEAM is best at supervision, state and messaging | Pure-Elixir LLM agents; Fabric as the orchestrator |
+| D2 | Fabric installed and unmodified; workers use a **controlled profile** | In-agent features improve with Fabric updates; no fork | Forking Fabric; managed-host mode for now (see D14) |
+| D3 | Shared checkout, **no worktrees**, no merge queue | Much simpler; conflicts are prevented by scheduling instead of merged | Worktree per worker |
+| D4 | **One active run per workspace** (V1) | Removes cross-run conflicts entirely | Cross-run admission logic |
+| D5 | **One mutation lane**: at most one mutating attempt at a time; read-only attempts run in parallel | Shell commands, formatters and generators can change files without any hook seeing it; serializing mutations makes attribution exact | Parallel writers guarded only by edit/write hooks |
+| D6 | Streaming produces **proposals**; only **accepted** tasks may mutate | Parseable partial output is not an authorization | Dispatching directly from `toolcall_delta` |
+| D7 | Authoritative operations use **dialogs** (pi waits for the BEAM's answer); telemetry uses notify | Gives request/response with durable acknowledgment over the existing channel | Fire-and-forget notify for everything |
+| D8 | Identity comes from the **channel** (the agent's own Port) plus the BEAM's active assignment, never from model-supplied ids | Models can't forge which process they are | Trusting ids in tool arguments |
+| D9 | **Separate planner and worker extensions** | Role-specific capabilities: planners propose, workers report only their own attempt | One extension registering all tools |
+| D10 | **Fresh pi process per attempt** in V1 | Start-up is 0.2–0.8 s with lean profiles; no reset qualification needed | Warm pool (optional later) |
+| D11 | Workspace **snapshots before and after** each mutating attempt give its actual write set | Attributes every mutation path (tools, shell, formatters), which hooks alone can't | Hook-only attribution |
+| D12 | Checkpoints are **private git commits under `refs/bm/…`**, built with a separate index | Records exactly what was verified without touching HEAD, the branch or the user's index | `git add <files> && git commit` (would include the user's staged changes) |
+| D13 | Postgres is authoritative; ETS holds live projections only | Recovery after a crash needs durable state | ETS-only claims and state |
+| D14 | Fabric's **managed-host mode** is noted, not used | It gives a clean provider boundary, but disables speculation, prewalk, repairs, entropy and native MCP, and requires the host to broker pi's core tools | Adopting it now |
+| D15 | Planner runs **without** Fabric | Simplicity: the planner writes no code. (Fabric hides extension tools by default, but `capture.keepVisible` could keep them visible, so this is a choice, not a necessity) | Planner with Fabric |
 
 Revisit a decision by adding a row, not by deleting one.
 
 ---
 
-## 3. System overview
+## 3. Structure
 
 ```
- Browser (LiveView + Svelte Flow)            CLI (later)
-        │  PubSub item events ▲  commands          │
-        ▼                     │                    ▼
-┌──────────────────────────────── BEAM ─────────────────────────────────────┐
-│  Bm.Runs ── Bm.Router ── Bm.Tasks (Postgres) ── Bm.Scheduler              │
-│     │            ▲ tool_call_ready                 │ file-disjoint batches │
-│     │            │                                 ▼                       │
-│  Planner agent   │                     Bm.Workers.Pool (warm pi workers)   │
-│  (Bm.Pi.Agent)───┘                        │   ▲                            │
-│                                           │   │ bm: notify / bm: dialogs   │
-│  Bm.Claims (ETS)  Bm.Git (only git writer)  Bm.Limits  Bm.Verifier  Actors │
-└───────────┬───────────────────────────────┼───┼────────────────────────────┘
-            │ RPC (JSONL over stdin/stdout)  │   │
-            ▼                               ▼   │
-   pi (planner): zro + bm_bridge      pi (worker ×N): zro + Fabric + bm_bridge
-                                                  + bm_claims + bm_guard + bm_report
-                                   all workers edit ONE shared checkout
+ Browser (LiveView + Svelte Flow)                     CLI (optional, later)
+        │ item events ▲  commands
+        ▼             │
+┌──────────────────────────────────── BEAM ─────────────────────────────────────┐
+│  Run coordinator (one per run)                                                  │
+│    goal · budget · accepted plan waves · task graph · planner inbox             │
+│        │ admits attempts                     ▲ results, events                  │
+│        ▼                                     │                                  │
+│  Workspace coordinator (one per checkout)                                       │
+│    run lock · mutation lane · baseline & dirty-file policy · snapshots          │
+│    attempt journal · verification barrier · checkpoints (refs/bm/…)            │
+│        │ starts / stops                                                         │
+│        ▼                                                                        │
+│  Agent adapter: Bm.Pi.Agent (one process per pi process)                        │
+│    Port · RPC · dialogs · session epoch · health · process-tree kill            │
+│                                                                                 │
+│  Limits (budget, timeouts, repeat guard) · Postgres (authoritative) · ETS       │
+└──────┬───────────────────────────────┬─────────────────────────┬────────────────┘
+       │ RPC                           │ RPC                     │ RPC
+  pi planner                    pi read-only worker(s)      pi mutating worker (≤1)
+  zro + bm_planner              zro + Fabric + bm_worker    zro + Fabric + bm_worker
+                                no edit/write/bash tools    + bm_guard
+                        all share ONE checkout
 ```
 
+Process boundaries follow state ownership: a run coordinator per run, one workspace coordinator
+per checkout, one adapter process per pi process. Other pieces (scheduler, validator, git helpers)
+are plain modules called by their owner, not separate processes.
+
 ---
 
-## 4. Who does what
+## 4. Roles and profiles
 
-### BEAM (this app)
+| Role | Extensions | Tools | Memory |
+|---|---|---|---|
+| Planner | zro, `bm_planner` | read-only pi tools + `propose_task`, `close_plan` | ~134 MB |
+| Read-only worker | zro, Fabric, `bm_worker` | `read`, `grep`, `find`, `ls` (+ Fabric code mode over them) + `submit_result` | ~260 MB |
+| Mutating worker | zro, Fabric, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash` + `submit_result` | ~260 MB |
+| Reviewer (optional) | zro, `bm_worker` | read-only + `submit_result` | ~134 MB |
 
-| Module | Status | Responsibility |
+Every agent is started with `--no-extensions` and an explicit `-e` list, and pinned model.
+**Profile check before assignment:** `bm_worker`/`bm_planner` report the effective model, active
+tools and versions on start; the adapter compares them with `get_state`. A mismatch fails closed
+(the agent is stopped and the attempt is not started). Fabric's own agent spawning must be off
+through configuration (`agents.maxDepth: 0` today); `PI_FABRIC_DEPTH` is only an extra guard, since
+it is an internal Fabric variable.
+
+---
+
+## 5. Channels between BEAM and pi
+
+| Direction | Mechanism | Used for | Reliability |
+|---|---|---|---|
+| BEAM → pi | RPC commands (`prompt`, `follow_up`, `abort`, `get_state`, `get_session_stats`) | Assign, deliver results, stop, inspect | pi responds with `success`; the adapter waits for it |
+| pi → BEAM | RPC session events | Live state, streamed proposals, UI | Best effort (telemetry) |
+| pi → BEAM | Extension **notify** `bm:{…}` | Progress hints, self-report | Best effort (telemetry) |
+| pi → BEAM → pi | Extension **dialog** with a `bm:` title; the BEAM answers with `extension_ui_response` | `propose_task`, `close_plan`, `submit_result`, permission questions | **Authoritative**: the BEAM persists, then answers; the tool returns the BEAM's answer |
+
+Dialog payload (JSON in the dialog message):
+
+```json
+{"v": 1, "op": "submit_result", "request_id": "<uuid from the extension>", "payload": {...}}
+```
+
+The BEAM adds the identity: which agent (from the Port), which run, task and attempt (from its
+active assignment), and the session epoch. Duplicate `request_id`s return the stored outcome.
+Dialogs with any other title go to the approval inbox (optional feature) or are declined.
+
+---
+
+## 6. Runs, plans and tasks
+
+**Plan progression.** A streamed `propose_task` call can populate the UI and trigger bounded
+read-only preparation. It becomes executable only through:
+
+```
+proposed ──▶ validated ──▶ accepted ──▶ scheduled
+```
+
+- *Validated*: schema, stable key, dependencies exist, no cycles, declared write set present for
+  mutating tasks, budget admits it, current planner generation.
+- *Accepted*: the BEAM persisted it and answered the planner's dialog. Accepted task definitions are
+  immutable; changes are new revisions.
+- Streamed arguments are reconciled with the final call; cancelled, malformed or superseded
+  proposals never become executable.
+- Plans arrive in **waves**. A run can't complete while planning is open: the planner calls
+  `close_plan`, or the run times out waiting for it.
+
+**Task vs attempt.** A task is the logical unit; an attempt is one execution of it.
+
+```
+queued ─▶ admitted ─▶ running ─▶ result_received ─▶ settling ─▶ verifying ─▶ accepted
+                 ╰──────────▶ blocked | failed | cancelled | needs_reconciliation
+```
+
+Only the BEAM moves an attempt to `accepted`. A worker's `submit_result` means "I think I'm done";
+it doesn't mean its tools stopped, files are stable or verification passed. Dependents consume
+**accepted** results.
+
+**Fencing.** Each attempt has an id and each agent adapter a session epoch. Messages carrying an
+old attempt or epoch are rejected. Fencing does not stop an OS process, so before a retry or
+reassignment the old process tree must be terminated or proven settled.
+
+**Results to the planner.** Receive → persist → settle and verify → queue → deliver as a
+`follow_up` at the planner's next boundary, batching related results. Routine results never
+interrupt the planner. The BEAM records *received*, *delivered* and *acknowledged* separately.
+Cancellation and safety events use a separate, prioritized path (`abort`).
+
+---
+
+## 7. Workspace coordinator
+
+**Baseline and dirty policy.** At run start the coordinator records HEAD and the content hash of
+every modified, staged or untracked (non-ignored) file. Those files are **user-owned** for the run:
+agents may read them; a task that needs to change one is blocked and reported. BM never stages,
+stashes or commits user changes.
+
+**Mutation lane.** At most one mutating attempt runs at a time (D5). Read-only attempts run in
+parallel up to a small limit.
+
+**Attribution by snapshot (D11).** Before a mutating attempt starts and after it settles, the
+coordinator snapshots the workspace (content hashes of tracked and untracked non-ignored files).
+The difference is the attempt's **actual write set**, whatever tool or command produced it. It is
+compared with the **declared** write set; writes outside it are flagged for review, and writes to
+user-owned files fail the attempt.
+
+**Settling.** An attempt is settled when pi reports `agent_settled`, no tool is running, and the
+pi process has **no descendant processes**. V1 disallows detached background work in workers.
+
+**Verification barrier.** With the mutation lane empty, the coordinator runs verification
+(`mix compile --warnings-as-errors` and the relevant tests), then records a **checkpoint**: a
+commit object built from the working tree with a *separate* git index and stored under
+`refs/bm/runs/<run>/<n>`. HEAD, the branch and the user's index are untouched. The checkpoint id is
+the exact state that was verified.
+
+**Rollback (V1).** Restore an attempt's attributed files from the previous checkpoint, only if
+their current content still equals what the attempt produced; created files are removed and deleted
+files restored under the same check. Any newer or external change stops the rollback and asks the
+user. Dependent accepted tasks block rollback of the task they depend on.
+
+**Freshness (from fx).** `bm_guard` records the content hash of every file the worker reads
+(whole-file freshness tracked separately from whether the model saw the whole file) and blocks
+`edit`/`write` when the file changed since, checking and writing as one step. New files, deletes,
+renames and symlinks resolve to canonical paths.
+
+---
+
+## 8. Guarantees (V1) and their enforcement
+
+| Guarantee | Enforced by | Not guaranteed |
 |---|---|---|
-| `Bm.Pi.Agent` | **exists** | One pi process per agent through a Port; RPC commands; event reduction; env; raw log |
-| `Bm.Pi.ToolCalls` | **exists** | Rebuilds tool calls from streamed deltas; reports each as soon as its JSON is complete |
-| `Bm.Pi.Transcript` | **exists** | Chat transcript from agent events |
-| `Bm.Runs` | new | One run per user request: goal, budget, status (active / blocked / budget-limited / complete / failed) |
-| `Bm.Router` | new | Turns each streamed `add_task` into a task record immediately |
-| `Bm.Tasks` | new | Task graph in Postgres: `depends_on`, declared `files`, status, attempts, result |
-| `Bm.Scheduler` | new | Picks runnable tasks: dependencies met **and** declared files disjoint from running tasks |
-| `Bm.Workers.Pool` | new | 2–6 warm workers (start with 2); `new_session` between tasks; stall watchdog |
-| `Bm.Claims` | new | ETS table of exclusive write claims `file → task`; answers `bm_claims` dialogs |
-| `Bm.Git` | new | The only process that runs git writes: per-task commits of claimed files, per-task revert |
-| `Bm.Verifier` | new | After a batch settles: `mix compile --warnings-as-errors` + tests; failures go back to the planner |
-| `Bm.Limits` | new | Run budget from pi's reported `usage.cost`, max workers, per-task timeout, repeat-call guard, stop-all |
-| `Bm.Actors` | later | `gen_statem` watchers (reviewer, supervisor) fed by worker events; reply silent / message / stop |
-| Item events (PubSub) | new | One event shape for UI/CLI: item started / delta / completed |
-| Web UI | partial | Canvas of agents, task board, approval inbox, per-task diff and revert, budget |
+| No two BM workers change files at the same time | Mutation lane (D5) | — |
+| Read-only workers can't change files through pi tools | Tool allowlist per profile | MCP tools or extensions outside the profile (profiles exclude them) |
+| Every change a mutating attempt makes is attributed to it | Before/after snapshots | Changes the *user* makes during that attempt are also attributed to it; the UI warns, and freshness checks catch edits to files the worker read |
+| User changes are never committed, stashed or overwritten by BM | Baseline policy, private-index checkpoints, conditional rollback | A shell command inside a mutating attempt could still overwrite a user-owned file; it is detected (snapshot) and the attempt fails, but the overwrite already happened |
+| Accepted means verified | Verification barrier + checkpoint id | Test coverage decides what "verified" catches |
+| Stale messages can't affect a new attempt | Attempt ids + session epoch | — |
+| Spending stays near the budget | Admission stops at the limit; hard limit aborts | Requests already in flight can exceed it; missing cost is "unknown", never 0 |
 
-### Our pi extensions (loaded with `-e` only in BEAM-managed processes)
-
-| Extension | Status | Responsibility |
-|---|---|---|
-| `bm_bridge` | **exists** (`priv/pi/extensions/bm_bridge.ts`) | `add_task` (planner), `submit_result` (worker); reports through `bm:` notify |
-| `bm_claims` | new | `tool_call` hook on `edit`/`write`: asks the BEAM for a write claim through a dialog; blocks the call when denied |
-| `bm_guard` | new | Stale-write check (file changed since this session read it → block); command rules (no `git commit/checkout/reset/stash/push`, no destructive commands; suggest an alternative) |
-| `bm_report` | new | On session start, reports model, active tools and versions so the BEAM can reject a misconfigured worker |
-
-### Fabric (unchanged, inside each worker)
-
-Code mode, speculative tool calls, argument repairs, background shell jobs, output limits, memory
-search, MCP. Its agents/actors/mesh/worktrees are not used by BEAM-managed processes.
-
-### pi core
-
-Model calls, `read`/`edit`/`write`/`bash`, sessions, retries, steering and follow-up queues, compaction.
-
----
-
-## 5. Communication channels (BEAM ⇄ pi)
-
-| Direction | Mechanism | Used for |
-|---|---|---|
-| BEAM → pi | RPC commands: `prompt`, `steer`, `follow_up`, `abort`, `new_session`, `get_state`, `get_session_stats` | Assign, correct, stop, reuse, inspect |
-| pi → BEAM | RPC session events (`message_update`, `tool_execution_*`, `agent_settled`, …) | Live state, streaming dispatch, UI |
-| pi → BEAM, fire-and-forget | Extension notify: `{"method":"notify","message":"bm:{\"event\":…,\"data\":…}"}` | Task registered, result, file touched, self-report |
-| pi → BEAM, **blocking** | Extension dialog (`confirm` / `input`) with a `bm:` title; the BEAM answers with `extension_ui_response` | Claims ("may I edit X?"), questions to the planner |
-
-Rules:
-
-- Dialogs whose title starts with `bm:` are answered by the BEAM automatically. Every other dialog
-  goes to the **approval inbox** in the browser (today they are auto-declined).
-- Every `bm:` payload is JSON: `{"event": string, "data": object}`.
-
----
-
-## 6. Process profiles
-
-| Role | Command | Memory (measured) |
-|---|---|---|
-| Planner | `pi --mode rpc --no-session --no-extensions -e <zro> -e bm_bridge --model zro/glm-5.3` | ~134 MB |
-| Worker | `pi --mode rpc --no-session --no-extensions -e <zro> -e <fabric> -e bm_bridge -e bm_claims -e bm_guard -e bm_report --model zro/glm-5.3` | ~260 MB (+ small extensions) |
-| Reviewer (later) | like the planner, read-only tools | ~134 MB |
-
-All BEAM-managed processes get `PI_FABRIC_DEPTH=99` (Fabric refuses to spawn children when the
-current depth ≥ `agents.maxDepth`). Pin the Fabric and pi versions used by workers; after any upgrade,
-rerun the experiment script before trusting the system again.
-
----
-
-## 7. Run lifecycle
-
-1. **Request.** The user sends a request; `Bm.Runs` creates a run with a goal and budget.
-2. **Small or large?** Small requests (a single change) go straight to one worker. Large ones go to
-   the planner.
-3. **Plan.** The planner registers tasks with `add_task(id, title, goal, files, depends_on, done_when)`.
-   `Bm.Pi.ToolCalls` reports each call as soon as its arguments are complete; `Bm.Router` stores it.
-4. **Schedule.** `Bm.Scheduler` starts every task whose dependencies are done and whose declared
-   files don't overlap a running task. Overlapping tasks wait.
-5. **Work.** A worker gets the task brief (goal, files, done_when, short project context). Before each
-   `edit`/`write`, `bm_claims` asks the BEAM for the file. The worker finishes with `submit_result`.
-6. **Commit.** `Bm.Git` commits exactly the files claimed by that task (`git add <files>`,
-   `git commit -m "<task id>: <title>"`) and releases the claims.
-7. **Verify.** When no task is mid-edit (a batch has settled), `Bm.Verifier` compiles and runs tests.
-   On failure, the output goes to the planner as a follow-up; it can add fix tasks.
-8. **Report.** Results reach the planner as `follow_up` messages, never by polling. The run ends
-   when all tasks are done and verification passes, or when a limit or the user stops it.
-
----
-
-## 8. Shared checkout: concurrency model
-
-Without worktrees, all workers see each other's changes as they happen. The rules below keep that safe.
-
-| Rule | Where enforced |
-|---|---|
-| Tasks declare the files they will touch; tasks with overlapping files never run at the same time | `Bm.Scheduler` |
-| Before writing a file, a worker must hold its claim; a claim is exclusive to one task | `bm_claims` + `Bm.Claims` |
-| Writing a file not declared by the task is allowed only if no other task holds or declared it; the BEAM records it | `Bm.Claims` |
-| A file changed since the worker read it cannot be written (another agent or the user changed it) | `bm_guard` stale-write check |
-| Workers never run git commands that change state; only `Bm.Git` does | `bm_guard` command rules |
-| Workers run only focused checks (compile, tests for their files); the full suite runs in `Bm.Verifier` after a batch | worker brief + `Bm.Verifier` |
-| A failed or aborted task is reverted by restoring only its claimed files | `Bm.Git` |
-
-Conflict cases:
-
-| Situation | Outcome |
-|---|---|
-| Worker B wants a file claimed by task A | Edit blocked; B is told who owns it. B continues other work or reports `blocked`; the BEAM reschedules B after A |
-| Worker's compile fails because of another worker's half-finished edit | Worker is told to check only its own files; the Verifier catches real breakage after the batch |
-| The user edits a file during a run | Stale-write guard blocks the worker's next write to that file; UI shows it. Recommended: pause the run before editing by hand |
-| Two tasks were declared disjoint but need the same undeclared file | The first claim wins; the second is blocked and rescheduled |
-
-Known costs of this model: less parallelism when tasks share files, and workers can observe each
-other's intermediate states. Both are accepted in exchange for having no merge step.
+Command policy in `bm_guard` blocks known-dangerous commands (git writes, `rm -rf` outside the
+checkout, publishing) and suggests alternatives. It is a safety net, not a sandbox.
 
 ---
 
 ## 9. Data model
 
-Postgres (Ecto):
+Postgres (authoritative):
 
-- `runs`: id, goal, status, budget_usd, spent_usd, started_at, finished_at
-- `tasks`: id, run_id, key (planner id), title, goal, files[], depends_on[], done_when, status
-  (queued / running / done / blocked / failed / reverted), attempts, worker, result (json), commit_sha
-- `items`: run_id, task_id, agent, kind, status, payload (json), inserted_at (the event log)
+- `workspaces`: canonical path, active_run_id (the run lock)
+- `runs`: goal, status, plan_open, budget, spent_confirmed, spent_unknown, baseline (json)
+- `tasks`: run, key, revision, definition (json), declared_writes, depends_on, status
+- `attempts`: task, number, role, agent, session_epoch, status, snapshot_before/after, actual_writes, result, checkpoint
+- `requests`: request_id, agent, op, payload, outcome (idempotency for dialogs)
+- `deliveries`: target, message, received_at, delivered_at, acknowledged_at
+- `checkpoints`: run, number, git ref, verified (json)
+- `items`: ordered event log for UI and recovery (run/task/attempt/item ids, sequence)
 
-ETS:
-
-- `claims`: file → {task_id, worker}
-- `limits`: run_id → counters (spent, tool calls, repeated-call streaks)
-
----
-
-## 10. Limits and safety
-
-- Run budget from pi's reported `usage.cost`; stop dispatching at the limit, abort at a hard limit.
-- Worker pool size capped by RAM (16 GB machine: 4–6 workers; start with 2).
-- Per-task timeout; stall watchdog (no events for N seconds → abort, then kill the process).
-- Repeat-call guard: the same tool call with the same arguments K times in a row → abort the task
-  (Fabric recorded a GLM case of 220 identical calls).
-- One stop button for everything.
-- Command rules in `bm_guard`; approvals for non-`bm:` dialogs in the browser inbox.
+ETS (projections): live agent status, lane occupancy, counters.
 
 ---
 
-## 11. Verified facts
+## 10. Limits and observability
 
-Measured on 2026-09-29 against pi 0.87.1, Fabric 0.97.0, GLM 5.3 via zro, 16 GB / 10-core Mac.
+- Budget: confirmed spend from pi's `usage.cost`; entries without cost are marked unknown.
+  Admission stops at the soft limit; the hard limit aborts running attempts.
+- Timeouts that distinguish provider wait, running tool, approval wait and true stall, instead of
+  one "no events" timeout.
+- Repeat-call guard (same call and arguments K times in a row → abort).
+- Bounded buffers: RPC line buffer, pending requests, transcripts, logs, event queues.
+- Raw RPC logs are sensitive (prompts, paths, file contents); replay fixtures are sanitized.
+
+---
+
+## 11. Recovery
+
+After a BEAM restart or an uncertain failure: freeze admission for the workspace, stop or confirm
+the state of every recorded pi process, compare the workspace with the last snapshot and
+checkpoint, then decide per attempt: resume, retry (only if it provably changed nothing), revert
+(if the conditional rollback applies) or mark `needs_reconciliation` for the user. An attempt that
+may have changed files is never retried automatically.
+
+---
+
+## 12. Status
+
+**Implemented** (tests use a scripted fake pi; live runs as noted):
+
+- `Bm.Pi.Agent`: Port, RPC events, transcript, extra env, raw log, `new_session`, abort. Known gaps
+  fixed in stage A: `new_session` replies before pi confirms; usage drops cost and turns missing
+  values into 0; unbounded buffers and transcript.
+- `Bm.Pi.ToolCalls`: assembles streamed tool calls. Gap: reports calls as ready before any
+  validation (to become "proposed").
+- `bm_bridge`: `add_task` and `submit_result` in one extension, fire-and-forget. To be replaced by
+  role-specific `bm_planner` / `bm_worker` with dialogs.
+- Chat page and canvas with one agent node.
+
+**Designed, not implemented:** everything in sections 5–11 not listed above.
+
+**Assumptions to qualify (stage A):** see section 14, items 1–6.
+
+---
+
+## 13. Verified facts
+
+Measured 2026-09-29: pi 0.87.1, Fabric 0.97.0 (source read at 0.98.1), GLM 5.3 via zro, 16 GB Mac.
 
 | Fact | Evidence |
 |---|---|
-| pi RPC process memory: full setup 405 MB, zro+Fabric 259 MB, zro only 134 MB | `ps` RSS of idle processes |
-| Startup to first `get_state` response: full setup ~2.1 s, planner profile 0.2 s, worker profile 0.8 s | experiment timings |
-| Streaming dispatch works: 6 `add_task` calls ready at 2.4 / 3.8 / 5.0 / 6.2 / 7.5 / 8.5 s; message ended ≈ 8.5 s | experiment A |
-| zro GLM runs on pi's `openai-completions` API (all `toolcall_end` at the end) | raw RPC log; `packages/ai/src/api/openai-completions.ts:680` |
-| zro reports prompt-cache reads (`cache_read` ≈ 10k tokens) although pi's model metadata says no cache | experiment A usage |
+| pi RPC memory: full setup 405 MB, zro+Fabric 259 MB, zro only 134 MB | `ps` RSS |
+| Start-up to first response: full 2.1 s, planner profile 0.2 s, worker profile 0.8 s | experiment |
+| zro GLM runs on pi's `openai-completions` API; all `toolcall_end` arrive at the end | raw log; `openai-completions.ts:680` |
+| 6 streamed `add_task` calls complete at 2.4–8.5 s; message ended ≈ 8.5 s | experiment A |
+| zro reports prompt-cache reads (~10k tokens) despite pi's metadata | experiment A |
 | Extension tools called inside `fabric_exec` emit no RPC events; Fabric's trace has `args: {}` | experiment B |
-| `bm:` notify from inside `fabric_exec` reaches the BEAM | experiment B2 |
-| `new_session` resets a warm process | experiment C |
-| The user's Fabric config has `agents.maxDepth: 0`; `PI_FABRIC_DEPTH` ≥ maxDepth also blocks spawning | error text + `agents/manager.ts` |
-| pi `tool_call` hooks can block a call; `confirm` dialogs return `confirmed: true/false` | pi `docs/extensions.md`, `docs/rpc-extension-ui.md` |
-
-Experiment scripts live outside the repo; recreate them from this table if needed. The agent's
-`raw_log` option records real RPC streams for replay tests.
-
----
-
-## 12. Open questions (verify before relying on them)
-
-1. Can a `tool_call` hook in `bm_claims` await a dialog, and does it fire for `pi.edit` calls made
-   inside `fabric_exec`? (Fabric's docs say it replays pi's tool lifecycle for nested calls.)
-2. Dialog round-trip latency per edit: acceptable, or should claims be granted per task up front?
-3. How well does GLM 5.3 declare `files` in `add_task`? Scheduling quality depends on it.
-4. Does the stale-write guard see edits made through Fabric's code mode?
-5. Do workers obey "no git writes" and "focused checks only", or does `bm_guard` block them often?
-6. Real cost and time per run versus a single pi agent on the same task (the go/no-go metric).
-7. Is forking workers from the planner's session worth it now that zro caches? Measure later.
-8. Which Fabric settings in the user's `fabric.json` (approvals, `prewalk.alwaysRearm`, mesh) affect workers?
+| A notify sent from inside `fabric_exec` reaches the BEAM | experiment B2 |
+| `new_session` over RPC succeeds on a warm process | experiment C |
+| User's Fabric config has `agents.maxDepth: 0` | Fabric error text |
+| pi `tool_call` hooks can block; `confirm` dialogs return `confirmed`; `input` returns text | pi docs |
+| Fabric hides extension tools by default; `capture.keepVisible` can keep them visible | Fabric `docs/configuration.md` |
+| Fabric managed-host v1 disables speculation, prewalk, repairs, entropy and native MCP | Fabric `docs/providers.md` |
+| Running Fabric in the checkout writes `.pi/fabric/` (mesh state, MCP cache) even with agents off | observed; now in `.gitignore` |
+| A checkpoint built with a separate index (`GIT_INDEX_FILE` + `read-tree HEAD` + `add -A` + `commit-tree` + `update-ref refs/bm/…`) leaves HEAD, the branch and the user's staged changes untouched and records the full working tree | throwaway-repo test with a staged and an untracked user file |
 
 ---
 
-## 13. Milestones
+## 14. Open questions (qualify in stage A)
 
-The full prioritized list is in [FEATURES.md](FEATURES.md); milestones group its items.
-
-| # | Scope (FEATURES.md items) | Done when |
-|---|---|---|
-| M1 | P0 0.4–0.7, 0.12, 0.13: runs, router, tasks, pool of 2 workers, results as follow-ups, basic limits, canvas | A real request is planned, run on 2 workers and summarized within budget, with every task visible |
-| M2 | P0 0.8–0.11: scheduler file rules, `bm_claims`, `Bm.Git` per-task commits and revert, `Bm.Verifier` | Parallel tasks on one checkout never write the same file; a failed task is reverted cleanly |
-| M3 | P1: guards, approval inbox, diff view, small-request shortcut, self-check, run status UI, command rules, pinned versions, replay tests, history | Safe to leave running on a real repository |
-| M4 | P2/P3 items, only where M1–M3 usage shows the need | Driven by real use |
-
-Already done: `Bm.Pi.Agent` with env/raw log/`new_session`, `Bm.Pi.ToolCalls`, `bm_bridge`, the
-experiment (24 tests pass).
-
----
-
-## 14. Non-goals
-
-- Git worktrees and merge queues.
-- Re-implementing Fabric's in-agent features or pi's tools in Elixir.
-- Pure-Elixir LLM agents.
-- Many tiny LLM agents; parallelism is bounded by RAM, provider limits and budget.
-- Cross-machine distribution (possible later with BEAM distribution; not designed yet).
+1. Does a dialog from inside a nested `fabric_exec` call reach the BEAM and return its answer?
+2. Can `bm_guard`'s `tool_call` hook await, and does it fire for `pi.edit`/`pi.write`/`pi.bash`
+   called inside `fabric_exec`? Denied calls must produce no change.
+3. If a required hook is missing (runner absent, extension failed to load), does protection fail closed?
+4. Does restricting tools with `--tools` also restrict Fabric's nested calls?
+5. Can background shell jobs be prevented or detected in worker profiles?
+6. Which settings in the user's `fabric.json` (approvals, `prewalk.alwaysRearm`, mesh, MCP) affect
+   workers, and can the profile check see them?
+7. How well does GLM 5.3 declare write sets? (Affects scheduling in stage D.)
+8. Cost, time and success versus a single pi on the same tasks (the benchmark in stage C).
 
 ---
 
-## 15. Code map
+## 15. Non-goals
+
+Git worktrees and merge queues; pure-Elixir LLM agents; re-implementing Fabric's in-agent features
+or pi's tools; many tiny LLM agents; distributed execution, councils, learned memory and extra
+supervisor agents before the basic system is reliable.
+
+---
+
+## 16. Code map
 
 | Path | What |
 |---|---|
-| `lib/bm/pi.ex` | Public API: `ensure_agent`, `prompt`, `new_session`, `abort`, `snapshot`, `subscribe`, `stop` |
-| `lib/bm/pi/agent.ex` | RPC agent process |
+| `lib/bm/pi.ex` | Public API for agents |
+| `lib/bm/pi/agent.ex` | Agent adapter (RPC process) |
 | `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler |
 | `lib/bm/pi/transcript.ex` | Transcript reducer |
-| `priv/pi/extensions/bm_bridge.ts` | `add_task`, `submit_result` |
-| `lib/bm_web/live/home_live.ex` | Chat + canvas page |
-| `assets/svelte/` | Svelte Flow canvas and agent node |
-| `test/support/fake_pi.mjs` | Scripted pi stand-in for tests |
-| `config/config.exs` | `Bm.Pi` command and cwd |
+| `priv/pi/extensions/bm_bridge.ts` | Current bridge (to be split into `bm_planner` / `bm_worker`) |
+| `lib/bm_web/live/home_live.ex`, `assets/svelte/` | Chat page and canvas |
+| `test/support/fake_pi.mjs` | Scripted pi stand-in |
 
-## 16. References
+References: pi RPC and extension docs; pi-fabric (MIT); Codex (Apache-2.0) multi-agent tools,
+item protocol, `execpolicy`; fx (Apache-2.0) read tracking and parallel read-only prefix; pi's
+durable runtime spec (Pico5).
 
-- pi RPC: `docs/rpc.md`, `docs/rpc-commands.md`, `docs/json.md`, `docs/rpc-extension-ui.md`, `docs/extensions.md` in the pi package.
-- pi-fabric (MIT): agents/actors/mesh docs, `docs/entropy.md`, `docs/speculation.md`.
-- Codex (Apache-2.0): multi-agent v2 tools, thread/turn/item protocol, `execpolicy`, memory pipeline.
-- fx (Apache-2.0): stale-read tracking, parallel read-only prefix, child permission ceiling.
-- pi durable runtime spec (Pico5): tasks as durable state machines, the "effect sandwich".
+---
+
+## Appendix A: design review (2026-09-29)
+
+An external review ("architecture hardening and implementation brief") was checked against the code
+and the Fabric source before this revision. Its core rule was adopted (see the top of this document).
+
+**Findings verified in the code (all confirmed):**
+
+| Finding | Location | Stage |
+|---|---|---|
+| Streamed calls become actionable as soon as their JSON parses, before validation | `lib/bm/pi/tool_calls.ex` (`JSON.decode(call.buffer)`) | A4 |
+| The bridge answers "queued"/"recorded" without a BEAM acknowledgment | `priv/pi/extensions/bm_bridge.ts` (`report(...)` then `return`) | A3 |
+| Planner and worker tools are registered in one extension | `bm_bridge.ts` (`registerTool` ×2) | A2 |
+| `new_session` replies `:ok` before pi confirms | `lib/bm/pi/agent.ex` (`handle_call(:new_session, …)`) | A1 |
+| Usage summaries drop `cost` and turn missing values into 0 | `agent.ex` (`usage_summary/1`); pi sends `usage.cost.total` | A1 |
+| Line buffer, transcript and raw log are unbounded | `agent.ex` | A1 |
+| `git add <files> && git commit` would include the user's staged changes | design (old §7) | replaced by D12 |
+| edit/write hooks miss shell, formatter, generator, MCP and background mutations | design (old §8) | replaced by D5 + D11 |
+
+**Findings verified in Fabric:** `capture.keepVisible` can keep extension tools visible (D15 corrected);
+managed-host v1 exists and disables speculation, prewalk, repairs, entropy and native MCP (D14);
+`PI_FABRIC_DEPTH` is an internal variable, so configuration plus a profile check is the real guard.
+
+**Adopted as proposed:** proposed → validated → accepted; task vs attempt with fencing; settle before
+verify; verification barrier bound to a recorded state; non-interrupting result delivery with
+received/delivered/acknowledged; conditional rollback; honest guarantees; missing cost is unknown;
+bounded buffers; sanitized replay fixtures; staged roadmap with exit gates; benchmark against a
+single pi.
+
+**Simplified for a single-user V1:**
+
+| Review proposal | V1 equivalent |
+|---|---|
+| Cross-run admission in a workspace coordinator | One active run per workspace (lock) |
+| General versioned envelopes with session epochs | `bm:` dialogs with `v`, `op`, `request_id`; identity from the Port; attempt id + session epoch added by the BEAM |
+| Estimated in-flight spend, reservations, pricing confidence | Confirmed spend + unknown; estimates optional |
+| Per-task undo with dependency semantics | Verified checkpoints + conditional rollback of one attempt |
+| Warm pool as part of the core | Fresh process per attempt; warm reuse optional |
+| Claims as the V1 conflict mechanism | One mutation lane + snapshots; claims move to the optional "two mutating workers" feature |
