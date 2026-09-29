@@ -99,7 +99,7 @@ defmodule Bm.Workspace.RecoveryTest do
 
   describe "a coordinator killed mid-attempt" do
     setup %{repo: repo} do
-      opts = [settle_interval: 50, prompt: &Bm.Workspace.CoordinatorTest.fake_prompt/1]
+      opts = [settle_interval: 50, prompt: &Bm.FakePi.prompt/1]
       {:ok, pid} = Coordinator.ensure_started(repo, opts)
       :ok = Coordinator.subscribe(repo)
       on_exit(fn -> Coordinator.stop(repo) end)

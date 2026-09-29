@@ -12,10 +12,8 @@ defmodule Bm.Workspace.CoordinatorTest do
     settle_interval: 50,
     settle_timeout: 1_000,
     verify_timeout: 5_000,
-    prompt: &__MODULE__.fake_prompt/1
+    prompt: &Bm.FakePi.prompt/1
   ]
-
-  def fake_prompt(task), do: "work:" <> task.goal
 
   setup %{tmp_dir: dir} = context do
     repo = Path.join(dir, "repo")
