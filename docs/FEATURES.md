@@ -20,13 +20,13 @@ else is optional, including features that make BM faster or nicer but not safer.
 | Question | Core answer | Optional later |
 |---|---|---|
 | How many writers? | One mutation lane, one attempt at a time | Two or more mutating workers |
-| Read-only helpers? | None in core: tasks run sequentially | Parallel read-only workers (only if the benchmark shows a gain) |
+| Read-only helpers? | None in core: tasks run sequentially; planner and reader get a guarded read-only bash | Parallel read-only workers (only if the benchmark shows a gain) |
 | How are changes attributed? | Before/after snapshots of the workspace | + freshness tracking of reads |
 | How do we undo? | Conditional revert of the **latest** attempt | Per-task rollback with dependency handling |
 | How do we stop runaways? | Hard budget cap, attempt time limit, stall timeout | Soft limits, per-state timeouts, repeat-call guard, in-flight estimates |
 | What after a crash? | Minimal recovery: kill leftovers, compare with snapshot, mark for the user | Automatic resume |
 | What does the user see? | Run page: tasks, attempts, diffs, verification, spend, Stop / Keep / Revert | Live canvas, history, search, CLI |
-| Planner? | One planner, sequential tasks, plan waves, `close_plan` | Reviewer, supervisor, `ask_planner`, council |
+| Planner? | One planner process, sequential tasks, plan waves, `close_plan`, per-task check | Reviewer, supervisor, `ask_planner`, council |
 
 ---
 
@@ -73,20 +73,35 @@ untouched, a denied or out-of-scope write fails the attempt, a failing verificat
 until Keep/Revert, and a restart mid-attempt ends in `needs_reconciliation`, not a retry. The
 benchmark result is recorded.
 
+### Milestone B.5: hardening before the planner
+
+Added after the milestone B review (2026-09-29); plan phase 6.6.
+
+| # | Feature | Size | Plan step |
+|---|---|---|---|
+| B11 | **UI checked in a browser**; prototypes (`/chat`, flow canvas) removed | S | 6.6.1–6.6.2 |
+| B12 | **Baseline verification** at run start, shown when the checkout already fails | S | 6.6.3 |
+| B13 | **Harder benchmark** with user-owned and generated files; write-set declaration measured (open question 7) | S | 6.6.4 |
+| B14 | **Guarded read-only bash** for planner and reader (policy in read-only mode + snapshot check) | M | 6.6.5 |
+
 ### Milestone C: planner, sequential tasks
 
 | # | Feature | Size | Plan phase |
 |---|---|---|---|
-| C1 | **Plan validation** (schema, keys, dependencies, cycles, write sets, user-owned files, budget) | S | 7 |
-| C2 | **Planner session**: `propose_task` → accepted/rejected, `close_plan`, plan waves | M | 7 |
+| C1 | **Plan validation** (schema, keys, dependencies, cycles, write sets, user-owned files, budget, check command) | S | 7 |
+| C2 | **Planner process** per run: `propose_task` → accepted/rejected, `close_plan`, plan waves; planner spend in the budget; a planner that changes files holds the run | M | 7 |
 | C3 | **Sequential scheduler**: next task whose dependencies are accepted | S | 7 |
-| C4 | **Result delivery** to the planner as `follow_up` (received / delivered recorded); bounded retries | M | 7 |
-| C5 | **Run page with plan**: planner transcript, task list with dependencies and states | M | 8 |
-| C6 | **Benchmark**: plain pi vs BM planner on the same goals | S | 8 |
+| C4 | **Dependency context**: workers get the summary and write set of accepted dependencies | S | 7 |
+| C5 | **Result delivery** to the planner as `follow_up` (received / delivered recorded); one re-plan per failed task | M | 7 |
+| C6 | **Task check**: optional per-task command run after the workspace verify; both must pass | S | 7 |
+| C7 | **Runaway planner limits** (rejections per wave, waves per run, plan timeout) and **planner recovery** (run paused, Resume planning / Finish) | S | 7 |
+| C8 | **Run page with plan**: goal form, planner transcript, task list with dependencies and states | M | 8 |
+| C9 | **Benchmark**: plain pi vs BM planner on multi-step goals touching user-owned files | S | 8 |
 
-**Exit gate:** cancelled or invalid planner output never causes writes; duplicate deliveries have
-one effect; a run finishes only when the plan is closed and all tasks are terminal; the benchmark
-is recorded and decides whether parallel read-only workers are worth building.
+**Exit gate:** cancelled or invalid planner output never causes writes; a planner that writes
+holds the run; duplicate deliveries have one effect; a run finishes only when the plan is closed
+and all tasks are terminal; a BEAM restart during planning leaves the run paused, not retried;
+the benchmark is recorded and decides whether parallel read-only workers are worth building.
 
 ---
 

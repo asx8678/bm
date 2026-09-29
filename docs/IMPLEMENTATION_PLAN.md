@@ -24,8 +24,9 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 4 | Workspace coordinator | 4.1–4.9 | one task end-to-end with the fake pi |
 | 5 | Limits, revert, recovery | 5.1–5.4 | runaways stopped; crashes end in reconciliation |
 | 6 | Run page and milestone B gate | 6.1–6.5 | **Milestone B exit gate** (live) + mini-benchmark |
-| 7 | Planner | 7.1–7.6 | goal → plan → sequential tasks with the fake pi |
-| 8 | Plan UI and milestone C gate | 8.1–8.3 | **Milestone C exit gate** (live) + benchmark |
+| 6.6 | Hardening before the planner (review of 2026-09-29) | 6.6.1–6.6.5 | UI seen, harder benchmark, write-set data, baseline verify |
+| 7 | Planner | 7.1–7.9 | goal → plan → sequential tasks with the fake pi |
+| 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 
 ---
 
@@ -381,44 +382,134 @@ or fix what the numbers show first.
 
 ---
 
+## Phase 6.6: hardening before the planner
+
+Added after a review of milestone B (2026-09-29). Each item either removes a known gap that the
+planner would build on, or produces data that Phase 7's rules depend on. Do these before 7.1.
+
+**6.6.1 See the UI.** Start the dev server, run one real task in a scratch repo through the Tasks
+page, and walk the run page (attempts, diff, verification output, Stop / Keep / Revert / Finish)
+in a browser. Fix layout and state bugs found. Nothing in Phase 6 was ever looked at.
+Verify: screenshots of the Tasks page and of a run page with a held attempt attached to the
+commit message or docs; the LiveView tests still pass.
+
+**6.6.2 Remove the prototypes.** Delete `ChatLive` (`/chat`), `FlowLive` and the Svelte Flow
+assets they need, and their routes. They are unguarded and confuse what BM guarantees; the canvas
+is an optional feature and will be rebuilt on the run data if it is ever wanted.
+Verify: `mix precommit` passes; the router has only `/`, `/runs/:id` and the dev routes.
+
+**6.6.3 Baseline verification.** At run start, after the baseline snapshot, run the workspace's
+verify command once and store the result on the run (`baseline_verify`). The run page shows
+"your checkout already fails verification" with the output when the exit is not 0. Attempts still
+run; the user decides. Reason: verification runs on the shared checkout including the user's
+uncommitted work, so a broken checkout would hold every attempt with a misleading message.
+Verify: a scratch repo whose check fails before any task shows the warning; one that passes
+does not.
+
+**6.6.4 Harder single-task benchmark and write-set data (live).** Extend `mix bm.bench` with
+three harder tasks: one that spans three files, one that needs a file the user has dirty (the
+right outcome is `blocked`), and one that needs a generated file (a formatter or a build step
+changes files that the worker did not name). Run each three times per mode. Record, per BM
+attempt, the declared write set against the actual write set: exact, subset, superset, disjoint.
+Verify: `docs/BENCHMARK.md` has the new table and a paragraph answering open question 7 (how
+well the model declares write sets). **Decision point:** the answer sets the rule in 7.1: if the
+model is mostly exact or a subset, keep `writes` required for mutating tasks; if not, make it
+advisory (planner may omit it; the flag stays) and record the decision in ARCHITECTURE.md §2.
+
+**6.6.5 Guarded read-only bash.** The planner and the reader need to run things (`git log`, the
+test suite, a build) to plan and to analyse; today they have only `read`, `grep`, `find` and
+`ls`. Give both profiles `bash` behind `bm_guard` with the policy in **read-only mode**
+(`Bm.Policy.authorize/3` with `mode: :read_only`): every redirect target, every write command
+(`tee`, `sed -i`, `cp`, `mv`, `rm`, `install`, `ln`, `mkdir`, `touch`, `chmod`) and every git
+write is refused; unknown commands are allowed. The guarantee stays the same as for the reader
+today: the policy is a safety net, and the snapshot after the session fails the attempt (or, for
+the planner, holds the run) if any file changed. The profile check lists `bash` for both roles.
+Verify: policy tests for read-only mode; a reader attempt whose fake pi runs `echo x > f` is
+refused, and one that writes through an interpreter is failed by attribution with the file
+listed; the live qualification suite passes with the new profiles.
+
+---
+
 ## Phase 7: planner (fake pi)
+
+Revised 2026-09-29 (see the Phase 6.6 introduction). The planner is **its own process**
+(`Bm.Workspace.Planner`, one per run, under `Bm.Workspace.Supervisor`), not part of the
+coordinator: the coordinator keeps owning the lane and the attempt state machine, and the planner
+process owns the planner pi session, plan validation calls, the task graph and result delivery.
+They talk by messages; the coordinator never calls the model. Reason: the coordinator is already
+1,000 lines with one state machine, and a second one inside it would not be testable on its own.
 
 **7.1 Plan validation (pure).** `Bm.Plan.validate(proposal, ctx)` with `ctx = %{tasks,
 user_owned, root, budget_left, plan_open}`: required fields; `key` format and unique in the run;
-`depends_on` refers to existing keys; no cycles; `writes` required and non-empty when `mutates`;
-writes inside the root and not user-owned; plan must be open.
+`depends_on` refers to existing keys; no cycles; `writes` inside the root and not user-owned;
+`writes` required and non-empty when `mutates` **unless 6.6.4 made it advisory**; optional
+`check` (a shell command, see 7.7) is a non-empty string; plan must be open.
 Returns `{:ok, task_attrs}` or `{:error, reason}` with a reason the model can act on.
 Verify: table-driven tests for each rule, including a three-task cycle.
 
 **7.2 Fake planner.** `fake_pi.mjs` gains `plan:<json>`: sends one `bm:propose_task` dialog per
-listed task, then `bm:close_plan`; on each `follow_up` it can run the next scripted wave.
+listed task, then `bm:close_plan`; on each `follow_up` it can run the next scripted wave. It can
+also be told to propose the same invalid task N times, to test 7.8.
 Verify: `pi_test.exs` sees the dialogs in order.
 
-**7.3 Planner session.** `Bm.Runs.start_goal(path, goal)` starts the run with `plan_open = true`,
-starts the planner (`Profile.start(…, :planner)`, owner = coordinator) and prompts it with
-`Bm.Prompts.planner(goal, workspace)`. `propose_task` → validate → insert task (`queued`) → reply
-`accepted` or `rejected` with the reason; `close_plan` → `plan_open = false`.
+**7.3 Planner process.** `Bm.Runs.start_goal(path, goal, opts)` starts the run with
+`plan_open = true` and starts `Bm.Workspace.Planner` for it. The planner process starts pi
+(`Profile.start(…, :planner)`, owner = the planner process), takes a snapshot before the session,
+and prompts it with `Bm.Prompts.planner(goal, workspace)`. `propose_task` → validate → insert
+task (`queued`) → reply `accepted` or `rejected` with the reason; `close_plan` →
+`plan_open = false`. The planner's usage events count against the run's budget exactly like an
+attempt's (`spent_usd`, `spent_unknown`); the cap stops the planner too. When the planner
+session ends, a snapshot after it is compared with the one before: any change holds the run
+(`needs_reconciliation` on the run, shown to the user) — the planner writes no code.
 Verify: a scripted plan with one invalid task yields two queued tasks and one rejection reply;
-streamed `propose_task` events alone (without the dialog) create no task.
+streamed `propose_task` events alone (without the dialog) create no task; a fake planner that
+reports usage moves the run's spend; a fake planner that writes a file leaves the run held.
 
-**7.4 Sequential scheduler.** After every lane change, pick the oldest `queued` task whose
-dependencies are `accepted` and admit it (Phase 4). Read-only tasks run in the same lane with the
-reader profile. Tasks whose dependency failed become `blocked`.
+**7.4 Sequential scheduler.** Lives in the planner process. After every lane change (the
+coordinator broadcasts them) pick the oldest `queued` task whose dependencies are `accepted` and
+ask the coordinator to admit it (Phase 4 `run_task` with an existing task). Read-only tasks run
+in the same lane with the reader profile. Tasks whose dependency failed become `blocked`.
 Verify: tasks `a`, `b(depends a)`, `c` run as `a, b, c` or `a, c, b`, never `b` first; failing `a`
 blocks `b`.
 
-**7.5 Result delivery.** When an attempt ends, record a delivery (received), then send the planner
-one `follow_up` per batch of finished tasks at its next idle point (delivered). The planner may
-propose more tasks (it must reopen: `propose_task` while closed is rejected unless the delivery
-reopened planning) and must `close_plan` again. One automatic re-plan per failed task; then the
-run fails.
+**7.5 Dependency context for workers.** `Bm.Prompts.worker/2` takes the task and its accepted
+dependencies: for each, the title, the worker's summary and the actual write set of the accepted
+attempt (paths only). The worker still never sees the plan or the conversation. Reason: a task
+that depends on another must know what that one changed; nothing tells it today.
+Verify: prompt test with two dependencies; a task without dependencies gets the Phase 4 prompt.
+
+**7.6 Result delivery.** When an attempt ends, record a delivery (received), then send the planner
+one `follow_up` per batch of finished tasks at its next idle point (delivered). The message
+carries each task's status, summary, flags and, for a held or failed attempt, the verification
+tail. The planner may propose more tasks (it must reopen: `propose_task` while closed is rejected
+unless the delivery reopened planning) and must `close_plan` again. One automatic re-plan per
+failed task; then the run fails.
 Verify: two tasks finishing while the planner is busy produce one `follow_up`; a duplicate
 `submit_result` produces one delivery; a failed task leads to exactly one re-plan message.
 
-**7.6 Run completion.** A run is `done` when the plan is closed and every task is terminal
-(`accepted | failed | blocked | cancelled`); `failed` if any required task failed. A planner idle
-with the plan open for `plan_timeout` (default 5 min) fails the run.
-Verify: tests for done, failed and plan timeout; the workspace lock is released each time.
+**7.7 Task check.** A task may carry a `check` command (the planner's executable form of
+`done_when`, e.g. `pytest tests/test_cli.py -q`). After the workspace verify command passes, the
+coordinator runs the task's check the same way (own process group, timeout, output tail) and the
+attempt is accepted only if both pass; a failing check holds the lane like a failing verify, with
+the check's output. Reason: the workspace verify proves the checkout still works, not that the
+task did what it was asked; with several tasks in a run the difference matters.
+Verify: fake-pi test where the verify passes and the check fails → held with the check output;
+both pass → accepted; no check → unchanged behaviour.
+
+**7.8 Runaway planners.** More than `max_rejections` (default 5) rejected proposals in one plan
+wave, or more than `max_waves` (default 4) waves in a run, fails the run with a message naming
+the limit. A planner idle with the plan open for `plan_timeout` (default 5 min) fails the run.
+Verify: tests for each limit; the run ends `failed` and the workspace lock is released.
+
+**7.9 Run completion and planner recovery.** A run is `done` when the plan is closed and every
+task is terminal (`accepted | failed | blocked | cancelled`); `failed` if any required task
+failed. Recovery (`Bm.Workspace.Recovery`) also covers the planner: after a BEAM restart, a run
+with `plan_open = true`, or with queued tasks and no planner process, is **paused** with the
+reason "planner lost", its planner pi is stopped through the recorded process groups, and the
+run page offers "Resume planning" (start a new planner session with the goal, the accepted tasks
+and their summaries) or "Finish". No automatic restart of the planner.
+Verify: tests for done, failed and paused-by-recovery; resume produces a planner prompt that
+lists the accepted tasks; the workspace lock is released each time a run ends.
 
 ---
 
@@ -434,7 +525,13 @@ Also a fake-pi test in the same file: a cancelled planner stream (`abort` mid-st
 task and no write.
 Verify: run `done`, one checkpoint per mutating task, user files untouched.
 
-**8.3 Benchmark.** Extend `mix bm.bench` with 3 multi-step goals: plain pi vs BM planner. Record
-in `docs/BENCHMARK.md` and decide which optional feature to build first (see FEATURES.md
-preconditions).
+**8.3 Benchmark.** Extend `mix bm.bench` with 3 multi-step goals, each with dependent tasks and at
+least one touching a user-owned file: plain pi vs BM planner, three runs each. Record in
+`docs/BENCHMARK.md` (verified success, cost, wall time, decisions left to the user, planner share
+of the cost) and decide which optional feature to build first (see FEATURES.md preconditions).
 Verify: results recorded; FEATURES.md updated with the decision.
+
+**8.4 Milestone C review.** Before merging to `main`: re-read Planner, the scheduler and delivery
+for real bugs as in earlier phases, probe recovery with a killed planner, and update
+ARCHITECTURE.md §13 (verified facts) and §16 (code map).
+Verify: findings fixed and listed in the Status note.

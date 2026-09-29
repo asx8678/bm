@@ -60,6 +60,7 @@ real pi/Fabric before anything relies on it.
 | D17 | **Stage A exit gate amended**: sanitized replay fixtures (A7) are optional | The scripted fake pi covers CI and the live suite covers qualification; a fixture sanitizer adds no safety now | Blocking stage B on A7 |
 | D18 | **Process groups** for everything a worker starts. pi runs under a `setsid` launcher (Perl `POSIX::setsid` + `exec`: pi's pid is its group id). pi's bash tool runs each command in its **own new session** (`detached: true`), so `bm_guard` also prefixes every authorized bash command with a line that appends `$$` (that session's group id) to a per-attempt file (`BM_PGID_FILE`). Settling, stop and recovery check and kill **all recorded groups** | Background jobs keep their group id after re-parenting to PID 1 (`nohup … &` and `( … &)` verified); macOS has no `setsid` binary and `ps -E` can't read other processes' environment, so group ids are the handle | Descendant-tree checks (miss re-parented processes); an environment marker (unreadable on macOS); only pi's own group (misses every bash command) |
 | D19 | **Snapshots are git trees** written from a private index (`<git-dir>/bm/index`): `read-tree HEAD` once, then `add -A` + `write-tree`. Write sets are `diff-tree` between two trees; checkpoints reuse the verified tree | One mechanism for D11 and D12; git's stat cache makes repeated snapshots cheap; trees also give exact content for conditional restore | Hashing every file in Elixir |
+| D20 | **Planner is its own process** per run (`Bm.Workspace.Planner`), decided 2026-09-29 after the milestone B review; it owns the planner session, validation, the task graph, scheduling and delivery, and asks the coordinator to admit tasks. Planner and reader get `bash` behind `bm_guard` in a **read-only policy mode**; a snapshot before and after the planner session holds the run if it changed anything. Tasks may carry an executable `check` run after the workspace verify | The coordinator already holds one state machine (the lane); planners must be able to run tests and `git log` to plan well; the workspace verify proves the checkout works, not that a task did its job | Planner logic inside the coordinator; planner limited to read tools; `done_when` as prose only |
 
 Revisit a decision by adding a row, not by deleting one.
 
@@ -106,8 +107,8 @@ are plain modules called by their owner, not separate processes.
 
 | Role | Extensions | Tools | Memory |
 |---|---|---|---|
-| Planner | zro, `bm_planner` | read-only pi tools + `propose_task`, `close_plan` | ~134 MB |
-| Read-only worker | zro, `bm_worker` | `read`, `grep`, `find`, `ls`, `submit_result` | ~134 MB |
+| Planner | zro, `bm_planner`, `bm_guard` (read-only mode, plan 6.6.5) | read-only pi tools, read-only `bash` + `propose_task`, `close_plan` | ~134 MB |
+| Read-only worker | zro, `bm_worker`, `bm_guard` (read-only mode, plan 6.6.5) | `read`, `grep`, `find`, `ls`, read-only `bash`, `submit_result` | ~134 MB |
 | Mutating worker | zro, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash`, `submit_result` | ~134 MB |
 | Reviewer (optional) | zro, `bm_worker` | read-only + `submit_result` | ~134 MB |
 
@@ -152,7 +153,8 @@ proposed ──▶ validated ──▶ accepted ──▶ scheduled
 ```
 
 - *Validated*: schema, stable key, dependencies exist, no cycles, declared write set present for
-  mutating tasks, budget admits it, current planner generation.
+  mutating tasks (or advisory, decided by plan step 6.6.4), optional `check` command, budget
+  admits it, current planner generation.
 - *Accepted*: the BEAM persisted it and answered the planner's dialog. Accepted task definitions are
   immutable; changes are new revisions.
 - Streamed arguments are reconciled with the final call; cancelled, malformed or superseded
@@ -175,8 +177,10 @@ without a result. Tasks have their own statuses (`queued`, `running`, `accepted`
 `blocked`, `cancelled`); a task is `blocked` when a dependency failed.
 
 Only the BEAM moves an attempt to `accepted`. A worker's `submit_result` means "I think I'm done";
-it doesn't mean its tools stopped, files are stable or verification passed. Dependents consume
-**accepted** results.
+it doesn't mean its tools stopped, files are stable or verification passed. An attempt is accepted
+when the workspace verify command **and** the task's `check` (if any) pass (D20). Dependents
+consume **accepted** results, and their workers are told the summary and write set of each
+accepted dependency (plan step 7.5).
 
 **Fencing.** Each attempt has an id and each agent adapter a session epoch. Messages carrying an
 old attempt or epoch are rejected. Fencing does not stop an OS process, so before a retry or
@@ -346,8 +350,9 @@ may have changed files is never retried automatically.
   Revert / Finish); the prototype chat at `/chat` is not guarded by BM. Milestone B exit gate
   passed live; `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
 
-**Not implemented yet:** the planner flow (milestone C). The coordinator is not yet reachable from the
-UI. A7 (replay fixtures) is optional (D17).
+**Not implemented yet:** the planner flow (milestone C, D20) and the hardening steps of plan phase
+6.6 (baseline verification, read-only bash for planner and reader, removal of the prototypes).
+A7 (replay fixtures) is optional (D17).
 
 ---
 
