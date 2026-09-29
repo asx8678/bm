@@ -66,6 +66,36 @@ defmodule Bm.PiTest do
     end
   end
 
+  describe "process groups" do
+    defp spawn_children(id) do
+      Bm.Pi.prompt(id, "spawn-child")
+      %{summary: %{pgid: pgid, pgid_file: file}} = settle(id)
+      assert pgid == Bm.Pi.os_pid(id)
+      assert [bash_group] = Bm.Proc.read_pgid_file(file)
+
+      groups = [pgid, bash_group]
+      # pi and its plain child, and the bash command's background job.
+      assert length(Bm.Proc.group_members(groups)) == 3
+      {groups, file}
+    end
+
+    test "stopping the agent ends pi's group and every recorded bash group", %{id: id} do
+      {groups, file} = spawn_children(id)
+
+      Bm.Pi.stop(id)
+      assert Bm.Proc.group_members(groups) == []
+      refute File.exists?(file)
+    end
+
+    test "processes left behind are ended when pi exits by itself", %{id: id} do
+      {groups, _file} = spawn_children(id)
+
+      Bm.Pi.prompt(id, "crash")
+      assert_receive {:pi, ^id, {:error, "pi exited" <> _}, %{pgid: nil}}, 5_000
+      assert Bm.Proc.group_members(groups) == []
+    end
+  end
+
   describe "usage and spend" do
     test "usage keeps the cost and spend adds confirmed cost per message", %{id: id} do
       Bm.Pi.prompt(id, "hello")

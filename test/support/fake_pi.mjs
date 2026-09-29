@@ -9,7 +9,12 @@
 //   "nocost"    -> answers, but the assistant message carries no usage/cost
 //   "break-reset" -> answers; the next new_session command fails
 //   "plan"      -> streams three add_task calls OpenAI-style (all toolcall_end events at the end)
+//   "spawn-child" -> leaves processes behind like pi's bash tool: a detached shell that records its
+//                  group id in BM_PGID_FILE (as bm_guard's prefix does) and starts a background
+//                  job, plus a plain child in pi's own group; then answers
 //   anything    -> answers "echo: <message>"
+import {spawn} from "node:child_process"
+
 let buffer = ""
 let waitingDialog = null
 let waitingBm = null
@@ -101,6 +106,10 @@ function handle(command) {
       send({type: "extension_ui_request", id: "n-1", method: "notify", notifyType: "info",
             message: `bm:${JSON.stringify({event: "result", data: {status: "done", summary: "probe"}})}`})
       answer("reported")
+    } else if (message === "spawn-child") {
+      spawn("sleep", ["60"], {stdio: "ignore"}).unref()
+      const script = 'printf "%s\\n" "$$" >> "$BM_PGID_FILE"; nohup sleep 60 >/dev/null 2>&1 &'
+      spawn("sh", ["-c", script], {detached: true, stdio: "ignore"}).on("exit", () => answer("spawned"))
     } else if (message === "plan") {
       streamPlan()
     } else if (message === "fail") {
