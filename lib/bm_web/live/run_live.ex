@@ -126,7 +126,7 @@ defmodule BmWeb.RunLive do
          )}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Not reverted: #{inspect(reason)}")}
+        {:noreply, put_flash(socket, :error, "Not reverted: #{explain_action(reason)}")}
     end
   end
 
@@ -137,7 +137,8 @@ defmodule BmWeb.RunLive do
          assign(socket, run: %{run | workspace: socket.assigns.run.workspace}, lane: :finished)}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not finish the run: #{inspect(reason)}")}
+        {:noreply,
+         put_flash(socket, :error, "Could not finish the run: #{explain_action(reason)}")}
     end
   end
 
@@ -159,13 +160,33 @@ defmodule BmWeb.RunLive do
     end
   end
 
+  @doc false
+  # Why an action on the run was refused, in words.
+  def explain_action(:nothing_running), do: "no attempt is running."
+  def explain_action(:nothing_held), do: "no attempt is waiting for a decision."
+  def explain_action(:attempt_running), do: "an attempt is running; stop it or wait for it."
+
+  def explain_action(:lane_busy),
+    do: "an attempt is running or waiting for your decision; resolve it first."
+
+  def explain_action(:no_run), do: "this workspace has no unfinished run."
+  def explain_action(:nothing_to_revert), do: "the latest attempt changed nothing to revert."
+
+  def explain_action({:not_revertable, status}),
+    do: "the latest attempt is #{status |> to_string() |> String.replace("_", " ")}."
+
+  def explain_action(:not_started),
+    do: "BM is not managing this workspace right now; reload the page."
+
+  def explain_action(other), do: "unexpected error (#{inspect(other)})."
+
   defp act(socket, fun) do
     case fun.(socket.assigns.root) do
       :ok ->
         {:noreply, socket}
 
       {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Not possible now: #{inspect(reason)}")}
+        {:noreply, put_flash(socket, :error, "Not possible now: #{explain_action(reason)}")}
     end
   end
 
@@ -180,11 +201,13 @@ defmodule BmWeb.RunLive do
           <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-bm-muted">
               <.run_status id="run-status" status={@run.status} />
-              <span class="font-mono">run #{@run.id}</span>
-              <span>·</span>
-              <span>started <.ago at={@run.inserted_at} /></span>
-              <span :if={@run.finished_at}>·</span>
-              <span :if={@run.finished_at}>took {duration(@run.inserted_at, @run.finished_at)}</span>
+              <div class="bm-meta flex flex-wrap items-center gap-y-1">
+                <span class="font-mono">run #{@run.id}</span>
+                <span>started <.ago at={@run.inserted_at} /></span>
+                <span :if={@run.finished_at}>
+                  took {duration(@run.inserted_at, @run.finished_at)}
+                </span>
+              </div>
             </div>
             <h1 id="run-goal" class="mt-1.5 text-lg font-semibold leading-snug">{@run.goal}</h1>
             <p class="mt-1 flex min-w-0 items-baseline gap-1.5 text-[11px]" title={@root}>
@@ -439,14 +462,12 @@ defmodule BmWeb.RunLive do
       </header>
 
       <div class="space-y-3 px-4 py-3">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-bm-muted">
+        <div class="bm-meta flex flex-wrap items-center gap-y-1 text-[11px] text-bm-muted">
           <span>started <.ago at={@attempt.inserted_at} /></span>
-          <span :if={terminal?(@attempt.status)}>·</span>
           <span :if={terminal?(@attempt.status)}>
             took {duration(@attempt.inserted_at, @attempt.updated_at)}
           </span>
-          <span :if={@attempt.checkpoint_ref}>·</span>
-          <span :if={@attempt.checkpoint_ref} class="flex items-center gap-1">
+          <span :if={@attempt.checkpoint_ref}>
             checkpoint
             <code class="rounded bg-bm-raised px-1 font-mono">{@attempt.checkpoint_ref}</code>
           </span>
@@ -487,7 +508,12 @@ defmodule BmWeb.RunLive do
           </li>
         </ul>
 
-        <details :if={@attempt.verify} id={"verify-#{@attempt.id}"} class="group">
+        <details
+          :if={@attempt.verify}
+          id={"verify-#{@attempt.id}"}
+          open={verify_needs_reading?(@attempt)}
+          class="group"
+        >
           <summary class="flex cursor-pointer list-none items-center gap-2 text-xs">
             <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
             <span class="font-medium">Verification</span>
@@ -522,6 +548,13 @@ defmodule BmWeb.RunLive do
     </article>
     """
   end
+
+  # A failed or timed-out verification is why the attempt waits or failed: show it unfolded.
+  defp verify_needs_reading?(%{status: status, verify: verify})
+       when status in [:held, :failed] and is_map(verify),
+       do: verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0)
+
+  defp verify_needs_reading?(_attempt), do: false
 
   defp terminal?(status),
     do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]

@@ -150,6 +150,13 @@ body {
   font-family: var(--font-sans);
 }
 
+/* A line of short facts separated by dots. Each item draws its dot in the gap to its left; the
+   container is shifted left by one gap and clips that strip, so the first item of every wrapped
+   line shows no dot. */
+.bm-meta { margin-left: -0.875rem; clip-path: inset(-0.25rem -0.25rem -0.25rem 0.875rem); }
+.bm-meta > * { position: relative; margin-left: 0.875rem; }
+.bm-meta > *::before { content: "·"; position: absolute; left: -0.875rem; width: 0.875rem; text-align: center; color: var(--bm-muted); }
+
 /* Consecutive tool calls read as one compact log */
 .bm-tool:has(+ .bm-tool) { margin-block-end: 0.25rem; }
 

@@ -435,7 +435,10 @@ runs had no time or spend, a finished run was a dead end (now "New task here" pr
 repository via `/?path=`), the repository field suggests known workspaces, the held-lane message
 names the reason (verification failed / timed out / interrupted), the brand read "BEAM". No
 horizontal overflow at 390 px. The chat and flow pages were removed here and restored on
-2026-09-30 at the user's request (see 6.6.2). `config/dev.exs` now honours `PORT`.
+2026-09-30 at the user's request (see 6.6.2). Follow-ups (2026-09-30): a failed or timed-out
+verification opens unfolded on held and failed attempts; refusals of Stop / Keep / Revert /
+Finish are explained in words instead of Elixir terms; the dotted meta lines no longer start a
+wrapped line with a stray dot. `config/dev.exs` now honours `PORT`.
 
 **Status: 6.6.3 and 6.6.5 done (2026-09-29).**
 - 6.6.3: the first attempt of a run goes through a `:baseline` phase: the verify command runs

@@ -158,6 +158,24 @@ defmodule BmWeb.RunLiveTest do
     assert has_element?(view, "#baseline-warning", "nope")
   end
 
+  test "a failed verification is shown unfolded", %{conn: conn, repo: repo} do
+    {run_id, id} =
+      run_task!(repo, [%{write: ["a.txt", "a\n"]}, done()], %{
+        verify_command: "test -f a.txt && echo checked-a && exit 1 || exit 0"
+      })
+
+    await_status(:held)
+    {:ok, view, _html} = live(conn, ~p"/runs/#{run_id}")
+    assert has_element?(view, "#verify-#{id}[open]", "checked-a")
+  end
+
+  test "refusals are explained in words" do
+    assert BmWeb.RunLive.explain_action(:lane_busy) =~ "waiting for your decision"
+
+    assert BmWeb.RunLive.explain_action({:not_revertable, :needs_reconciliation}) =~
+             "needs reconciliation"
+  end
+
   test "an unknown run goes back to Tasks", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/"}}} = live(conn, ~p"/runs/999999")
   end
