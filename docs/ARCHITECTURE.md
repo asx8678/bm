@@ -1,11 +1,13 @@
 # BM architecture
 
-Revised 2026-09-29 (second revision, after an external design review).
-The prioritized roadmap is in [FEATURES.md](FEATURES.md).
+Revised 2026-09-29 (third revision: Phase 0 of the implementation plan).
+The prioritized roadmap is in [FEATURES.md](FEATURES.md); the step-by-step plan for the core is in
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 BM is a multi-agent coding system. The **BEAM** (this Phoenix app) plans, authorizes, schedules,
 supervises, verifies and records work, and shows it in the browser. **pi** agents, driven over pi's
-RPC mode, do the coding. **pi-fabric** stays installed, unmodified, for its in-agent features.
+RPC mode, do the coding. BM agents run **plain pi** (zro plus BM's own extensions); pi-fabric stays
+installed and unmodified for the user's own pi sessions, and BM does not load it (D16).
 All agents share **one checkout**; there are no git worktrees.
 
 > **Core rule:** the planner *proposes* work; the BEAM *authorizes* effects; workers *report*
@@ -21,7 +23,8 @@ real pi/Fabric before anything relies on it.
 
 1. **Coordination by code, not by prompts.** Models plan, code and report. The BEAM decides.
 2. **Don't rebuild pi or Fabric.** pi owns model calls, tools, sessions, retries and compaction.
-   Fabric owns in-agent features (code mode, speculation, argument repairs).
+   Fabric's in-agent features (code mode, speculation, argument repairs) are not re-implemented;
+   BM workers go without them until Fabric can be re-added under BM's control (D16).
 3. **One authority for agents.** Only the BEAM starts, assigns and stops agents. No hidden
    recursive orchestration.
 4. **Conservative before parallel.** V1 allows parallel *read-only* work and exactly **one mutating
@@ -38,8 +41,8 @@ real pi/Fabric before anything relies on it.
 
 | # | Decision | Why | Rejected |
 |---|---|---|---|
-| D1 | BEAM orchestrates; pi codes | pi+Fabric handle editing, GLM quirks and zro auth; the BEAM is best at supervision, state and messaging | Pure-Elixir LLM agents; Fabric as the orchestrator |
-| D2 | Fabric installed and unmodified; BM agents use **controlled profiles** (Fabric-free for now, D16) | In-agent features improve with Fabric updates; no fork | Forking Fabric; managed-host mode for now (see D14) |
+| D1 | BEAM orchestrates; pi codes | pi handles editing, GLM quirks and zro auth; the BEAM is best at supervision, state and messaging | Pure-Elixir LLM agents; Fabric as the orchestrator |
+| D2 | Fabric stays unmodified (no fork); BM agents use **controlled profiles**, currently Fabric-free (D16) | If Fabric is re-added, its in-agent features improve with Fabric updates | Forking Fabric; managed-host mode for now (see D14) |
 | D3 | Shared checkout, **no worktrees**, no merge queue | Much simpler; conflicts are prevented by scheduling instead of merged | Worktree per worker |
 | D4 | **One active run per workspace** (V1) | Removes cross-run conflicts entirely | Cross-run admission logic |
 | D5 | **One mutation lane**: at most one mutating attempt at a time; read-only attempts run in parallel | Shell commands, formatters and generators can change files without any hook seeing it; serializing mutations makes attribution exact | Parallel writers guarded only by edit/write hooks |
@@ -52,8 +55,11 @@ real pi/Fabric before anything relies on it.
 | D12 | Checkpoints are **private git commits under `refs/bm/…`**, built with a separate index | Records exactly what was verified without touching HEAD, the branch or the user's index | `git add <files> && git commit` (would include the user's staged changes) |
 | D13 | Postgres is authoritative; ETS holds live projections only | Recovery after a crash needs durable state | ETS-only claims and state |
 | D14 | Fabric's **managed-host mode** is noted, not used | It gives a clean provider boundary, but disables speculation, prewalk, repairs, entropy and native MCP, and requires the host to broker pi's core tools | Adopting it now |
-| D16 | **Workers are Fabric-free** (decided 2026-09-29): planner, reader and writer run plain pi with zro and BM extensions | Live A6 showed `--tools` doesn't bind Fabric's nested calls and Fabric starts the user's MCP servers; without Fabric, `--tools` and `bm_guard` fully cover the worker's tools | A BM-managed `PI_CODING_AGENT_DIR` with its own `fabric.json` (optional later; needs access to the user's pi credentials); guard-only control with the user's Fabric config |
 | D15 | Planner runs **without** Fabric | Simplicity: the planner writes no code. (Fabric hides extension tools by default, but `capture.keepVisible` could keep them visible, so this is a choice, not a necessity) | Planner with Fabric |
+| D16 | **Workers are Fabric-free** (decided 2026-09-29): planner, reader and writer run plain pi with zro and BM extensions | Live A6 showed `--tools` doesn't bind Fabric's nested calls and Fabric starts the user's MCP servers; without Fabric, `--tools` and `bm_guard` fully cover the worker's tools | A BM-managed `PI_CODING_AGENT_DIR` with its own `fabric.json` (optional later; needs access to the user's pi credentials); guard-only control with the user's Fabric config |
+| D17 | **Stage A exit gate amended**: sanitized replay fixtures (A7) are optional | The scripted fake pi covers CI and the live suite covers qualification; a fixture sanitizer adds no safety now | Blocking stage B on A7 |
+| D18 | **Process groups** for everything a worker starts. pi runs under a `setsid` launcher (Perl `POSIX::setsid` + `exec`: pi's pid is its group id). pi's bash tool runs each command in its **own new session** (`detached: true`), so `bm_guard` also prefixes every authorized bash command with a line that appends `$$` (that session's group id) to a per-attempt file (`BM_PGID_FILE`). Settling, stop and recovery check and kill **all recorded groups** | Background jobs keep their group id after re-parenting to PID 1 (`nohup … &` and `( … &)` verified); macOS has no `setsid` binary and `ps -E` can't read other processes' environment, so group ids are the handle | Descendant-tree checks (miss re-parented processes); an environment marker (unreadable on macOS); only pi's own group (misses every bash command) |
+| D19 | **Snapshots are git trees** written from a private index (`<git-dir>/bm/index`): `read-tree HEAD` once, then `add -A` + `write-tree`. Write sets are `diff-tree` between two trees; checkpoints reuse the verified tree | One mechanism for D11 and D12; git's stat cache makes repeated snapshots cheap; trees also give exact content for conditional restore | Hashing every file in Elixir |
 
 Revisit a decision by adding a row, not by deleting one.
 
@@ -76,19 +82,22 @@ Revisit a decision by adding a row, not by deleting one.
 │        │ starts / stops                                                         │
 │        ▼                                                                        │
 │  Agent adapter: Bm.Pi.Agent (one process per pi process)                        │
-│    Port · RPC · dialogs · session epoch · health · process-tree kill            │
+│    Port · RPC · dialogs · session epoch · health · process-group kill           │
 │                                                                                 │
 │  Limits (budget, timeouts, repeat guard) · Postgres (authoritative) · ETS       │
 └──────┬───────────────────────────────┬─────────────────────────┬────────────────┘
        │ RPC                           │ RPC                     │ RPC
   pi planner                    pi read-only worker(s)      pi mutating worker (≤1)
-  zro + bm_planner              zro + Fabric + bm_worker    zro + Fabric + bm_worker
-                                no edit/write/bash tools    + bm_guard
+  zro + bm_planner              zro + bm_worker             zro + bm_worker + bm_guard
+                                no edit/write/bash tools    edit/write/bash via guard
+                                (parallel: optional)
                         all share ONE checkout
 ```
 
-Process boundaries follow state ownership: a run coordinator per run, one workspace coordinator
-per checkout, one adapter process per pi process. Other pieces (scheduler, validator, git helpers)
+Process boundaries follow state ownership: one workspace coordinator per checkout, one adapter
+process per pi process. With one active run per workspace (D4), the core keeps the run
+coordinator's state inside the workspace coordinator; it becomes its own process only if a
+workspace ever runs more than one run. Other pieces (scheduler, validator, git helpers)
 are plain modules called by their owner, not separate processes.
 
 ---
@@ -102,12 +111,13 @@ are plain modules called by their owner, not separate processes.
 | Mutating worker | zro, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash`, `submit_result` | ~134 MB |
 | Reviewer (optional) | zro, `bm_worker` | read-only + `submit_result` | ~134 MB |
 
-Every agent is started with `--no-extensions` and an explicit `-e` list, and pinned model.
-**Profile check before assignment:** `bm_worker`/`bm_planner` report the effective model, active
-tools and versions on start; the adapter compares them with `get_state`. A mismatch fails closed
-(the agent is stopped and the attempt is not started). Fabric's own agent spawning must be off
-through configuration (`agents.maxDepth: 0` today); `PI_FABRIC_DEPTH` is only an extra guard, since
-it is an internal Fabric variable.
+Every agent is started with `--no-extensions`, an explicit `-e` list, a `--tools` allowlist and a
+pinned model (`Bm.Pi.Profile`). **Profile check before assignment:** `bm_worker`/`bm_planner`
+report the active tools on start (`bm_guard` reports too in the writer profile); the check
+compares them and the model with the profile, and pi's version with the pinned one. A mismatch
+fails closed (the agent is stopped and the attempt is not started). With Fabric not loaded (D16),
+Fabric's agent spawning and nested calls don't apply; if Fabric is re-added, its spawning must be
+off through configuration (`agents.maxDepth: 0`), with `PI_FABRIC_DEPTH` only as an extra guard.
 
 ---
 
@@ -174,38 +184,40 @@ Cancellation and safety events use a separate, prioritized path (`abort`).
 
 ## 7. Workspace coordinator
 
-**Baseline and dirty policy.** At run start the coordinator records HEAD and the content hash of
-every modified, staged or untracked (non-ignored) file. Those files are **user-owned** for the run:
-agents may read them; a task that needs to change one is blocked and reported. BM never stages,
-stashes or commits user changes.
+**Baseline and dirty policy.** At run start the coordinator records HEAD, a snapshot tree (D19)
+and every modified, staged or untracked (non-ignored) path. Those files are **user-owned** for the
+run: agents may read them; a task that needs to change one is blocked and reported. BM never
+stages, stashes or commits user changes.
 
-**Mutation lane.** At most one mutating attempt runs at a time (D5). Read-only attempts run in
-parallel up to a small limit.
+**Mutation lane.** At most one attempt runs at a time in the core (D5); tasks run sequentially.
+Parallel read-only attempts are an optional feature.
 
-**Attribution by snapshot (D11).** Before a mutating attempt starts and after it settles, the
-coordinator snapshots the workspace (content hashes of tracked and untracked non-ignored files).
-The difference is the attempt's **actual write set**, whatever tool or command produced it. It is
-compared with the **declared** write set; writes outside it are flagged for review, and writes to
-user-owned files fail the attempt.
+**Attribution by snapshot (D11, D19).** Before an attempt starts and after it settles, the
+coordinator writes a snapshot tree of the workspace from BM's private index. `git diff-tree`
+between the two trees is the attempt's **actual write set**, whatever tool or command produced it.
+It is compared with the **declared** write set; writes outside it are flagged for review, and
+writes to user-owned files fail the attempt.
 
-**Settling.** An attempt is settled when pi reports `agent_settled`, no tool is running, and the
-pi process has **no descendant processes**. V1 disallows detached background work in workers.
+**Settling (D18).** An attempt is settled when pi reports `agent_settled`, no tool is running, and
+no process is left in pi's own group or in any group recorded in the attempt's `BM_PGID_FILE`.
+Leftovers after a short grace period are killed by group and the attempt is flagged.
 
-**Verification barrier.** With the mutation lane empty, the coordinator runs verification
-(`mix compile --warnings-as-errors` and the relevant tests), then records a **checkpoint**: a
-commit object built from the working tree with a *separate* git index and stored under
-`refs/bm/runs/<run>/<n>`. HEAD, the branch and the user's index are untouched. The checkpoint id is
-the exact state that was verified.
+**Verification barrier.** With the lane still held, the coordinator runs the workspace's
+**verify command** (configured per workspace, e.g. `mix precommit`; run as its own process group
+with a timeout), then records a **checkpoint**: a commit of the verified snapshot tree stored
+under `refs/bm/runs/<run>/<n>`. HEAD, the branch and the user's index are untouched. The checkpoint
+id is the exact state that was verified. A failed verification **holds** the lane until the user
+chooses Keep or Revert. Note: `refs/bm/…` include untracked non-ignored files and are pushed by
+`git push --mirror`; pruning old refs is an optional feature.
 
-**Rollback (V1).** Restore an attempt's attributed files from the previous checkpoint, only if
-their current content still equals what the attempt produced; created files are removed and deleted
-files restored under the same check. Any newer or external change stops the rollback and asks the
-user. Dependent accepted tasks block rollback of the task they depend on.
+**Revert (core).** Only the latest attempt can be reverted: restore its write set from its
+`tree_before`, only if every file still equals its content in `tree_after`; created files are
+removed and deleted files restored under the same check. Any newer or external change stops the
+revert and asks the user. Per-task rollback with dependency handling is optional.
 
-**Freshness (from fx).** `bm_guard` records the content hash of every file the worker reads
-(whole-file freshness tracked separately from whether the model saw the whole file) and blocks
-`edit`/`write` when the file changed since, checking and writing as one step. New files, deletes,
-renames and symlinks resolve to canonical paths.
+**Freshness (optional, from fx).** A later addition: `bm_guard` would record the content hash of
+every file the worker reads and block `edit`/`write` when the file changed since. Not in the core,
+because with one writer the snapshots already catch concurrent user edits after the fact.
 
 ---
 
@@ -215,14 +227,16 @@ renames and symlinks resolve to canonical paths.
 |---|---|---|
 | No two BM workers change files at the same time | Mutation lane (D5) | — |
 | Read-only workers can't change files through pi tools | Tool allowlist per profile | MCP tools or extensions outside the profile (profiles exclude them) |
-| Every change a mutating attempt makes is attributed to it | Before/after snapshots | Changes the *user* makes during that attempt are also attributed to it; the UI warns, and freshness checks catch edits to files the worker read |
+| Every change a mutating attempt makes is attributed to it | Before/after snapshots | Changes the *user* makes during that attempt are also attributed to it; the UI warns (the optional freshness check would catch edits to files the worker read) |
+| No process started by a worker outlives its attempt | Recorded process groups (D18), group kill on settle/stop/recovery | A command that starts a **new session** itself (`setsid`, double fork + setsid) escapes; the policy refuses `setsid`, but this is not a sandbox |
 | User changes are never committed, stashed or overwritten by BM | Baseline policy, private-index checkpoints, conditional rollback | A shell command inside a mutating attempt could still overwrite a user-owned file; it is detected (snapshot) and the attempt fails, but the overwrite already happened |
 | Accepted means verified | Verification barrier + checkpoint id | Test coverage decides what "verified" catches |
 | Stale messages can't affect a new attempt | Attempt ids + session epoch | — |
 | Spending stays near the budget | Admission stops at the limit; hard limit aborts | Requests already in flight can exceed it; missing cost is "unknown", never 0 |
 
-Command policy in `bm_guard` blocks known-dangerous commands (git writes, `rm -rf` outside the
-checkout, publishing) and suggests alternatives. It is a safety net, not a sandbox.
+Command policy (`Bm.Policy`, asked by `bm_guard` for every edit, write and bash call) blocks
+known-dangerous commands (git writes, `setsid`, `rm -rf` outside the checkout, publishing), paths
+outside the checkout and writes to user-owned files. It is a safety net, not a sandbox.
 
 ---
 
@@ -230,14 +244,19 @@ checkout, publishing) and suggests alternatives. It is a safety net, not a sandb
 
 Postgres (authoritative):
 
-- `workspaces`: canonical path, active_run_id (the run lock)
-- `runs`: goal, status, plan_open, budget, spent_confirmed, spent_unknown, baseline (json)
-- `tasks`: run, key, revision, definition (json), declared_writes, depends_on, status
-- `attempts`: task, number, role, agent, session_epoch, status, snapshot_before/after, actual_writes, result, checkpoint
-- `requests`: request_id, agent, op, payload, outcome (idempotency for dialogs)
-- `deliveries`: target, message, received_at, delivered_at, acknowledged_at
-- `checkpoints`: run, number, git ref, verified (json)
-- `items`: ordered event log for UI and recovery (run/task/attempt/item ids, sequence)
+Core tables (see IMPLEMENTATION_PLAN.md step 2.1 for columns):
+
+- `workspaces`: canonical path, verify command, settings
+- `runs`: workspace, goal, status, plan_open, budget, spent (confirmed) and unknown count, baseline
+  (HEAD, tree, user-owned paths). A partial unique index on active runs per workspace is the run lock
+- `tasks`: run, key, revision, title, goal, done_when, mutates, declared writes, depends_on, status
+- `attempts`: task, number, role, agent, session_epoch, process groups, status, tree_before/after,
+  actual_writes, result, verification, checkpoint ref
+- `bridge_requests` (implemented): request_id, agent, role, op, session epoch, attempt, payload,
+  outcome (idempotency for dialogs)
+- `deliveries`: target, message, received_at, delivered_at
+
+Optional later: `items` (ordered event log for UI replay and history), separate `checkpoints`.
 
 ETS (projections): live agent status, lane occupancy, counters.
 
@@ -245,46 +264,55 @@ ETS (projections): live agent status, lane occupancy, counters.
 
 ## 10. Limits and observability
 
-- Budget: confirmed spend from pi's `usage.cost`; entries without cost are marked unknown.
-  Admission stops at the soft limit; the hard limit aborts running attempts.
-- Timeouts that distinguish provider wait, running tool, approval wait and true stall, instead of
-  one "no events" timeout.
-- Repeat-call guard (same call and arguments K times in a row → abort).
-- Bounded buffers: RPC line buffer, pending requests, transcripts, logs, event queues.
-- Raw RPC logs are sensitive (prompts, paths, file contents); replay fixtures are sanitized.
+Core:
+
+- Budget: confirmed spend from pi's `usage.cost`; entries without cost are counted as unknown,
+  never as 0. Admission stops at the hard cap, and crossing it aborts the running attempt.
+- Time limits per attempt: a maximum duration, and a stall timeout (no pi event while no tool runs
+  and no dialog is pending).
+- Bounded buffers: RPC line buffer, pending requests, transcripts, logs (implemented in A1).
+- Raw RPC logs are sensitive (prompts, paths, file contents) and are not committed.
+
+Optional: soft budget limit, in-flight estimates, timeouts per state (provider wait, running tool,
+approval wait), a repeat-call guard (same call and arguments K times in a row → abort), sanitized
+replay fixtures.
 
 ---
 
 ## 11. Recovery
 
-After a BEAM restart or an uncertain failure: freeze admission for the workspace, stop or confirm
-the state of every recorded pi process, compare the workspace with the last snapshot and
-checkpoint, then decide per attempt: resume, retry (only if it provably changed nothing), revert
-(if the conditional rollback applies) or mark `needs_reconciliation` for the user. An attempt that
+**Core (minimal).** At application start, before accepting work: for every attempt that was in
+flight, kill its recorded process groups, write a snapshot and compare it with the attempt's
+`tree_before`. No change → `failed` (reason `interrupted`, safe to run again); any change →
+`needs_reconciliation` for the user, who can Keep or Revert. The run is paused. An attempt that
 may have changed files is never retried automatically.
+
+**Optional.** Resume attempts in place, and reconcile against the last checkpoint automatically.
 
 ---
 
 ## 12. Status
 
-**Implemented** (tests use a scripted fake pi; live runs as noted):
+**Implemented (milestone A, A1–A6).** Tests use the scripted fake pi; the live suite
+(`mix test --only live`, 4/4) uses the real pi and model.
 
-- `Bm.Pi.Agent`: Port, RPC events, transcript, extra env, raw log, `new_session`, abort. Known gaps
-  fixed in stage A: `new_session` replies before pi confirms; usage drops cost and turns missing
-  values into 0; unbounded buffers and transcript.
-- `Bm.Pi.ToolCalls`: assembles streamed tool calls. Gap: reports calls as ready before any
-  validation (to become "proposed").
-- `bm_bridge`: `add_task` and `submit_result` in one extension, fire-and-forget. To be replaced by
-  role-specific `bm_planner` / `bm_worker` with dialogs.
+- `Bm.Pi.Agent`: Port, RPC events, transcript, extra env, raw log. Commands (`prompt`,
+  `follow_up`, `new_session`, `abort`) wait for pi's `success`; confirmed cost and unknown usage
+  tracked; bounded line buffer, pending requests, transcript and raw log; session epoch; graceful
+  stop via `/bm-shutdown` before any kill.
+- `Bm.Pi.ToolCalls`: streamed tool calls are **proposals** only.
+- `Bm.Bridge` + `bridge_requests`: authoritative `bm:` dialogs, role check, persisted before the
+  answer, idempotent by `request_id`, identity from the channel.
+- `Bm.Pi.Profile`: planner / reader / writer profiles, Fabric-free (D16), fail-closed profile check,
+  pinned pi version.
+- Extensions: `bm_common` (dialog and notify helpers, `/bm-shutdown`), `bm_planner`
+  (`propose_task`, `close_plan`), `bm_worker` (`submit_result`), `bm_guard` (asks the BEAM before
+  every edit, write and bash call; fails closed).
 - Chat page and canvas with one agent node.
 
-**Designed, not implemented:** everything in sections 5–11 not listed above.
-
-**Stage A progress:** A1–A6 implemented (acknowledged commands, cost, bounds, proposals,
-authoritative dialogs with persisted idempotent requests, split extensions, Fabric-free profiles
-with a fail-closed check, graceful shutdown, `bm_guard`). Live qualification: 4/4 pass
-(`mix test --only live`). A7: live tests are in `test/live/`; recorded fixtures are not committed
-until an allowlist sanitizer exists (raw streams contain the local pi environment).
+**Not implemented yet:** runs, tasks, attempts, the workspace coordinator, git layer, policy,
+limits, recovery and the run page (milestone B), and the planner flow (milestone C). Nothing
+answers the guard's `authorize` requests outside tests yet. A7 (replay fixtures) is optional (D17).
 
 ---
 
@@ -316,6 +344,12 @@ Measured 2026-09-29: pi 0.87.1, Fabric 0.97.0 (source read at 0.98.1), GLM 5.3 v
 | pi's auth-storage lock goes stale after 30 s (`proper-lockfile`, `stale: 30_000`); killing pi can delay the next start by ~30 s. Graceful exit via the `/bm-shutdown` extension command stops pi in 8–13 ms with fast restarts (0.82 s) | measured; pi `auth-storage.ts` |
 | `PI_CODING_AGENT_DIR` sets the config directory for both pi and Fabric | Fabric `core/agent-dir.ts` |
 | A checkpoint built with a separate index (`GIT_INDEX_FILE` + `read-tree HEAD` + `add -A` + `commit-tree` + `update-ref refs/bm/…`) leaves HEAD, the branch and the user's staged changes untouched and records the full working tree | throwaway-repo test with a staged and an untracked user file |
+| macOS has no `setsid` binary; `perl -MPOSIX -e 'setsid() or die; exec @ARGV'` makes the exec'd program leader of a new session and group with pid = pgid | 2026-09-29, `ps -o pid,pgid,sess` |
+| In a non-interactive shell, `nohup … &` and `( … &)` keep the shell's process group after the shell exits and they are re-parented to PID 1; `kill -- -<pgid>` still reaches them | 2026-09-29, scratch test |
+| **pi's bash tool spawns every command with `detached: true`** (new session per command) and kills it by group on abort or timeout; commands are not in pi's group | pi 0.87.1 `dist/core/tools/bash.js:52`, `utils/shell.js:184` |
+| `ps -E` doesn't show another process's environment on this macOS, even unsandboxed, so environment markers can't identify a worker's processes | 2026-09-29, scratch test |
+| pi `tool_call` handlers may **mutate the tool input** as well as block it | pi `docs/extensions.md:103` |
+| pi's shell is configurable only through settings (`shellPath`, `shellCommandPrefix` in `~/.pi/agent/settings.json` or the project's `.pi/settings.json`), which would touch the user's config or checkout | pi `docs/shell-aliases.md` |
 
 ---
 
@@ -333,16 +367,20 @@ Answered in stage A6 (live, 2026-09-29):
    and a denied write creates nothing.
 5. Background processes: the guard sees each bash command. A `nohup … &` command is re-parented
    to PID 1 after the shell exits, so it **escapes pi's process tree** and a descendant check
-   can't see it (reproduced live). Settling (stage B5) must track the worker's **process group**
-   (start pi as a group leader, check and kill by group) and the command policy should refuse
-   detaching patterns (`nohup`, trailing `&`, `disown`, `setsid`). Neither is a sandbox: a
-   process that creates its own session still escapes.
+   can't see it (reproduced live). Refined in Phase 0 (2026-09-29): pi runs each bash command in
+   its own session, and background jobs keep that session's group id, so tracking the group id of
+   every bash command catches them (D18). Only a process that creates a new session itself
+   escapes; the policy refuses `setsid`, which is a safety net, not a sandbox.
+6. Which settings in the user's `fabric.json` affect workers: **moot** while workers are
+   Fabric-free (D16); reopen if Fabric is re-added.
 
 Still open:
-6. Which settings in the user's `fabric.json` (approvals, `prewalk.alwaysRearm`, mesh, MCP) affect
-   workers, and can the profile check see them?
-7. How well does GLM 5.3 declare write sets? (Affects scheduling in stage D.)
-8. Cost, time and success versus a single pi on the same tasks (the benchmark in stage C).
+7. How well does GLM 5.3 declare write sets? (Affects the undeclared-write flag and, later,
+   parallel writers.)
+8. Cost, time and success versus a single pi on the same tasks (benchmarks in plan steps 6.5 and
+   8.3).
+9. Does prefixing the bash command in `bm_guard`'s `tool_call` hook work under real pi (the
+   model sees its original command; the executed one records `$$`)? Qualified in plan step 1.4.
 
 ---
 
@@ -360,11 +398,17 @@ supervisor agents before the basic system is reliable.
 |---|---|
 | `lib/bm/pi.ex` | Public API for agents |
 | `lib/bm/pi/agent.ex` | Agent adapter (RPC process) |
-| `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler |
+| `lib/bm/pi/profile.ex` | Controlled profiles and the fail-closed profile check |
+| `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler (proposals) |
 | `lib/bm/pi/transcript.ex` | Transcript reducer |
-| `priv/pi/extensions/bm_bridge.ts` | Current bridge (to be split into `bm_planner` / `bm_worker`) |
-| `lib/bm_web/live/home_live.ex`, `assets/svelte/` | Chat page and canvas |
+| `lib/bm/bridge.ex`, `lib/bm/bridge/request.ex` | Authoritative dialog handling and its persisted requests |
+| `priv/pi/extensions/bm_common.ts` | Dialog/notify helpers and `/bm-shutdown` (not an extension) |
+| `priv/pi/extensions/bm_planner.ts` | `propose_task`, `close_plan` |
+| `priv/pi/extensions/bm_worker.ts` | `submit_result` |
+| `priv/pi/extensions/bm_guard.ts` | Asks the BEAM before edit, write and bash |
+| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/flow_live.ex`, `assets/svelte/` | Chat page and canvas |
 | `test/support/fake_pi.mjs` | Scripted pi stand-in |
+| `test/live/qualification_test.exs` | Live qualification suite (`mix test --only live`) |
 
 References: pi RPC and extension docs; pi-fabric (MIT); Codex (Apache-2.0) multi-agent tools,
 item protocol, `execpolicy`; fx (Apache-2.0) read tracking and parallel read-only prefix; pi's
