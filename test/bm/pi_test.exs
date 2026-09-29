@@ -179,6 +179,74 @@ defmodule Bm.PiTest do
     end
   end
 
+  describe "scripted work (fake pi)" do
+    @describetag owner: true
+    @describetag :tmp_dir
+
+    defp work(id, steps), do: Bm.Pi.prompt(id, "work:" <> JSON.encode!(steps))
+
+    defp answer_next(id, op, reply) do
+      assert_receive {:pi_request, ^id, %{op: ^op, dialog_id: dialog_id} = request}, 5_000
+      Bm.Pi.respond(id, dialog_id, reply)
+      request
+    end
+
+    test "steps ask the BEAM, write, run recorded commands and submit", %{id: id, tmp_dir: dir} do
+      file = Path.join(dir, "out.txt")
+
+      work(id, [
+        %{authorize: %{tool: "write", input: %{path: file}}},
+        %{write: [file, "hi"]},
+        %{bash: "true"},
+        %{submit: %{status: "done", summary: "did it"}}
+      ])
+
+      allow = %{"ok" => true, "allow" => true}
+      assert %{payload: %{"tool" => "write"}} = answer_next(id, "authorize", allow)
+      assert %{payload: %{"tool" => "bash"}} = answer_next(id, "authorize", allow)
+
+      assert %{payload: %{"status" => "done"}} =
+               answer_next(id, "submit_result", %{"ok" => true})
+
+      %{transcript: transcript, summary: %{pgid_file: pgid_file}} = settle(id)
+      assert %{role: :assistant, text: "worked"} = List.last(transcript)
+      assert File.read!(file) == "hi"
+      assert [_bash_group] = Bm.Proc.read_pgid_file(pgid_file)
+    end
+
+    test "a denied authorization stops the work", %{id: id, tmp_dir: dir} do
+      file = Path.join(dir, "out.txt")
+      work(id, [%{bash: "touch #{file}"}, %{write: [file, "no"]}])
+      answer_next(id, "authorize", %{"ok" => true, "allow" => false, "reason" => "policy"})
+
+      %{transcript: transcript} = settle(id)
+      assert %{text: "denied: policy"} = List.last(transcript)
+      refute File.exists?(file)
+    end
+
+    test "a spawned background job is recorded; hang waits until aborted", %{id: id} do
+      work(id, [%{spawn: "sleep 60"}, %{hang: true}])
+      assert_receive {:pi, ^id, :status, %{status: :running}}, 5_000
+
+      # Wait until the background job is recorded.
+      pgid_file = Bm.Pi.snapshot(id).summary.pgid_file
+      assert eventually(fn -> Bm.Proc.read_pgid_file(pgid_file) != [] end)
+
+      assert :ok = Bm.Pi.abort(id)
+      %{transcript: transcript} = settle(id)
+      assert %{role: :notice, text: "Stopped."} = List.last(transcript)
+      assert [_pi, _job] = Bm.Pi.process_groups(id)
+    end
+  end
+
+  defp eventually(fun, attempts \\ 50) do
+    cond do
+      fun.() -> true
+      attempts == 0 -> false
+      true -> receive(after: (20 -> eventually(fun, attempts - 1)))
+    end
+  end
+
   describe "authoritative bridge requests" do
     @describetag owner: true
 

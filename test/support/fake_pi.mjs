@@ -12,13 +12,21 @@
 //   "spawn-child" -> leaves processes behind like pi's bash tool: a detached shell that records its
 //                  group id in BM_PGID_FILE (as bm_guard's prefix does) and starts a background
 //                  job, plus a plain child in pi's own group; then answers
+//   "work:<json>" -> runs scripted steps like a worker, then answers "worked" (see runWork)
 //   anything    -> answers "echo: <message>"
 import {spawn} from "node:child_process"
+import {randomUUID} from "node:crypto"
+import {writeFileSync, mkdirSync} from "node:fs"
+import {dirname} from "node:path"
 
 let buffer = ""
 let waitingDialog = null
 let waitingBm = null
 let failNextReset = false
+// Dialogs sent by runWork, waiting for the BEAM's extension_ui_response: id -> resolve.
+const pendingDialogs = new Map()
+let abortWork = null
+let workAborted = false
 
 const send = record => process.stdout.write(JSON.stringify(record) + "\n")
 const usage = {input: 10, output: 2, cacheRead: 5, cacheWrite: 0, totalTokens: 17}
@@ -52,6 +60,54 @@ function streamPlan() {
   send({type: "agent_settled"})
 }
 
+// Asks the BEAM through a bm: input dialog, like bm_common's bmRequest; resolves to its reply.
+function bmRequest(op, payload, requestId = randomUUID()) {
+  const id = `work-${randomUUID()}`
+  const request = {v: 1, op, request_id: requestId, payload}
+  send({type: "extension_ui_request", id, method: "input", title: `bm:${op}`, placeholder: JSON.stringify(request)})
+  return new Promise(resolve => pendingDialogs.set(id, value => resolve(value === undefined ? {ok: false} : JSON.parse(value))))
+}
+
+// Like pi's bash tool with bm_guard's prefix: a detached shell per command (own session) that
+// records its group id in BM_PGID_FILE. Resolves when the shell exits.
+function runShell(command) {
+  const script = `printf '%s\\n' "$$" >> "$BM_PGID_FILE"\n${command}`
+  return new Promise(resolve => spawn("sh", ["-c", script], {detached: true, stdio: "ignore"}).on("exit", resolve))
+}
+
+// Steps: {"authorize": {tool, input}} stops the work when denied; {"bash": cmd} authorizes, then
+// runs cmd (stops when denied); {"write": [path, text]} writes directly, as a tool would;
+// {"spawn": cmd} starts cmd in the background like a bash tool call; {"submit": {status, summary},
+// "request_id"?: id}; {"hang": true} waits until aborted.
+async function runWork(steps) {
+  workAborted = false
+  for (const step of steps) {
+    if (step.authorize) {
+      const reply = await bmRequest("authorize", step.authorize)
+      if (!reply.allow) return answer(`denied: ${reply.reason ?? reply.error}`)
+    } else if (step.bash) {
+      const reply = await bmRequest("authorize", {tool: "bash", input: {command: step.bash}})
+      if (!reply.allow) return answer(`denied: ${reply.reason ?? reply.error}`)
+      send({type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash", args: {command: step.bash}})
+      await runShell(step.bash)
+      send({type: "tool_execution_end", toolCallId: "bash-1", toolName: "bash", result: {content: []}, isError: false})
+    } else if (step.write) {
+      const [path, text] = step.write
+      mkdirSync(dirname(path), {recursive: true})
+      writeFileSync(path, text)
+    } else if (step.spawn) {
+      runShell(`${step.spawn} >/dev/null 2>&1 &`)
+      await new Promise(resolve => setTimeout(resolve, 100))
+    } else if (step.submit) {
+      await bmRequest("submit_result", step.submit, step.request_id)
+    } else if (step.hang) {
+      if (!workAborted) await new Promise(resolve => { abortWork = resolve })
+      return answer("aborted", "aborted")
+    }
+  }
+  answer("worked")
+}
+
 function handle(command) {
   if (command.type === "get_state") {
     send({id: command.id, type: "response", command: "get_state", success: true,
@@ -72,8 +128,13 @@ function handle(command) {
   } else if (command.type === "extension_ui_response" && waitingBm === command.id) {
     waitingBm = null
     answer(`bm reply: ${command.value ?? "cancelled"}`)
+  } else if (command.type === "extension_ui_response" && pendingDialogs.has(command.id)) {
+    const resolve = pendingDialogs.get(command.id)
+    pendingDialogs.delete(command.id)
+    resolve(command.cancelled ? undefined : command.value)
   } else if (command.type === "abort") {
     send({id: command.id, type: "response", command: "abort", success: true})
+    if (abortWork) { abortWork(); abortWork = null } else { workAborted = true }
   } else if (command.type === "extension_ui_response" && waitingDialog === command.id) {
     waitingDialog = null
     answer(command.cancelled ? "dialog: cancelled" : "dialog: answered")
@@ -110,6 +171,8 @@ function handle(command) {
       spawn("sleep", ["60"], {stdio: "ignore"}).unref()
       const script = 'printf "%s\\n" "$$" >> "$BM_PGID_FILE"; nohup sleep 60 >/dev/null 2>&1 &'
       spawn("sh", ["-c", script], {detached: true, stdio: "ignore"}).on("exit", () => answer("spawned"))
+    } else if (message.startsWith("work:")) {
+      runWork(JSON.parse(message.slice("work:".length)))
     } else if (message === "plan") {
       streamPlan()
     } else if (message === "fail") {
