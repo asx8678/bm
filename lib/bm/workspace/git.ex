@@ -88,6 +88,19 @@ defmodule Bm.Workspace.Git do
     end
   end
 
+  @doc "`:ok` if `repo` is the top level of a git working tree, `{:error, reason}` otherwise."
+  def check_root(repo) do
+    with {:ok, _git_dir} <- git_dir(repo), do: :ok
+  end
+
+  @doc "The object id `rev` names (e.g. a checkpoint ref), or nil."
+  def rev_parse(repo, rev) do
+    case git(repo, ["rev-parse", "--verify", "--quiet", rev]) do
+      {:ok, out} -> String.trim(out)
+      {:error, _} -> nil
+    end
+  end
+
   @doc "HEAD's commit id, or nil in a repository without commits."
   def head(repo) do
     case git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) do

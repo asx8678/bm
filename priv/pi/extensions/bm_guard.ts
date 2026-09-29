@@ -28,6 +28,15 @@ function recordProcessGroup(input: { command: string }, pgidFile: string): void 
 	input.command = `printf '%s\\n' "$$" >> ${shellQuote(pgidFile)}\n${input.command}`;
 }
 
+/**
+ * What the BEAM needs to decide (and records): the path for edit/write, the command for bash.
+ * File contents are left out; they can be large and BM attributes changes from snapshots anyway.
+ */
+function policyInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
+	if (tool === "bash") return { command: input.command, timeout: input.timeout };
+	return { path: input.path };
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (!GUARDED_TOOLS.has(event.toolName)) return undefined;
@@ -38,7 +47,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			const reply = await bmRequest(ctx, "authorize", { tool: event.toolName, input: event.input });
+			const reply = await bmRequest(ctx, "authorize", { tool: event.toolName, input: policyInput(event.toolName, event.input as Record<string, unknown>) });
 			if (reply.allow !== true) return { block: true, reason: String(reply.reason ?? "Blocked by BM policy.") };
 			// Mutated in place, after the BEAM saw the original command (pi's documented way).
 			if (event.toolName === "bash" && pgidFile) recordProcessGroup(event.input as { command: string }, pgidFile);

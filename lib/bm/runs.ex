@@ -146,6 +146,24 @@ defmodule Bm.Runs do
     Repo.all(from a in Attempt, where: a.status in ^Attempt.in_flight_statuses(), order_by: a.id)
   end
 
+  @doc "Adds `flag` to an attempt without changing its status (e.g. \"kept\")."
+  def add_attempt_flag(%Attempt{id: id}, flag) when is_binary(flag) do
+    from(a in Attempt, where: a.id == ^id and ^flag not in a.flags)
+    |> Repo.update_all(push: [flags: flag], set: [updated_at: DateTime.utc_now()])
+
+    {:ok, Repo.get!(Attempt, id)}
+  end
+
+  @doc "The attempts of a run, newest first."
+  def list_run_attempts(%Run{id: run_id}) do
+    Repo.all(
+      from a in Attempt,
+        join: t in assoc(a, :task),
+        where: t.run_id == ^run_id,
+        order_by: [desc: a.inserted_at, desc: a.id]
+    )
+  end
+
   @doc """
   Moves `attempt` to status `to`, setting `attrs`. Returns `{:ok, attempt}`,
   `{:error, {:illegal, from, to}}` if the move isn't allowed, `{:error, :stale}` if the stored

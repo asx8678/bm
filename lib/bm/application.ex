@@ -15,6 +15,11 @@ defmodule Bm.Application do
       # pi agents: one Bm.Pi.Agent per agent id, found through the registry
       {Registry, keys: :unique, name: Bm.Pi.Registry},
       {DynamicSupervisor, name: Bm.Pi.AgentSupervisor, strategy: :one_for_one},
+      # Workspace coordinators: one per checkout, found by canonical path
+      {Registry, keys: :unique, name: Bm.Workspace.Registry},
+      {DynamicSupervisor, name: Bm.Workspace.Supervisor, strategy: :one_for_one},
+      # Blocking work of coordinators (starting/stopping pi, verification)
+      {Task.Supervisor, name: Bm.TaskSupervisor},
       # Start to serve requests, typically the last entry
       BmWeb.Endpoint
     ]

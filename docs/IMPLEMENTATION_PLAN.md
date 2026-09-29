@@ -252,6 +252,21 @@ write set, attempt `cancelled`, lane `:free` if nothing was written, else `{:hel
 Verify: cancel during `hang` → `cancelled` with an empty write set; cancel after a `write` → held
 with that file in `actual_writes`.
 
+**Status: Phase 4 done (2026-09-29).** Decisions made while building it:
+- A workspace needs a `verify_command` (`run_task` returns `{:error, :no_verify_command}`); there
+  is no "accepted without verification" for changes.
+- An attempt that changed nothing is accepted without running verification and without a
+  checkpoint (`verify: %{"skipped" => "no changes"}`): the workspace is as it was.
+- The lane is also held after a **failed** or **cancelled** attempt that left changes, until Keep
+  or Revert. Keep on a `held` attempt accepts it with a checkpoint marked "kept, unverified"; on a
+  failed/cancelled one it only adds the `kept` flag and frees the lane.
+- Tasks with `mutates: false` run with the reader profile; any write fails them.
+- `bm_guard` sends only the path (edit/write) or the command (bash) to the BEAM, never file
+  contents; authorizations are persisted in `bridge_requests` as an audit log.
+- Starting/stopping pi and verification run in `Bm.TaskSupervisor` tasks, so the coordinator keeps
+  answering the worker and can cancel at any phase; the coordinator monitors the pi adapter and
+  ends recorded groups itself if the adapter dies.
+
 ---
 
 ## Phase 5: limits, revert, recovery
