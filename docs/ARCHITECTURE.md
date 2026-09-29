@@ -309,6 +309,9 @@ may have changed files is never retried automatically.
   (`propose_task`, `close_plan`), `bm_worker` (`submit_result`), `bm_guard` (asks the BEAM before
   every edit, write and bash call; fails closed).
 - Chat page and canvas with one agent node.
+- Process groups (Phase 1, D18): `priv/pi/setsid.pl`, `Bm.Proc`; pi starts as a group leader,
+  `bm_guard` records every bash command's group in `BM_PGID_FILE`, and all groups are ended when
+  pi exits or the agent stops.
 
 **Not implemented yet:** runs, tasks, attempts, the workspace coordinator, git layer, policy,
 limits, recovery and the run page (milestone B), and the planner flow (milestone C). Nothing
@@ -379,9 +382,10 @@ Still open:
    parallel writers.)
 8. Cost, time and success versus a single pi on the same tasks (benchmarks in plan steps 6.5 and
    8.3).
-9. Does prefixing the bash command in `bm_guard`'s `tool_call` hook work under real pi (the
-   model sees its original command; the executed one records `$$`)? Qualified in plan step 1.4.
-
+9. Prefixing the bash command in `bm_guard`'s `tool_call` hook works under real pi: **yes**
+   (live, 2026-09-29). The BEAM authorizes the model's original command, the model sees the
+   command's normal output, the recorded group is not pi's, a `nohup … &` job is still found
+   after `agent_settled`, and stopping the agent ends it. Moved to "answered" with plan step 1.4.
 ---
 
 ## 15. Non-goals
@@ -401,6 +405,7 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/pi/profile.ex` | Controlled profiles and the fail-closed profile check |
 | `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler (proposals) |
 | `lib/bm/pi/transcript.ex` | Transcript reducer |
+| `lib/bm/proc.ex`, `priv/pi/setsid.pl` | Process groups: launcher, members, group kill, `BM_PGID_FILE` |
 | `lib/bm/bridge.ex`, `lib/bm/bridge/request.ex` | Authoritative dialog handling and its persisted requests |
 | `priv/pi/extensions/bm_common.ts` | Dialog/notify helpers and `/bm-shutdown` (not an extension) |
 | `priv/pi/extensions/bm_planner.ts` | `propose_task`, `close_plan` |

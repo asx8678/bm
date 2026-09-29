@@ -80,7 +80,10 @@ closed if `BM_PGID_FILE` is unset). **Live**: extend `qualification_test.exs`: t
 `nohup sleep 30 >/dev/null 2>&1 &`; after `agent_settled` the recorded group still has a member;
 after `Bm.Pi.stop/1` it is empty. Also check the tool result shown to the model is the command's
 normal output.
-Verify: `mix test --only live` passes (5/5); answer open question 9 in ARCHITECTURE.md §14.
+Verify: `mix test --only live` passes (4/4: this test replaces the old descendant-tree finding);
+answer open question 9 in ARCHITECTURE.md §14.
+
+**Status: Phase 1 done (2026-09-29).**
 
 ---
 
