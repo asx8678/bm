@@ -313,12 +313,15 @@ may have changed files is never retried automatically.
   `bm_guard` records every bash command's group in `BM_PGID_FILE`, and all groups are ended when
   pi exits or the agent stops.
 
+- Git layer (Phase 3): `Bm.Workspace.Git` with snapshots from a private index, write sets
+  (`diff-tree`), baselines of user-owned paths, checkpoints under `refs/bm/…`, and conditional
+  restore (content, mode and symlinks). Works only at a repository's top level.
 - Persistence (Phase 2): `Bm.Runs` with workspaces (canonical paths), runs (one unfinished run
   per workspace, enforced by a partial unique index), tasks, attempts and the attempt state
   machine (`Bm.Runs.Attempt.transitions/0`, compare-and-set transitions). `Bm.Bridge.handle/5`
   fences requests by the owner's assignment (`stale`, `not_assigned`) and records the attempt.
 
-**Not implemented yet:** the workspace coordinator, git layer, policy,
+**Not implemented yet:** the workspace coordinator, policy,
 limits, recovery and the run page (milestone B), and the planner flow (milestone C). Nothing
 answers the guard's `authorize` requests outside tests yet. A7 (replay fixtures) is optional (D17).
 
@@ -358,6 +361,9 @@ Measured 2026-09-29: pi 0.87.1, Fabric 0.97.0 (source read at 0.98.1), GLM 5.3 v
 | `ps -E` doesn't show another process's environment on this macOS, even unsandboxed, so environment markers can't identify a worker's processes | 2026-09-29, scratch test |
 | pi `tool_call` handlers may **mutate the tool input** as well as block it | pi `docs/extensions.md:103` |
 | pi's shell is configurable only through settings (`shellPath`, `shellCommandPrefix` in `~/.pi/agent/settings.json` or the project's `.pi/settings.json`), which would touch the user's config or checkout | pi `docs/shell-aliases.md` |
+| A plain `git status` rewrites the user's `.git/index` (stat-cache refresh); `GIT_OPTIONAL_LOCKS=0` prevents it | 2026-09-29, scratch repo and `Bm.Workspace.GitTest` |
+| Snapshot of this repository (private index, `add -A` + `write-tree`): first 47 ms, second 31 ms | `mix test --only perf`, 2026-09-29 |
+| `git add -A` from a subdirectory snapshots only that subdirectory (and fails if the parent repo ignores it), so the git layer requires the repository's top level | `Bm.Workspace.GitTest` |
 
 ---
 
@@ -411,6 +417,7 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler (proposals) |
 | `lib/bm/pi/transcript.ex` | Transcript reducer |
 | `lib/bm/proc.ex`, `priv/pi/setsid.pl` | Process groups: launcher, members, group kill, `BM_PGID_FILE` |
+| `lib/bm/workspace/git.ex` | Snapshots, write sets, baseline, checkpoints, conditional restore |
 | `lib/bm/runs.ex`, `lib/bm/runs/` | Workspaces, runs, tasks, attempts (Postgres) and the attempt state machine |
 | `lib/bm/bridge.ex`, `lib/bm/bridge/request.ex` | Authoritative dialog handling and its persisted requests |
 | `priv/pi/extensions/bm_common.ts` | Dialog/notify helpers and `/bm-shutdown` (not an extension) |

@@ -170,6 +170,12 @@ refuses and no file changes.
 **3.6 Speed check.** A test tagged `:perf` snapshots this repository twice.
 Verify: second snapshot < 1 s on this machine; record the numbers in ARCHITECTURE.md §13.
 
+**Status: Phase 3 done (2026-09-29).** Notes: every function requires the repository's top level
+(`{:error, {:not_repository_root, top}}` otherwise), so Phase 4 must create workspaces at the
+top level; restore also handles file modes and symlinks and uses `cat-file --filters` (checkout
+conversions); checkpoints use BM's own identity and `--no-gpg-sign`; `mix test --only perf`
+runs the timing check.
+
 ---
 
 ## Phase 4: workspace coordinator (fake pi)
