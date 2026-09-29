@@ -36,6 +36,13 @@ config :phoenix_live_view,
 # at the `config/runtime.exs`.
 config :bm, Bm.Mailer, adapter: Swoosh.Adapters.Local
 
+# pi coding agent, driven over its JSONL RPC protocol.
+# `cwd` is the directory pi works in; nil means the directory the app was started from.
+# Drop `--model` to use the default model from pi's own settings.
+config :bm, Bm.Pi,
+  command: ["pi", "--mode", "rpc", "--no-session", "--model", "zro/glm-5.3"],
+  cwd: nil
+
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.3.3",

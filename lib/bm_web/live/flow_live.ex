@@ -33,10 +33,7 @@ defmodule BmWeb.FlowLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="fixed top-4 left-4 z-10 flex flex-col items-center leading-none">
-      <span class="text-2xl font-bold">BM</span>
-      <span class="text-[10px]">coding</span>
-    </div>
+    <span class="fixed top-4 left-4 z-10 text-sm font-bold tracking-wide">BEAM</span>
 
     <div class="flex h-screen flex-col px-4 pt-20 pb-4">
       <div class="mb-2 flex items-center justify-between text-sm">

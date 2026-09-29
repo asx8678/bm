@@ -2,7 +2,8 @@ import {mount, unmount} from "svelte"
 import FlowCanvas from "../../svelte/FlowCanvas.svelte"
 
 // Mounts Svelte Flow into the hook element.
-// Initial graph: JSON in data-graph. Server updates: push_event("flow:set_graph", graph).
+// Initial graph: JSON in data-graph. Server updates: push_event("flow:set_graph", graph)
+// replaces the graph, push_event("flow:update_node", %{id: id, data: data}) merges into one node.
 // Client edits: pushEvent("flow_changed", graph).
 export default {
   mounted() {
@@ -19,6 +20,7 @@ export default {
     })
 
     this.handleEvent("flow:set_graph", graph => this.component.setGraph(graph))
+    this.handleEvent("flow:update_node", ({id, data}) => this.component.updateNode(id, data))
   },
 
   destroyed() {

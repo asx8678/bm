@@ -39,3 +39,6 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Replace pi with a scripted stand-in that speaks the same RPC protocol
+config :bm, Bm.Pi, command: ["node", Path.expand("../test/support/fake_pi.mjs", __DIR__)]

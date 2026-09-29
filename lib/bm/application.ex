@@ -12,8 +12,9 @@ defmodule Bm.Application do
       Bm.Repo,
       {DNSCluster, query: Application.get_env(:bm, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Bm.PubSub},
-      # Start a worker by calling: Bm.Worker.start_link(arg)
-      # {Bm.Worker, arg},
+      # pi agents: one Bm.Pi.Agent per agent id, found through the registry
+      {Registry, keys: :unique, name: Bm.Pi.Registry},
+      {DynamicSupervisor, name: Bm.Pi.AgentSupervisor, strategy: :one_for_one},
       # Start to serve requests, typically the last entry
       BmWeb.Endpoint
     ]
