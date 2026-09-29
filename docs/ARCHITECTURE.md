@@ -244,8 +244,10 @@ because with one writer the snapshots already catch concurrent user edits after 
 | Spending stays near the budget | Admission stops at the limit; hard limit aborts | Requests already in flight can exceed it; missing cost is "unknown", never 0 |
 
 Command policy (`Bm.Policy`, asked by `bm_guard` for every edit, write and bash call) blocks
-known-dangerous commands (git writes, `setsid`, `rm -rf` outside the checkout, publishing), paths
-outside the checkout and writes to user-owned files. It is a safety net, not a sandbox.
+known-dangerous commands (git writes, `setsid`, `sudo`, publishing), and applies the same path
+rules to edit/write and to files a shell command visibly writes (redirects, `tee`, `sed -i`,
+`cp`/`mv`/`install`/`ln` destinations, `rm`): inside the checkout, not `.git`, not user-owned.
+It is a safety net, not a sandbox.
 
 ---
 
@@ -340,8 +342,11 @@ may have changed files is never retried automatically.
   attempt time limit and stall timeout, revert of the latest attempt, and minimal recovery at
   application start and coordinator start (`Bm.Workspace.Recovery`).
 
-**Not implemented yet:** the run page and the milestone B gate (Phase 6), and the planner flow
-(milestone C). The coordinator is not yet reachable from the
+- UI (Phase 6): Tasks page and run page (live attempts, diffs, verification, Stop / Keep /
+  Revert / Finish); the prototype chat at `/chat` is not guarded by BM. Milestone B exit gate
+  passed live; `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
+
+**Not implemented yet:** the planner flow (milestone C). The coordinator is not yet reachable from the
 UI. A7 (replay fixtures) is optional (D17).
 
 ---
@@ -442,13 +447,17 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/workspace/recovery.ex` | Recovery of attempts left in flight |
 | `lib/bm/policy.ex` | Decides the worker's edit/write paths and bash commands |
 | `lib/bm/prompts.ex` | Worker prompt |
+| `lib/bm/workspace/verify.ex` | Runs the verify command as its own process group |
+| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Tasks page, run page, status badges and diffs |
+| `lib/mix/tasks/bm.bench.ex` | Benchmark: plain pi vs BM |
+| `test/live/milestone_b_test.exs` | Milestone B exit gate (live) |
 | `lib/bm/runs.ex`, `lib/bm/runs/` | Workspaces, runs, tasks, attempts (Postgres) and the attempt state machine |
 | `lib/bm/bridge.ex`, `lib/bm/bridge/request.ex` | Authoritative dialog handling and its persisted requests |
 | `priv/pi/extensions/bm_common.ts` | Dialog/notify helpers and `/bm-shutdown` (not an extension) |
 | `priv/pi/extensions/bm_planner.ts` | `propose_task`, `close_plan` |
 | `priv/pi/extensions/bm_worker.ts` | `submit_result` |
 | `priv/pi/extensions/bm_guard.ts` | Asks the BEAM before edit, write and bash |
-| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/flow_live.ex`, `assets/svelte/` | Chat page and canvas |
+| `lib/bm_web/live/chat_live.ex`, `lib/bm_web/live/flow_live.ex`, `assets/svelte/` | Prototype chat (not guarded) and canvas |
 | `test/support/fake_pi.mjs` | Scripted pi stand-in |
 | `test/live/qualification_test.exs` | Live qualification suite (`mix test --only live`) |
 

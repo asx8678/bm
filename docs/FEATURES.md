@@ -64,6 +64,9 @@ ARCHITECTURE.md).
 | B9 | **Run page**: start a single task, see attempts, diff, verification output, spend; Stop / Keep / Revert | M | 6 |
 | B10 | **Mini-benchmark**: plain pi vs BM with one worker | S | 6 |
 
+**Status: done (2026-09-29).** Exit gate passed (`test/live/milestone_b_test.exs`); benchmark in
+[BENCHMARK.md](BENCHMARK.md).
+
 **Exit gate:** a live end-to-end run in a scratch repo with a staged user change and a dirty user
 file: the task's change is checkpointed and verified, the user's staged change and dirty file are
 untouched, a denied or out-of-scope write fails the attempt, a failing verification holds the lane

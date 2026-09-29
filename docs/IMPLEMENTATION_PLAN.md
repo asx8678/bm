@@ -358,6 +358,27 @@ wall time and manual interventions in `docs/BENCHMARK.md`.
 Verify: file exists with both columns. **Decision point:** continue to Phase 7 as planned,
 or fix what the numbers show first.
 
+**Status: Phase 6 done (2026-09-29); milestone B exit gate passed.**
+- 6.1–6.3: Tasks page (`/`, task form and recent runs), run page (`/runs/:id`: attempts streamed
+  live with status, worker summary, flags, verification output and per-file diffs; Stop, Keep,
+  Revert, Revert last change, next task, Finish run). The coordinator broadcasts on the
+  workspace topic (not `run:<id>`); `Coordinator.finish_run/1` was added so a run can end. The
+  prototype chat moved to `/chat`, marked as not guarded by BM; `Layouts.app` is BM's shell.
+- 6.4: `test/live/milestone_b_test.exs` passes with the real model (≈13 s): accepted +
+  checkpoint; a task needing the user's dirty file fails without touching it; a failing
+  verification holds and Revert removes the change; a killed coordinator's attempt is recovered
+  as `needs_reconciliation` and its processes are ended. Finding: the model's first move was
+  `printf ... >> notes.txt` through bash, which the policy did not check; the policy now refuses
+  shell writes (redirects, `tee`, `sed -i`, `cp`/`mv`/`install`/`ln` destinations, `rm`) to the
+  user's files, outside the workspace and in `.git`, and the worker then reports the task as
+  blocked without writing.
+- 6.5: `mix bm.bench` (docs/BENCHMARK.md): both modes verified 5/5 small tasks; BM cost $0.060
+  and 25 s against $0.077 and 39 s for plain pi (one sample; plain pi carries the user's full
+  setup). **Decision:** the tasks are too easy to separate the modes on success; BM's value at
+  this size is the guarded, verified, recorded result, at no extra cost. Continue with Phase 7;
+  the milestone C benchmark (8.3) must use multi-step goals and include tasks that touch the
+  user's files, where the modes can differ.
+
 ---
 
 ## Phase 7: planner (fake pi)
