@@ -438,6 +438,22 @@ names the reason (verification failed / timed out / interrupted), the brand read
 horizontal overflow at 390 px. Prototypes, Svelte and its build plugin removed; `mix precommit`
 152 tests. `config/dev.exs` now honours `PORT`.
 
+**Status: 6.6.3 and 6.6.5 done (2026-09-29).**
+- 6.6.3: the first attempt of a run goes through a `:baseline` phase: the verify command runs
+  once on the untouched checkout; its exit, output tail and the files it changed are stored as
+  `runs.baseline_verify` and broadcast; the attempt's `tree_before` is re-taken afterwards so a
+  generator's output is not attributed to the worker. Cancel during the baseline ends the command
+  and the attempt. The run page warns when the baseline failed (fold with the output) and, in a
+  separate note, when the verify command changed the user's own uncommitted files. Two existing
+  tests had to make their generators non-idempotent, since the baseline now runs them first.
+- 6.6.5: `Bm.Policy` has a read-only mode (`ctx.mode`): edit/write refused; bash refused when it
+  redirects anywhere but a device or temp file, and for `tee`, `sed -i`, `cp`, `mv`, `rm`,
+  `mkdir`, `touch`, `chmod`, `dd`, `patch`, `rsync`, `unzip`, `tar x` and git writes; anything
+  else runs. Planner and reader profiles carry `bm_guard` and `bash`; the coordinator picks the
+  mode from the attempt's role; `Bm.Bridge` lets planners send `authorize`. Live qualification
+  4/4 with the new profiles (the reader tried a shell redirect and was refused). `mix precommit`
+  160 tests.
+
 ---
 
 ## Phase 7: planner (fake pi)

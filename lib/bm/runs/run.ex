@@ -21,6 +21,9 @@ defmodule Bm.Runs.Run do
     field :spent_unknown, :integer, default: 0
     # HEAD, snapshot tree and user-owned paths at run start (see Bm.Workspace.Git, phase 3).
     field :baseline, :map
+    # The verify command's result on the checkout before the first attempt (6.6.3):
+    # "exit", "output", "timeout", and "changed" (files it changed).
+    field :baseline_verify, :map
     field :finished_at, :utc_datetime_usec
 
     has_many :tasks, Bm.Runs.Task

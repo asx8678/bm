@@ -149,6 +149,15 @@ defmodule BmWeb.RunLiveTest do
     assert has_element?(view, "#attempts", "refs/bm/runs/#{run_id}/1")
   end
 
+  test "warns when the checkout already fails verification", %{conn: conn, repo: repo} do
+    {run_id, _id} = run_task!(repo, [done()], %{verify_command: "echo nope; exit 1"})
+    await_status(:accepted)
+
+    {:ok, view, _html} = live(conn, ~p"/runs/#{run_id}")
+    assert has_element?(view, "#baseline-warning", "already fails")
+    assert has_element?(view, "#baseline-warning", "nope")
+  end
+
   test "an unknown run goes back to Tasks", %{conn: conn} do
     assert {:error, {:live_redirect, %{to: "/"}}} = live(conn, ~p"/runs/999999")
   end

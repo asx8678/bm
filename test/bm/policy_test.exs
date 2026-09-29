@@ -126,6 +126,50 @@ defmodule Bm.PolicyTest do
     end
   end
 
+  describe "read-only mode" do
+    setup %{ctx: ctx}, do: %{ro: Map.put(ctx, :mode, :read_only)}
+
+    test "edit and write are refused whatever the path", %{ro: ro} do
+      assert {:deny, reason} = Policy.authorize("write", %{"path" => "lib/new.ex"}, ro)
+      assert reason =~ "read-only"
+      assert {:deny, _} = Policy.authorize("edit", %{"path" => "/tmp/x"}, ro)
+    end
+
+    test "commands that only read or run are allowed", %{ro: ro} do
+      for command <- [
+            "cat README.md",
+            "git log --oneline -5 && git status",
+            "mix test 2>&1 | tail -20",
+            "python3 -m pytest -q > /dev/null",
+            "grep -rn TODO lib > /tmp/todos.txt",
+            "sed -n '1,10p' lib/app.ex",
+            "tar tzf archive.tgz"
+          ] do
+        assert Policy.authorize("bash", %{"command" => command}, ro) == :allow, command
+      end
+    end
+
+    test "commands that write are refused", %{ro: ro} do
+      for command <- [
+            "echo x > lib/new.ex",
+            "cat a >> b",
+            "tee out.txt < in.txt",
+            "sed -i 's/a/b/' lib/app.ex",
+            "cp a b",
+            "mv a b",
+            "rm -rf build",
+            "mkdir -p tmp",
+            "touch marker",
+            "chmod +x run.sh",
+            "git checkout -- .",
+            "tar xzf archive.tgz"
+          ] do
+        assert {:deny, reason} = Policy.authorize("bash", %{"command" => command}, ro)
+        assert reason =~ "read-only" or reason =~ "git", command
+      end
+    end
+  end
+
   test "other tools are refused", %{ctx: ctx} do
     assert {:deny, _} = Policy.authorize("fabric_exec", %{}, ctx)
   end

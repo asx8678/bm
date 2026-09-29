@@ -12,12 +12,22 @@ defmodule Bm.Policy do
     would escape BM's process-group tracking, decision D18), `sudo`, recursive `rm` outside the
     workspace, and publishing commands.
 
+  **Read-only mode** (`ctx.mode == :read_only`, for the planner and read-only workers, plan
+  step 6.6.5): `edit` and `write` are refused outright, and so is every bash command that names a
+  file to write (redirections other than devices or temp files, `tee`, `sed -i`, `cp`, `mv`,
+  `rm`, `mkdir`, `touch`, `chmod` …) and every git write. The snapshot after the session still
+  decides: a read-only session that changed files fails.
+
   **This is a safety net, not a sandbox.** Shell parsing here is approximate: variables, `eval`,
   scripts and interpreters can do anything a permitted command can. Snapshots attribute every
   change afterwards (decision D11), whatever made it.
   """
 
-  @type ctx :: %{root: Path.t(), user_owned: [String.t()]}
+  @type ctx :: %{
+          required(:root) => Path.t(),
+          required(:user_owned) => [String.t()],
+          optional(:mode) => :write | :read_only
+        }
   @type decision :: :allow | {:deny, String.t()}
 
   # git subcommands that change the repository, the index or the working tree.
@@ -41,6 +51,10 @@ defmodule Bm.Policy do
 
   @doc "Decides a tool call. `input` is the tool's arguments as sent by pi."
   @spec authorize(String.t(), map(), ctx) :: decision
+  def authorize(tool, _input, %{mode: :read_only}) when tool in ["edit", "write"] do
+    {:deny, "This task is read-only: report what you found instead of changing files."}
+  end
+
   def authorize(tool, input, ctx) when tool in ["edit", "write"] do
     case input do
       %{"path" => path} when is_binary(path) -> authorize_path(path, ctx)
@@ -151,6 +165,21 @@ defmodule Bm.Policy do
 
   defp check_command("git", args, _ctx), do: check_git(args)
 
+  @write_commands ~w(tee mv cp install ln rm rmdir mkdir touch chmod chown chgrp truncate dd
+                     patch rsync unzip tar)
+
+  defp check_command(cmd, args, %{mode: :read_only}) when cmd in @write_commands do
+    if cmd == "tar" and not Enum.any?(args, &String.contains?(&1, "x")),
+      do: :allow,
+      else: {:deny, "This task is read-only; #{cmd} would change files. Only inspect and run."}
+  end
+
+  defp check_command("sed", args, %{mode: :read_only}) do
+    if in_place?(args),
+      do: {:deny, "This task is read-only; sed -i would change files."},
+      else: :allow
+  end
+
   defp check_command(cmd, _args, _ctx) when cmd in ~w(setsid disown) do
     {:deny, "#{cmd} would detach processes from BM's tracking. Run the command normally."}
   end
@@ -167,10 +196,7 @@ defmodule Bm.Policy do
   defp check_command("tee", args, ctx), do: check_write_targets(operands(args), ctx)
 
   defp check_command("sed", args, ctx) do
-    if Enum.any?(
-         args,
-         &(&1 in ["-i", "--in-place"] or String.starts_with?(&1, ["-i", "--in-place="]))
-       ) do
+    if in_place?(args) do
       # Without -e the first operand is the script; the rest are the files it rewrites.
       files =
         if Enum.any?(args, &(&1 in ["-e", "--expression"])),
@@ -198,6 +224,13 @@ defmodule Bm.Policy do
     if [cmd | Enum.take(args, 1)] in @publishing,
       do: {:deny, "Publishing (#{Enum.join([cmd | Enum.take(args, 1)], " ")}) is not allowed."},
       else: :allow
+  end
+
+  defp in_place?(args) do
+    Enum.any?(
+      args,
+      &(&1 in ["-i", "--in-place"] or String.starts_with?(&1, ["-i", "--in-place="]))
+    )
   end
 
   defp check_git(args) do
@@ -254,6 +287,9 @@ defmodule Bm.Policy do
 
       temporary?(target) ->
         :allow
+
+      ctx[:mode] == :read_only ->
+        {:deny, "This task is read-only; writing to #{target} is not allowed."}
 
       true ->
         authorize_path(target, ctx)

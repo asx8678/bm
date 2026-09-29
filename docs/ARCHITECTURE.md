@@ -108,7 +108,7 @@ are plain modules called by their owner, not separate processes.
 | Role | Extensions | Tools | Memory |
 |---|---|---|---|
 | Planner | zro, `bm_planner`, `bm_guard` (read-only mode, plan 6.6.5) | read-only pi tools, read-only `bash` + `propose_task`, `close_plan` | ~134 MB |
-| Read-only worker | zro, `bm_worker`, `bm_guard` (read-only mode, plan 6.6.5) | `read`, `grep`, `find`, `ls`, read-only `bash`, `submit_result` | ~134 MB |
+| Read-only worker | zro, `bm_worker`, `bm_guard` (read-only mode, implemented 6.6.5) | `read`, `grep`, `find`, `ls`, read-only `bash`, `submit_result` | ~134 MB |
 | Mutating worker | zro, `bm_worker`, `bm_guard` | read tools, `edit`, `write`, policed `bash`, `submit_result` | ~134 MB |
 | Reviewer (optional) | zro, `bm_worker` | read-only + `submit_result` | ~134 MB |
 
@@ -198,7 +198,10 @@ Cancellation and safety events use a separate, prioritized path (`abort`).
 **Baseline and dirty policy.** At run start the coordinator records HEAD, a snapshot tree (D19)
 and every modified, staged or untracked (non-ignored) path. Those files are **user-owned** for the
 run: agents may read them; a task that needs to change one is blocked and reported. BM never
-stages, stashes or commits user changes.
+stages, stashes or commits user changes. Before the first attempt the verify command runs once
+on the checkout as the user left it (`runs.baseline_verify`, plan 6.6.3): a checkout that already
+fails is shown as such, and files the command generates are excluded from the first attempt's
+write set.
 
 **Mutation lane.** At most one attempt runs at a time in the core (D5); tasks run sequentially.
 Parallel read-only attempts are an optional feature.
@@ -350,8 +353,8 @@ may have changed files is never retried automatically.
   Revert / Finish), checked in a browser (docs/screenshots). Milestone B exit gate passed live;
   `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
 
-**Not implemented yet:** the planner flow (milestone C, D20) and the remaining hardening steps of
-plan phase 6.6 (baseline verification, harder benchmark, read-only bash for planner and reader).
+**Not implemented yet:** the planner flow (milestone C, D20) and the harder benchmark of plan step
+6.6.4. Baseline verification (6.6.3) and read-only bash for planner and reader (6.6.5) are in.
 A7 (replay fixtures) is optional (D17).
 
 ---

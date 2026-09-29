@@ -6,6 +6,8 @@ defmodule Bm.Workspace.Coordinator do
 
   An attempt goes through these phases:
 
+      :baseline   (first attempt of a run) the verify command runs on the untouched checkout,
+                  so a checkout that already fails is told apart from one the worker broke
       :starting   pi is started with the task's profile and checked (fail closed)
       :running    the worker runs; its bm:authorize requests are answered by `Bm.Policy`,
                   its bm:submit_result is persisted (fenced by the attempt and pi session)
@@ -217,7 +219,13 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:run_task, attrs}, _from, state) do
     case Bm.Repo.transaction(fn -> admit_records(state, attrs) end) do
       {:ok, records} ->
-        state = start_attempt(state, records)
+        state = assign_attempt(state, records)
+
+        state =
+          if state.run.baseline_verify == nil,
+            do: start_baseline_verification(state),
+            else: start_worker(state)
+
         {:reply, {:ok, state.attempt}, state}
 
       {:error, reason} ->
@@ -275,11 +283,11 @@ defmodule Bm.Workspace.Coordinator do
     end
   end
 
-  defp start_attempt(state, %{workspace: workspace, run: run, task: task, attempt: attempt}) do
+  defp assign_attempt(state, %{workspace: workspace, run: run, task: task, attempt: attempt}) do
     agent_id = "attempt-#{attempt.id}"
     Bm.Pi.subscribe(agent_id)
 
-    state = %{
+    %{
       state
       | workspace: workspace,
         run: run,
@@ -298,17 +306,62 @@ defmodule Bm.Workspace.Coordinator do
         running_since: nil,
         last_event_at: nil
     }
+  end
 
+  defp start_worker(state) do
     coordinator = self()
-    root = state.root
-    role = attempt.role
+    %{root: root, agent_id: agent_id, attempt: %{role: role}} = state
 
     state =
-      start_job(state, :start, fn ->
+      start_job(%{state | phase: :starting}, :start, fn ->
         Profile.start(agent_id, role, owner: coordinator, cwd: root)
       end)
 
     broadcast_attempt(state)
+  end
+
+  ## Baseline verification (6.6.3)
+
+  # The first attempt of a run waits for one run of the verify command on the checkout as the
+  # user left it. Its result is recorded on the run and shown; attempts run either way.
+  defp start_baseline_verification(state) do
+    coordinator = self()
+
+    %{root: root, workspace: %{verify_command: command}, config: %{verify_timeout: timeout}} =
+      state
+
+    state =
+      start_job(%{state | phase: :baseline}, :baseline, fn ->
+        Bm.Workspace.Verify.run(command, root, timeout, coordinator)
+      end)
+
+    broadcast_attempt(state)
+  end
+
+  defp baseline_verified(state, result) do
+    state = %{state | verify_pgid: nil}
+
+    verify =
+      case result do
+        %{} = verify -> verify
+        other -> %{"exit" => nil, "output" => "verification crashed: #{inspect(other)}"}
+      end
+
+    # The verify command may itself change files (generators); those are not the attempt's.
+    {changed, state} =
+      with {:ok, tree} <- Git.snapshot(state.root),
+           {:ok, entries} <- Git.diff(state.root, state.attempt.tree_before, tree) do
+        attempt = Runs.update_attempt_fields(state.attempt, %{tree_before: tree})
+        {Enum.map(entries, & &1.path), %{state | attempt: attempt}}
+      else
+        _error -> {[], state}
+      end
+
+    {:ok, run} = Runs.set_baseline_verify(state.run, Map.put(verify, "changed", changed))
+    Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+    state = %{state | run: run}
+
+    if state.cancel?, do: finish(state, :cancelled, %{}), else: start_worker(state)
   end
 
   defp maybe_set_verify_command(workspace, %{verify_command: command}) when is_binary(command),
@@ -409,6 +462,11 @@ defmodule Bm.Workspace.Coordinator do
   def handle_info(:settle_check, %{phase: :settling} = state), do: {:noreply, settle_check(state)}
   def handle_info(:settle_check, state), do: {:noreply, state}
 
+  def handle_info({:verify_started, pgid}, %{phase: :baseline} = state) do
+    if state.cancel?, do: Bm.Proc.terminate_groups([pgid])
+    {:noreply, %{state | verify_pgid: pgid}}
+  end
+
   def handle_info({:verify_started, pgid}, %{phase: :verifying} = state) do
     if state.cancel?, do: Bm.Proc.terminate_groups([pgid])
 
@@ -504,7 +562,8 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp authorize(state, %{"tool" => tool} = payload) do
-    ctx = %{root: state.root, user_owned: user_owned(state)}
+    mode = if state.attempt.role == :reader, do: :read_only, else: :write
+    ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
 
     case Bm.Policy.authorize(tool, payload["input"] || %{}, ctx) do
       :allow -> %{"ok" => true, "allow" => true}
@@ -548,6 +607,7 @@ defmodule Bm.Workspace.Coordinator do
 
   defp job_done(state, :stop, _result), do: stopped(state)
   defp job_done(state, :verify, result), do: verified(state, result)
+  defp job_done(state, :baseline, result), do: baseline_verified(state, result)
 
   defp worker_started(state, agent_pid) do
     summary = Bm.Pi.snapshot(state.agent_id).summary
@@ -973,10 +1033,17 @@ defmodule Bm.Workspace.Coordinator do
 
     case state.phase do
       # Handled when pi has started (job_done :start) or stopped (attribute).
-      phase when phase in [:starting, :stopping] -> state
-      :running -> stop_worker(state)
-      :settling -> stop_worker(state)
-      :verifying -> tap(state, &(&1.verify_pgid && Bm.Proc.terminate_groups([&1.verify_pgid])))
+      phase when phase in [:starting, :stopping] ->
+        state
+
+      :running ->
+        stop_worker(state)
+
+      :settling ->
+        stop_worker(state)
+
+      phase when phase in [:verifying, :baseline] ->
+        tap(state, &(&1.verify_pgid && Bm.Proc.terminate_groups([&1.verify_pgid])))
     end
   end
 

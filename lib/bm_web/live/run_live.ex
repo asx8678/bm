@@ -205,6 +205,8 @@ defmodule BmWeb.RunLive do
           </dl>
         </header>
 
+        <.baseline_warning run={@run} />
+
         <.action_bar lane={@lane} latest={@latest} run={@run} root={@root} form={@form} />
 
         <ol id="attempts" phx-update="stream" class="mt-6 space-y-4">
@@ -222,6 +224,64 @@ defmodule BmWeb.RunLive do
     </Layouts.app>
     """
   end
+
+  attr :run, :any, required: true
+
+  # Shown when the verify command already failed on the checkout as the user left it: a failing
+  # verification afterwards is then not the worker's doing.
+  defp baseline_warning(%{run: %{baseline_verify: %{"exit" => exit} = verify}} = assigns)
+       when exit != 0 do
+    assigns = assign(assigns, verify: verify)
+
+    ~H"""
+    <details
+      id="baseline-warning"
+      class="group mt-5 rounded-xl border border-bm-run/50 bg-bm-run/10 px-4 py-2.5"
+    >
+      <summary class="flex cursor-pointer list-none items-center gap-2 text-xs">
+        <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
+        <span class="font-semibold text-bm-run">Your checkout already fails verification</span>
+        <span class="font-mono text-[11px] text-bm-muted">{verify_label(@verify)} before any attempt</span>
+      </summary>
+      <p class="mt-2 text-xs text-bm-muted">
+        The verify command was run once before the first attempt and did not pass. Attempts still
+        run, but a failing verification may not be the worker's doing. Fix the checkout or the
+        verify command, then start a new run.
+      </p>
+      <pre
+        :if={@verify["output"] not in [nil, ""]}
+        class="mt-2 max-h-72 overflow-auto rounded-md bg-bm-bg px-3 py-2 font-mono text-[11px] leading-relaxed"
+      >{@verify["output"]}</pre>
+    </details>
+    """
+  end
+
+  defp baseline_warning(
+         %{run: %{baseline_verify: %{"changed" => [_ | _] = changed}} = run} = assigns
+       ) do
+    owned = get_in(run.baseline, ["user_owned"]) || []
+
+    case Enum.filter(changed, &(&1 in owned)) do
+      [] ->
+        ~H""
+
+      touched ->
+        assigns = assign(assigns, touched: touched)
+
+        ~H"""
+        <p
+          id="baseline-warning"
+          class="mt-5 rounded-xl border border-bm-run/50 bg-bm-run/10 px-4 py-2.5 text-xs"
+        >
+          <span class="font-semibold text-bm-run">Your verify command changed your uncommitted files</span>
+          before any attempt ran: <span class="font-mono">{Enum.join(@touched, ", ")}</span>.
+          BM did not touch them itself; check the command if that was not intended.
+        </p>
+        """
+    end
+  end
+
+  defp baseline_warning(assigns), do: ~H""
 
   attr :lane, :any, required: true
   attr :latest, :any, required: true

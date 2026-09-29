@@ -80,6 +80,11 @@ defmodule Bm.Runs do
     end)
   end
 
+  @doc "Records the verify command's result on the checkout before the first attempt."
+  def set_baseline_verify(%Run{} = run, result) when is_map(result) do
+    run |> Ecto.Changeset.change(baseline_verify: result) |> Repo.update()
+  end
+
   @doc "The workspace's unfinished (`:active` or `:paused`) run, or nil."
   def get_unfinished_run(%Workspace{id: workspace_id}) do
     Repo.one(

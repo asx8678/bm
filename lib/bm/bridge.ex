@@ -6,7 +6,7 @@ defmodule Bm.Bridge do
   The owner calls `handle/5` with its **current assignment** for that agent, which:
 
     1. checks that the agent's **role** may perform the operation (planners propose tasks,
-       workers report results);
+       workers report results; both ask for authorization of guarded tool calls);
     2. **fences** the request: it is rejected unless the owner has assigned the agent work
        (`"not_assigned"`; a worker needs an attempt) and the request comes from the pi session
        the assignment was made for (`"stale"`);
@@ -26,7 +26,7 @@ defmodule Bm.Bridge do
   alias Bm.Repo
 
   @ops %{
-    planner: ~w(propose_task close_plan),
+    planner: ~w(propose_task close_plan authorize),
     worker: ~w(submit_result authorize)
   }
 

@@ -89,7 +89,9 @@ defmodule Bm.Live.QualificationTest do
   test "planner: the profile check passes and propose_task / close_plan are answered by the BEAM",
        ctx do
     report = start!(ctx, :planner)
-    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls propose_task close_plan))
+
+    assert Enum.sort(report.tools) ==
+             Enum.sort(~w(read grep find ls bash propose_task close_plan))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """
@@ -104,7 +106,7 @@ defmodule Bm.Live.QualificationTest do
 
   test "reader: submit_result is answered by the BEAM; mutating tools are not available", ctx do
     report = start!(ctx, :reader)
-    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls submit_result))
+    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls bash submit_result))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """
@@ -112,9 +114,22 @@ defmodule Bm.Live.QualificationTest do
       submit_result with status "done" and summary "reader probe". Do nothing else.
       """)
 
-    requests = serve(ctx, fn _ -> %{"ok" => true, "status" => "received"} end)
+    # The reader has bash behind the guard (6.6.5): the BEAM answers with the read-only policy.
+    requests =
+      serve(ctx, fn
+        %{op: "authorize", payload: %{"tool" => tool, "input" => input}} ->
+          case Bm.Policy.authorize(tool, input, %{root: ctx.dir, user_owned: [], mode: :read_only}) do
+            :allow -> %{"ok" => true, "allow" => true}
+            {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
+          end
+
+        _request -> %{"ok" => true, "status" => "received"}
+      end)
+
     # The model may report "done" or honestly "blocked"; what matters is the request and no file.
-    assert [%{op: "submit_result", payload: %{"status" => _}}] = requests
+    assert [%{op: "submit_result", payload: %{"status" => _}}] =
+             Enum.filter(requests, &(&1.op == "submit_result"))
+
     refute File.exists?(Path.join(ctx.dir, "q3.txt"))
   end
 

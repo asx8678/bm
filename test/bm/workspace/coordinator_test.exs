@@ -231,17 +231,20 @@ defmodule Bm.Workspace.CoordinatorTest do
   describe "verification side effects (review)" do
     test "files the verify command changes belong to the attempt and its checkpoint",
          %{repo: repo} do
-      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], verify_command: "echo generated > gen.txt")
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()],
+        verify_command: "echo generated-$$ > gen.txt"
+      )
+
       {attempt, :free} = await_status(:accepted)
 
       assert Enum.map(attempt.actual_writes, & &1["path"]) |> Enum.sort() == ["a.txt", "gen.txt"]
       assert "verify_changed_files" in attempt.flags
-      assert git!(repo, ["cat-file", "-p", "#{attempt.checkpoint_ref}:gen.txt"]) == "generated"
+      assert git!(repo, ["cat-file", "-p", "#{attempt.checkpoint_ref}:gen.txt"]) =~ "generated-"
     end
 
     test "a verify command that changes the user's files holds the lane", %{repo: repo} do
       run!(repo, [%{write: ["a.txt", "a\n"]}, done()],
-        verify_command: "echo reformatted > notes.txt"
+        verify_command: "echo reformatted-$$ > notes.txt"
       )
 
       {attempt, lane} = await_status(:held)
@@ -261,6 +264,51 @@ defmodule Bm.Workspace.CoordinatorTest do
     end
   end
 
+  describe "baseline verification (6.6.3)" do
+    test "a checkout that already fails is recorded; the attempt still runs", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], verify_command: "echo broken; exit 3")
+      {attempt, {:held, _}} = await_status(:held)
+
+      %{run_id: run_id} = Coordinator.state(repo)
+      run = Runs.get_run!(run_id)
+      assert %{"exit" => 3, "output" => "broken\n", "changed" => []} = run.baseline_verify
+      assert attempt.verify["exit"] == 3
+    end
+
+    test "files the verify command generates are not the attempt's", %{repo: repo} do
+      run!(repo, [%{write: ["a.txt", "a\n"]}, done()], verify_command: "touch gen.txt")
+      {attempt, :free} = await_status(:accepted)
+
+      %{run_id: run_id} = Coordinator.state(repo)
+      assert %{"exit" => 0, "changed" => ["gen.txt"]} = Runs.get_run!(run_id).baseline_verify
+      assert Enum.map(attempt.actual_writes, & &1["path"]) == ["a.txt"]
+      refute "verify_changed_files" in attempt.flags
+
+      # The second attempt of the run does not verify the baseline again.
+      run!(repo, [done()])
+      {second, :free} = await_status(:accepted)
+      assert second.tree_before == attempt.tree_after
+    end
+
+    test "a cancel during the baseline ends it and the attempt", %{repo: repo} do
+      run!(repo, [done()], verify_command: "sleep 30")
+      # The verify command is running: cancel now.
+      :ok = wait_for_phase(repo, :baseline)
+      :ok = Coordinator.cancel(repo)
+      {attempt, :free} = await_status(:cancelled)
+      assert attempt.actual_writes == []
+      assert Coordinator.state(repo).phase == nil
+    end
+  end
+
+  defp wait_for_phase(repo, phase, tries \\ 100) do
+    case Coordinator.state(repo) do
+      %{phase: ^phase} -> :ok
+      _ when tries == 0 -> flunk("phase #{phase} not reached")
+      _ -> receive(after: (20 -> wait_for_phase(repo, phase, tries - 1)))
+    end
+  end
+
   describe "read-only tasks" do
     test "run with the reader profile and are accepted without changes", %{repo: repo} do
       run!(repo, [done()], mutates: false)
@@ -272,6 +320,23 @@ defmodule Bm.Workspace.CoordinatorTest do
       run!(repo, [%{write: ["a.txt", "a\n"]}, done()], mutates: false)
       {attempt, _lane} = await_status(:failed)
       assert attempt.error =~ "read-only"
+    end
+
+    test "may run commands, but not ones that write (6.6.5)", %{repo: repo} do
+      run!(repo, [%{bash: "cat README.md"}, done()], mutates: false)
+      {_attempt, :free} = await_status(:accepted)
+
+      run!(repo, [%{bash: "echo x > a.txt"}, done()], mutates: false)
+      {attempt, :free} = await_status(:failed)
+      assert attempt.error =~ "without submitting"
+      refute File.exists?(Path.join(repo, "a.txt"))
+
+      denied =
+        Bm.Repo.all(Bm.Bridge.Request)
+        |> Enum.filter(&(&1.op == "authorize" and &1.attempt_id == attempt.id))
+
+      assert [%{outcome: %{"allow" => false, "reason" => reason}}] = denied
+      assert reason =~ "read-only"
     end
   end
 
