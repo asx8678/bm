@@ -53,7 +53,8 @@ defmodule Bm.Workspace.Git do
   # A workspace is a whole checkout: `repo` must be the repository's top level, not a
   # subdirectory (which would snapshot only part of it, or a directory the parent repo ignores).
   defp git_dir(repo) do
-    with {:ok, out} <- git(repo, ["rev-parse", "--absolute-git-dir", "--show-toplevel"]),
+    with {:ok, out} <-
+           git(repo, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], stderr: true),
          [git_dir, top] <- String.split(out, "\n", trim: true) do
       {real, 0} = System.cmd("pwd", ["-P"], cd: repo)
       if top == String.trim(real), do: {:ok, git_dir}, else: {:error, {:not_repository_root, top}}
