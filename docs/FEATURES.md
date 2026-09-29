@@ -16,13 +16,13 @@ Make the pieces that exist trustworthy and answer the open questions before buil
 
 | # | Feature | Size | Status |
 |---|---|---|---|
-| A1 | Fix the agent adapter: `new_session`/commands wait for pi's `success`; keep monetary cost; missing usage is *unknown*, not 0; bound the line buffer, pending requests and transcript | S | todo |
-| A2 | Split `bm_bridge` into **`bm_planner`** (`propose_task`, `close_plan`) and **`bm_worker`** (`submit_result`) | S | todo |
-| A3 | **Authoritative dialogs**: tools send a `bm:` dialog and return the BEAM's answer; the adapter persists before answering; duplicate `request_id`s return the stored outcome; identity comes from the channel | M | todo |
-| A4 | `ToolCalls` output becomes **proposals** (UI and read-only preparation only) | S | todo |
-| A5 | **Profiles and profile check**: planner / read-only / mutating profiles; self-report on start + `get_state`; mismatch fails closed; pinned pi and Fabric versions | M | todo |
-| A6 | **Qualification suite** for the open questions: nested dialogs, `tool_call` blocking in nested calls, denied calls cause no change, missing hooks fail closed, `--tools` restricts nested calls, background jobs | M | todo |
-| A7 | Experiment scripts and **sanitized replay fixtures** in the repository | S | todo |
+| A1 | Fix the agent adapter: `new_session`/commands wait for pi's `success`; keep monetary cost; missing usage is *unknown*, not 0; bound the line buffer, pending requests and transcript | S | **done** |
+| A2 | Split `bm_bridge` into **`bm_planner`** (`propose_task`, `close_plan`) and **`bm_worker`** (`submit_result`) | S | **done** |
+| A3 | **Authoritative dialogs**: tools send a `bm:` dialog and return the BEAM's answer; the adapter persists before answering; duplicate `request_id`s return the stored outcome; identity comes from the channel | M | **done** |
+| A4 | `ToolCalls` output becomes **proposals** (UI and read-only preparation only) | S | **done** |
+| A5 | **Profiles and profile check**: planner / read-only / mutating profiles; self-report on start + `get_state`; mismatch fails closed; pinned pi and Fabric versions | M | **done** (Fabric control: decision D16 pending) |
+| A6 | **Qualification suite** for the open questions: nested dialogs, `tool_call` blocking in nested calls, denied calls cause no change, missing hooks fail closed, `--tools` restricts nested calls, background jobs | M | **run live**: 4/5 pass; `--tools` doesn't bind Fabric |
+| A7 | Experiment scripts and **sanitized replay fixtures** in the repository | S | partial: live tests in repo; fixtures need an allowlist sanitizer |
 
 **Exit gate:** qualification results recorded in ARCHITECTURE.md §13–14; every authoritative
 operation acknowledged; replay tests pass without a model.

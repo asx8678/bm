@@ -8,7 +8,7 @@
 
 import { StringEnum, Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { bmRequest, report } from "./bm_common.ts";
+import { bmRequest, registerShutdown, report } from "./bm_common.ts";
 
 const submitResult = defineTool({
 	name: "submit_result",
@@ -31,6 +31,7 @@ const submitResult = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
+	registerShutdown(pi);
 	pi.registerTool(submitResult);
 	pi.on("session_start", (_event, ctx) => report(ctx, "profile", { role: "worker", tools: pi.getActiveTools() }));
 }

@@ -23,7 +23,7 @@ defmodule Bm.Bridge do
 
   @ops %{
     planner: ~w(propose_task close_plan),
-    worker: ~w(submit_result)
+    worker: ~w(submit_result authorize)
   }
 
   @type role :: :planner | :worker

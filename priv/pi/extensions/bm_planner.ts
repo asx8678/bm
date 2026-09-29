@@ -9,7 +9,7 @@
 
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { bmRequest, report } from "./bm_common.ts";
+import { bmRequest, registerShutdown, report } from "./bm_common.ts";
 
 const proposeTask = defineTool({
 	name: "propose_task",
@@ -53,6 +53,7 @@ const closePlan = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
+	registerShutdown(pi);
 	pi.registerTool(proposeTask);
 	pi.registerTool(closePlan);
 	pi.on("session_start", (_event, ctx) => report(ctx, "profile", { role: "planner", tools: pi.getActiveTools() }));

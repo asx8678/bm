@@ -20,7 +20,8 @@ defmodule Bm.Pi.Agent do
   pi process with a new session epoch.
   """
 
-  use GenServer, restart: :transient
+  # Leave time for pi to shut down gracefully before the supervisor gives up (see terminate/2).
+  use GenServer, restart: :transient, shutdown: 20_000
 
   require Logger
 
@@ -39,6 +40,8 @@ defmodule Bm.Pi.Agent do
 
   @impl true
   def init(opts) do
+    # Needed for terminate/2 to run on supervisor shutdown, so pi can exit gracefully.
+    Process.flag(:trap_exit, true)
     config = Application.get_env(:bm, Bm.Pi, [])
     owner = opts[:owner]
     if owner, do: Process.monitor(owner)
@@ -52,6 +55,8 @@ defmodule Bm.Pi.Agent do
       # When set, stdout lines from pi are appended to this file (debugging and replay fixtures).
       raw_log: opts[:raw_log],
       raw_log_bytes: 0,
+      # Extension command that makes pi exit cleanly (profiles with a bm_* extension set it).
+      shutdown_command: opts[:shutdown_command],
       owner: owner,
       port: nil,
       os_pid: nil,
@@ -172,14 +177,45 @@ defmodule Bm.Pi.Agent do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{port: port}) when is_port(port) do
-    # Closing stdin asks pi to shut down cleanly.
+  def terminate(_reason, %{port: port} = state) when is_port(port) do
+    # A killed pi can leave its auth-storage lock behind and delay the next start by up to
+    # 30 s, so ask pi to exit by itself first; escalate only if it doesn't.
+    graceful? =
+      if state.shutdown_command do
+        send_record(state, %{type: "prompt", message: state.shutdown_command})
+        await_exit(port, 10_000)
+      end
+
+    stopped_by =
+      cond do
+        graceful? -> :shutdown_command
+        kill_and_wait(state, "TERM", 3_000) -> :sigterm
+        kill_and_wait(state, "KILL", 2_000) -> :sigkill
+        true -> :unknown
+      end
+
+    Logger.info("pi agent #{state.id}: stopped by #{stopped_by}")
     Port.close(port)
   catch
     :error, :badarg -> :ok
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp kill_and_wait(%{os_pid: os_pid, port: port}, signal, timeout) do
+    System.cmd("kill", ["-#{signal}", to_string(os_pid)], stderr_to_stdout: true)
+    await_exit(port, timeout)
+  end
+
+  # Keeps reading pi's output (so pi never hits a closed pipe) until it exits.
+  defp await_exit(port, timeout) do
+    receive do
+      {^port, {:exit_status, _}} -> true
+      {^port, {:data, _}} -> await_exit(port, timeout)
+    after
+      timeout -> false
+    end
+  end
 
   defp open_port(state) do
     [executable | args] = state.command

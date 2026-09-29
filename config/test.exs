@@ -42,3 +42,11 @@ config :phoenix,
 
 # Replace pi with a scripted stand-in that speaks the same RPC protocol
 config :bm, Bm.Pi, command: ["node", Path.expand("../test/support/fake_pi.mjs", __DIR__)]
+
+config :bm, Bm.Pi.Profile,
+  pi_command: ["node", Path.expand("../test/support/fake_pi.mjs", __DIR__)],
+  model: "fake/Fake Model",
+  zro_extension: nil,
+  fabric_extension: nil,
+  pi_version: nil,
+  fabric_version: nil

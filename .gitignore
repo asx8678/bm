@@ -38,3 +38,7 @@ npm-debug.log
 
 # pi / Fabric runtime state written when agents run in this directory
 /.pi/
+
+# Raw pi RPC recordings contain the local pi environment (system prompt, skills); commit only
+# fixtures produced by an allowlist sanitizer.
+/test/fixtures/pi/*.jsonl

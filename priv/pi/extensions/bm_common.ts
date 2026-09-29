@@ -11,7 +11,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -37,6 +37,17 @@ export async function bmRequest(
 	}
 	if (!reply.ok) throw new Error(`BM rejected ${op}: ${reply.error ?? "unknown reason"}`);
 	return reply;
+}
+
+/**
+ * `/bm-shutdown`: lets the BEAM stop pi gracefully. Killing pi can leave pi's auth-storage file
+ * lock behind, which blocks the next pi start for up to 30 s (proper-lockfile, stale: 30_000).
+ */
+export function registerShutdown(pi: ExtensionAPI): void {
+	pi.registerCommand("bm-shutdown", {
+		description: "Shut pi down gracefully (used by BM)",
+		handler: async (_args, ctx) => ctx.shutdown(),
+	});
 }
 
 /** Best-effort telemetry. */

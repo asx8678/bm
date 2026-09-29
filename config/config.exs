@@ -43,6 +43,16 @@ config :bm, Bm.Pi,
   command: ["pi", "--mode", "rpc", "--no-session", "--model", "zro/glm-5.3"],
   cwd: nil
 
+# Controlled profiles for BM-managed pi agents (see Bm.Pi.Profile). Versions are pinned: a
+# mismatch stops the agent before it gets work. Rerun the live qualification after upgrading.
+config :bm, Bm.Pi.Profile,
+  pi_command: ["pi"],
+  model: "zro/glm-5.3",
+  zro_extension: Path.expand("~/.pi/agent/npm/node_modules/pi-zro-provider"),
+  fabric_extension: Path.expand("~/.pi/agent/npm/node_modules/pi-fabric"),
+  pi_version: "0.87.1",
+  fabric_version: "0.97.0"
+
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.3.3",

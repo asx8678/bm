@@ -75,6 +75,8 @@ function handle(command) {
   } else if (command.type === "prompt") {
     const message = command.message
     if (message === "crash") process.exit(3)
+    // Like the bm_* extensions' /bm-shutdown command: exit cleanly.
+    if (message === "/bm-shutdown") process.exit(0)
 
     send({id: command.id, type: "response", command: "prompt", success: true})
     send({type: "agent_start"})
@@ -113,6 +115,16 @@ function handle(command) {
   } else {
     send({id: command.id, type: "response", command: command.type, success: false, error: "unsupported"})
   }
+}
+
+// Like BM's extensions, report the profile at start: tools from --tools, guard if bm_guard is loaded.
+const toolsArg = process.argv.indexOf("--tools")
+if (toolsArg >= 0) {
+  const tools = process.argv[toolsArg + 1].split(",").concat(process.env.FAKE_EXTRA_TOOL ? [process.env.FAKE_EXTRA_TOOL] : [])
+  const role = tools.includes("propose_task") ? "planner" : "worker"
+  const notify = data => send({type: "extension_ui_request", id: `r-${Math.random()}`, method: "notify", message: `bm:${JSON.stringify(data)}`})
+  notify({event: "profile", data: {role, tools}})
+  if (process.argv.some(arg => arg.endsWith("bm_guard.ts"))) notify({event: "guard", data: {tools: ["edit", "write", "bash"]}})
 }
 
 process.stdin.on("data", chunk => {

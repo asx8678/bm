@@ -52,6 +52,7 @@ real pi/Fabric before anything relies on it.
 | D12 | Checkpoints are **private git commits under `refs/bm/…`**, built with a separate index | Records exactly what was verified without touching HEAD, the branch or the user's index | `git add <files> && git commit` (would include the user's staged changes) |
 | D13 | Postgres is authoritative; ETS holds live projections only | Recovery after a crash needs durable state | ETS-only claims and state |
 | D14 | Fabric's **managed-host mode** is noted, not used | It gives a clean provider boundary, but disables speculation, prewalk, repairs, entropy and native MCP, and requires the host to broker pi's core tools | Adopting it now |
+| D16 | **Pending:** how to control Fabric in workers. Options: (a) Fabric-free workers; (b) a BM-managed `PI_CODING_AGENT_DIR` with its own `fabric.json` (agents, mesh and MCP off), which needs access to the user's pi credentials; (c) guard-only control with Fabric's user config | Live A6 showed `--tools` doesn't bind Fabric and Fabric starts the user's MCP servers | — |
 | D15 | Planner runs **without** Fabric | Simplicity: the planner writes no code. (Fabric hides extension tools by default, but `capture.keepVisible` could keep them visible, so this is a choice, not a necessity) | Planner with Fabric |
 
 Revisit a decision by adding a row, not by deleting one.
@@ -279,7 +280,11 @@ may have changed files is never retried automatically.
 
 **Designed, not implemented:** everything in sections 5–11 not listed above.
 
-**Assumptions to qualify (stage A):** see section 14, items 1–6.
+**Stage A progress:** A1–A5 implemented (acknowledged commands, cost, bounds, proposals,
+authoritative dialogs with persisted idempotent requests, split extensions, profiles with a
+fail-closed check, graceful shutdown). A6 qualification run live (5 tests, 4 pass; the failing one
+is finding 4). A7: live tests are in `test/live/`; recorded fixtures are not committed until an
+allowlist sanitizer exists (raw streams contain the local pi environment).
 
 ---
 
@@ -302,18 +307,32 @@ Measured 2026-09-29: pi 0.87.1, Fabric 0.97.0 (source read at 0.98.1), GLM 5.3 v
 | Fabric hides extension tools by default; `capture.keepVisible` can keep them visible | Fabric `docs/configuration.md` |
 | Fabric managed-host v1 disables speculation, prewalk, repairs, entropy and native MCP | Fabric `docs/providers.md` |
 | Running Fabric in the checkout writes `.pi/fabric/` (mesh state, MCP cache) even with agents off | observed; now in `.gitignore` |
+| **`--tools` does not restrict Fabric's nested calls**: a "read-only" worker (no `write` in `--tools`) created a file with `pi.write` inside `fabric_exec` | live qualification A6 |
+| With Fabric loaded, the only active tool is `fabric_exec`; extension tools such as `submit_result` are captured and reachable as `extensions.<tool>` | live A6 (profile self-report) |
+| `bm:` dialogs from inside `fabric_exec` reach the BEAM and return its answer | live A6 |
+| `bm_guard`'s `tool_call` hook fires for nested `pi.write`, awaits the BEAM, and a denied write creates nothing | live A6 |
+| The guard sees background shell requests (`{"background": true, ...}`); such a process outlives `agent_settled` as a pi descendant | live A6 |
+| A `ChatGPT.app … node_repl` process ran as a descendant of a Fabric worker's pi, most likely an MCP server started by Fabric from the user's config (not confirmed) | live A6, `ps` |
+| pi's auth-storage lock goes stale after 30 s (`proper-lockfile`, `stale: 30_000`); killing pi can delay the next start by ~30 s. Graceful exit via the `/bm-shutdown` extension command stops pi in 8–13 ms with fast restarts (0.82 s) | measured; pi `auth-storage.ts` |
+| `PI_CODING_AGENT_DIR` sets the config directory for both pi and Fabric | Fabric `core/agent-dir.ts` |
 | A checkpoint built with a separate index (`GIT_INDEX_FILE` + `read-tree HEAD` + `add -A` + `commit-tree` + `update-ref refs/bm/…`) leaves HEAD, the branch and the user's staged changes untouched and records the full working tree | throwaway-repo test with a staged and an untracked user file |
 
 ---
 
-## 14. Open questions (qualify in stage A)
+## 14. Open questions
 
-1. Does a dialog from inside a nested `fabric_exec` call reach the BEAM and return its answer?
-2. Can `bm_guard`'s `tool_call` hook await, and does it fire for `pi.edit`/`pi.write`/`pi.bash`
-   called inside `fabric_exec`? Denied calls must produce no change.
-3. If a required hook is missing (runner absent, extension failed to load), does protection fail closed?
-4. Does restricting tools with `--tools` also restrict Fabric's nested calls?
-5. Can background shell jobs be prevented or detected in worker profiles?
+Answered in stage A6 (live, 2026-09-29):
+
+1. Dialogs from inside `fabric_exec` reach the BEAM: **yes**.
+2. `bm_guard` awaits the BEAM and fires for nested `pi.write`; a denial writes nothing: **yes**.
+3. Missing guard: the writer profile requires the guard's self-report, so a worker without it is
+   rejected before assignment (profile check). A guard that loads but can't reach the BEAM blocks.
+4. `--tools` restricts Fabric's nested calls: **no**. Read-only enforcement for Fabric workers needs
+   the guard (deny-all policy) or a Fabric-free profile. **Decision D16 pending.**
+5. Background shell jobs: the guard sees the `background` flag and can deny it; if allowed, the
+   process outlives `agent_settled`, so settling must check descendants (stage B5).
+
+Still open:
 6. Which settings in the user's `fabric.json` (approvals, `prewalk.alwaysRearm`, mesh, MCP) affect
    workers, and can the profile check see them?
 7. How well does GLM 5.3 declare write sets? (Affects scheduling in stage D.)

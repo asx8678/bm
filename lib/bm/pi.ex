@@ -61,6 +61,7 @@ defmodule Bm.Pi do
   end
 
   def subscribe(id), do: Phoenix.PubSub.subscribe(Bm.PubSub, topic(id))
+  def unsubscribe(id), do: Phoenix.PubSub.unsubscribe(Bm.PubSub, topic(id))
 
   @doc false
   def broadcast(id, event, summary) do
