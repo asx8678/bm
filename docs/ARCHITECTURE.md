@@ -313,7 +313,12 @@ may have changed files is never retried automatically.
   `bm_guard` records every bash command's group in `BM_PGID_FILE`, and all groups are ended when
   pi exits or the agent stops.
 
-**Not implemented yet:** runs, tasks, attempts, the workspace coordinator, git layer, policy,
+- Persistence (Phase 2): `Bm.Runs` with workspaces (canonical paths), runs (one unfinished run
+  per workspace, enforced by a partial unique index), tasks, attempts and the attempt state
+  machine (`Bm.Runs.Attempt.transitions/0`, compare-and-set transitions). `Bm.Bridge.handle/5`
+  fences requests by the owner's assignment (`stale`, `not_assigned`) and records the attempt.
+
+**Not implemented yet:** the workspace coordinator, git layer, policy,
 limits, recovery and the run page (milestone B), and the planner flow (milestone C). Nothing
 answers the guard's `authorize` requests outside tests yet. A7 (replay fixtures) is optional (D17).
 
@@ -406,6 +411,7 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/pi/tool_calls.ex` | Streamed tool-call assembler (proposals) |
 | `lib/bm/pi/transcript.ex` | Transcript reducer |
 | `lib/bm/proc.ex`, `priv/pi/setsid.pl` | Process groups: launcher, members, group kill, `BM_PGID_FILE` |
+| `lib/bm/runs.ex`, `lib/bm/runs/` | Workspaces, runs, tasks, attempts (Postgres) and the attempt state machine |
 | `lib/bm/bridge.ex`, `lib/bm/bridge/request.ex` | Authoritative dialog handling and its persisted requests |
 | `priv/pi/extensions/bm_common.ts` | Dialog/notify helpers and `/bm-shutdown` (not an extension) |
 | `priv/pi/extensions/bm_planner.ts` | `propose_task`, `close_plan` |

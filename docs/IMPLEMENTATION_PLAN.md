@@ -118,10 +118,16 @@ Verify: table-driven test over every pair.
 
 **2.4 Fencing in the bridge.** Add `attempt_id` to `bridge_requests` (new migration).
 `Bm.Bridge.handle/4` receives the current assignment (`attempt_id`, `session_epoch`) from the
-caller; a request arriving with an epoch that differs from the adapter's current one, or when no
-attempt is assigned, returns `%{"ok" => false, "error" => "stale"}` and runs nothing.
+caller; a request arriving with an epoch that differs from the assignment's returns
+`%{"ok" => false, "error" => "stale"}`, and one arriving when nothing is assigned (or a worker
+without an attempt) returns `"not_assigned"`; neither runs nor persists anything.
 Verify: `bridge_test.exs`: stale epoch rejected; no assignment rejected; duplicate `request_id`
 still returns the stored outcome.
+
+**Status: Phase 2 done (2026-09-29).** Notes: attempts may also go `running → settling` (worker
+stopped without a result) and `accepted → reverted` (revert of the latest attempt, checked by the
+coordinator); `Bm.Runs.transition_attempt/3` applies a move only if the stored status is unchanged
+(`{:error, :stale}` otherwise); workspace paths are canonical (symlinks resolved).
 
 ---
 

@@ -10,6 +10,8 @@ defmodule Bm.Bridge.Request do
     field :role, :string
     field :op, :string
     field :session_epoch, :integer
+    # The attempt assigned to the agent when the request arrived (nil for planners).
+    belongs_to :attempt, Bm.Runs.Attempt
     field :payload, :map
     field :outcome, :map
 
@@ -20,7 +22,7 @@ defmodule Bm.Bridge.Request do
 
   def changeset(request, attrs) do
     request
-    |> cast(attrs, @fields)
+    |> cast(attrs, [:attempt_id | @fields])
     |> validate_required(@fields)
     |> unique_constraint(:request_id)
   end
