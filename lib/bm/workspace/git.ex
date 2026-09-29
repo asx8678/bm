@@ -176,7 +176,7 @@ defmodule Bm.Workspace.Git do
   deleted. Used to revert an attempt: `from_tree` is its `tree_before`, `expected_tree` its
   `tree_after`.
   """
-  @spec restore(Path.t(), [entry | String.t()], tree, tree) ::
+  @spec restore(Path.t(), [entry | %{String.t() => String.t()} | String.t()], tree, tree) ::
           :ok | {:error, {:changed_since, [String.t()]}} | {:error, term()}
   def restore(repo, entries, from_tree, expected_tree) do
     paths = entries |> Enum.map(&entry_path/1) |> Enum.uniq()
@@ -184,15 +184,47 @@ defmodule Bm.Workspace.Git do
     with {:ok, expected} <- ls_tree(repo, expected_tree, paths),
          {:ok, from} <- ls_tree(repo, from_tree, paths),
          {:ok, current} <- current_objects(repo, paths),
-         [] <- Enum.reject(paths, &(Map.get(current, &1) == Map.get(expected, &1))) do
-      Enum.each(paths, &put_file(repo, &1, Map.get(from, &1), from_tree))
+         deletes = Enum.filter(paths, &(from[&1] == nil and current[&1] != :directory)),
+         [] <- changed_paths(repo, paths, current, expected, MapSet.new(deletes)) do
+      # Deletions first, deepest first, so a directory is empty before a file takes its place
+      # (an attempt that turned file `a` into `a/b` is reverted by removing `a/b`, then `a`).
+      deletes |> Enum.sort_by(&depth/1, :desc) |> Enum.each(&delete_file(repo, &1))
+
+      paths
+      |> Enum.filter(&from[&1])
+      |> Enum.sort_by(&depth/1)
+      |> Enum.each(&write_file(repo, &1, from[&1]))
     else
       changed when is_list(changed) -> {:error, {:changed_since, changed}}
       error -> error
     end
   end
 
+  # Paths whose current state isn't what the attempt left. A directory where the attempt left
+  # nothing (it created files below it) is fine only if the restore deletes everything in it.
+  defp changed_paths(repo, paths, current, expected, deletes) do
+    Enum.reject(paths, fn path ->
+      case current[path] do
+        :directory -> expected[path] == nil and directory_cleared?(repo, path, deletes)
+        object -> object == expected[path]
+      end
+    end)
+  end
+
+  defp directory_cleared?(repo, dir, deletes) do
+    root = Path.expand(repo)
+
+    Path.join([root, dir, "**"])
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&File.dir?/1)
+    |> Enum.all?(&MapSet.member?(deletes, Path.relative_to(&1, root)))
+  end
+
+  defp depth(path), do: path |> Path.split() |> length()
+
   defp entry_path(%{path: path}), do: path
+  # As stored in `attempts.actual_writes` (JSON: string keys).
+  defp entry_path(%{"path" => path}), do: path
   defp entry_path(path) when is_binary(path), do: path
 
   # %{path => {mode, blob}} for the paths present in `tree`.
@@ -217,7 +249,8 @@ defmodule Bm.Workspace.Git do
       full = Path.join(repo, path)
 
       case File.lstat(full) do
-        {:error, :enoent} ->
+        # :enotdir: a parent is a file, so this path doesn't exist either.
+        {:error, reason} when reason in [:enoent, :enotdir] ->
           {:cont, {:ok, acc}}
 
         {:ok, %File.Stat{type: :symlink}} ->
@@ -227,6 +260,9 @@ defmodule Bm.Workspace.Git do
         {:ok, %File.Stat{type: :regular, mode: mode}} ->
           file_mode = if Bitwise.band(mode, 0o111) != 0, do: "100755", else: "100644"
           hash_result(repo, ["hash-object", "--", path], nil, file_mode, path, acc)
+
+        {:ok, %File.Stat{type: :directory}} ->
+          {:cont, {:ok, Map.put(acc, path, :directory)}}
 
         {:ok, %File.Stat{type: type}} ->
           {:halt, {:error, {:unsupported_file_type, path, type}}}
@@ -241,16 +277,21 @@ defmodule Bm.Workspace.Git do
     end
   end
 
-  defp put_file(repo, path, nil, _tree) do
+  defp delete_file(repo, path) do
     full = Path.join(repo, path)
     File.rm(full)
     remove_empty_parents(repo, Path.dirname(full))
   end
 
-  defp put_file(repo, path, {mode, blob}, _tree) do
+  defp write_file(repo, path, {mode, blob}) do
     full = Path.join(repo, path)
     File.mkdir_p!(Path.dirname(full))
-    if match?({:ok, _}, File.lstat(full)), do: File.rm!(full)
+
+    case File.lstat(full) do
+      {:ok, %File.Stat{type: :directory}} -> File.rmdir!(full)
+      {:ok, _} -> File.rm!(full)
+      {:error, _absent} -> :ok
+    end
 
     case mode do
       "120000" ->

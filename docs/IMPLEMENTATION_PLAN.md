@@ -176,6 +176,12 @@ top level; restore also handles file modes and symlinks and uses `cat-file --fil
 conversions); checkpoints use BM's own identity and `--no-gpg-sign`; `mix test --only perf`
 runs the timing check.
 
+**Review (2026-09-29).** A re-check of phases 0–3 found and fixed: restore refused to revert a
+file that an attempt turned into a directory, crashed on a path below a file (`:enotdir`), and
+didn't accept write sets as stored in Postgres (string keys); ARCHITECTURE.md §6 still showed the
+old attempt lifecycle. Restore now deletes deepest-first before writing, and replaces a directory
+only if every file in it is being deleted.
+
 ---
 
 ## Phase 4: workspace coordinator (fake pi)

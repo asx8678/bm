@@ -233,6 +233,15 @@ defmodule Bm.Workspace.GitTest do
       assert Bitwise.band(File.stat!(Path.join(repo, "unstaged.txt")).mode, 0o111) == 0
     end
 
+    test "accepts write sets as stored in Postgres (string keys)", ctx do
+      repo = fixture!(ctx)
+      {before, after_tree, entries} = attempt!(repo)
+      stored = Enum.map(entries, &%{"path" => &1.path, "status" => to_string(&1.status)})
+
+      assert :ok = Git.restore(repo, stored, before, after_tree)
+      assert {:ok, ^before} = Git.snapshot(repo)
+    end
+
     test "refuses and changes nothing when a file changed since", ctx do
       repo = fixture!(ctx)
       {before, after_tree, entries} = attempt!(repo)
@@ -244,6 +253,58 @@ defmodule Bm.Workspace.GitTest do
 
       assert {:ok, ^edited} = Git.snapshot(repo)
       assert read(repo, "tracked.txt") == {:ok, "the user's later edit\n"}
+    end
+
+    test "reverts a file that the attempt turned into a directory, and back", ctx do
+      repo = fixture!(ctx)
+      {:ok, before} = Git.snapshot(repo)
+      File.rm!(Path.join(repo, "tracked.txt"))
+      write!(repo, "tracked.txt/inner.txt", "now a directory\n")
+      File.rm!(Path.join(repo, "untracked.txt"))
+      write!(repo, "untracked.txt/deep/x.txt", "x\n")
+      {:ok, after_tree} = Git.snapshot(repo)
+      {:ok, entries} = Git.diff(repo, before, after_tree)
+
+      assert :ok = Git.restore(repo, entries, before, after_tree)
+      assert {:ok, ^before} = Git.snapshot(repo)
+      assert read(repo, "tracked.txt") == {:ok, "tracked\n"}
+
+      # The other direction: revert from the directory state back to it.
+      {:ok, entries} = Git.diff(repo, after_tree, before)
+      assert :ok = Git.restore(repo, entries, after_tree, before)
+      assert {:ok, ^after_tree} = Git.snapshot(repo)
+    end
+
+    test "refuses to replace a directory that holds files the attempt didn't write", ctx do
+      repo = fixture!(ctx)
+      {:ok, before} = Git.snapshot(repo)
+      File.rm!(Path.join(repo, "tracked.txt"))
+      write!(repo, "tracked.txt/inner.txt", "attempt\n")
+      {:ok, after_tree} = Git.snapshot(repo)
+      {:ok, entries} = Git.diff(repo, before, after_tree)
+      write!(repo, "tracked.txt/user.txt", "the user's new file\n")
+
+      assert {:error, {:changed_since, ["tracked.txt"]}} =
+               Git.restore(repo, entries, before, after_tree)
+
+      assert read(repo, "tracked.txt/user.txt") == {:ok, "the user's new file\n"}
+      assert read(repo, "tracked.txt/inner.txt") == {:ok, "attempt\n"}
+    end
+
+    test "never writes through a symlink the attempt put in place of a directory", ctx do
+      repo = fixture!(ctx)
+      write!(repo, "dir/f.txt", "in dir\n")
+      {:ok, before} = Git.snapshot(repo)
+      outside = Path.join(ctx.tmp_dir, "outside")
+      File.mkdir_p!(outside)
+      File.rm_rf!(Path.join(repo, "dir"))
+      File.ln_s!(outside, Path.join(repo, "dir"))
+      {:ok, after_tree} = Git.snapshot(repo)
+      {:ok, entries} = Git.diff(repo, before, after_tree)
+
+      assert :ok = Git.restore(repo, entries, before, after_tree)
+      assert File.ls!(outside) == []
+      assert read(repo, "dir/f.txt") == {:ok, "in dir\n"}
     end
 
     test "a file recreated after the attempt deleted it counts as changed", ctx do

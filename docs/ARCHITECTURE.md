@@ -164,8 +164,15 @@ proposed ──▶ validated ──▶ accepted ──▶ scheduled
 
 ```
 queued ─▶ admitted ─▶ running ─▶ result_received ─▶ settling ─▶ verifying ─▶ accepted
-                 ╰──────────▶ blocked | failed | cancelled | needs_reconciliation
+                        ╰───────────────────────────────╯                 ╰─▶ held
+in flight (admitted … verifying) ─▶ failed | cancelled | needs_reconciliation
+held ─▶ accepted (Keep) | reverted (Revert)
+failed | cancelled | needs_reconciliation | accepted ─▶ reverted  (latest attempt only)
 ```
+
+The table is `Bm.Runs.Attempt.transitions/0`. `running ─▶ settling` covers a worker that stopped
+without a result. Tasks have their own statuses (`queued`, `running`, `accepted`, `failed`,
+`blocked`, `cancelled`); a task is `blocked` when a dependency failed.
 
 Only the BEAM moves an attempt to `accepted`. A worker's `submit_result` means "I think I'm done";
 it doesn't mean its tools stopped, files are stable or verification passed. Dependents consume
