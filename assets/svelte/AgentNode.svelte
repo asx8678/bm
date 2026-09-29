@@ -6,7 +6,9 @@
 
   const statusLabels = {starting: "Starting", idle: "Ready", running: "Working", exited: "Stopped"}
 
-  const formatTokens = count => (count >= 1000 ? `${(count / 1000).toFixed(1)}k` : `${count}`)
+  // Unknown counts (not reported by the provider) show as a dash, never as 0.
+  const formatTokens = count =>
+    count == null ? "–" : count >= 1000 ? `${(count / 1000).toFixed(1)}k` : `${count}`
 </script>
 
 <div class="agent" data-status={data.status}>

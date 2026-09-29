@@ -1,10 +1,11 @@
 defmodule Bm.PiTest do
   use ExUnit.Case, async: true
 
-  setup do
+  setup context do
     id = "test-#{System.unique_integer([:positive])}"
     Bm.Pi.subscribe(id)
-    {:ok, _pid} = Bm.Pi.ensure_agent(id)
+    opts = if context[:owner], do: [owner: self()], else: []
+    {:ok, _pid} = Bm.Pi.ensure_agent(id, opts)
     on_exit(fn -> Bm.Pi.stop(id) end)
 
     assert_receive {:pi, ^id, :status, %{status: :idle, model: "Fake Model"}}, 5_000
@@ -16,87 +17,174 @@ defmodule Bm.PiTest do
     Bm.Pi.snapshot(id)
   end
 
-  test "a prompt streams back an assistant reply", %{id: id} do
-    assert :ok = Bm.Pi.prompt(id, "hello")
-    assert_receive {:pi, ^id, :status, %{status: :running}}, 5_000
+  describe "commands" do
+    test "a prompt returns :ok once pi accepted it and streams back a reply", %{id: id} do
+      assert :ok = Bm.Pi.prompt(id, "hello")
+      %{transcript: transcript} = settle(id)
 
-    %{transcript: transcript, summary: summary} = settle(id)
-
-    assert [%{role: :user, text: "hello"}, %{role: :assistant, text: "echo: hello"}] = transcript
-    assert summary.usage == %{input: 10, output: 2, cache_read: 5}
-  end
-
-  test "tool calls appear in the transcript and the summary", %{id: id} do
-    Bm.Pi.prompt(id, "tool please")
-
-    assert_receive {:pi, ^id, {:tool_start, "call-1", "read", "mix.exs"},
-                    %{tool: "read mix.exs"}},
-                   5_000
-
-    %{transcript: transcript, summary: summary} = settle(id)
-
-    assert Enum.any?(transcript, &match?(%{role: :tool, name: "read", status: :ok}, &1))
-    assert summary.tool == nil
-  end
-
-  test "model errors are reported", %{id: id} do
-    Bm.Pi.prompt(id, "fail")
-    assert %{transcript: transcript} = settle(id)
-    assert List.last(transcript) == %{role: :error, text: "boom"}
-  end
-
-  test "dialogs are declined so pi does not block", %{id: id} do
-    Bm.Pi.prompt(id, "dialog")
-    assert %{transcript: transcript} = settle(id)
-
-    assert Enum.any?(
-             transcript,
-             &match?(%{role: :notice, text: "Declined pi dialog: Allow?"}, &1)
-           )
-
-    assert %{role: :assistant, text: "dialog: cancelled"} = List.last(transcript)
-  end
-
-  test "the agent survives pi exiting and restarts it on the next prompt", %{id: id} do
-    Bm.Pi.prompt(id, "crash")
-    assert_receive {:pi, ^id, {:error, "pi exited with status 3" <> _}, %{status: :exited}}, 5_000
-
-    Bm.Pi.prompt(id, "again")
-    assert_receive {:pi, ^id, :status, %{status: :idle}}, 5_000
-    assert %{transcript: transcript} = settle(id)
-    assert %{role: :assistant, text: "echo: again"} = List.last(transcript)
-  end
-
-  test "streamed tool calls are reported one by one, before the message ends", %{id: id} do
-    Bm.Pi.prompt(id, "plan")
-
-    for task <- ["a", "b", "c"] do
-      assert_receive {:pi, ^id,
-                      {:tool_call_ready, %{name: "add_task", arguments: %{"id" => ^task}}}, _},
-                     5_000
+      assert [%{role: :user, text: "hello"}, %{role: :assistant, text: "echo: hello"}] =
+               transcript
     end
 
-    settle(id)
-    refute_received {:pi, ^id, {:tool_call_ready, _}, _}
+    test "new_session replies only after pi confirms and then clears the transcript", %{id: id} do
+      Bm.Pi.prompt(id, "hello")
+      settle(id)
+      %{summary: %{session_epoch: epoch}} = Bm.Pi.snapshot(id)
+
+      assert :ok = Bm.Pi.new_session(id)
+      assert %{transcript: [], summary: %{session_epoch: new_epoch}} = Bm.Pi.snapshot(id)
+      assert new_epoch == epoch + 1
+    end
+
+    test "a refused new_session is reported to the caller and keeps the session", %{id: id} do
+      Bm.Pi.prompt(id, "break-reset")
+      settle(id)
+      %{summary: %{session_epoch: epoch}} = Bm.Pi.snapshot(id)
+
+      assert {:error, "reset refused"} = Bm.Pi.new_session(id)
+      assert %{transcript: [_ | _], summary: %{session_epoch: ^epoch}} = Bm.Pi.snapshot(id)
+    end
+
+    test "follow_up is accepted and delivered", %{id: id} do
+      assert :ok = Bm.Pi.follow_up(id, "later")
+      %{transcript: transcript} = settle(id)
+      assert %{role: :assistant, text: "followed: later"} = List.last(transcript)
+    end
+
+    test "the agent survives pi exiting and restarts it with a new session epoch", %{id: id} do
+      %{summary: %{session_epoch: epoch}} = Bm.Pi.snapshot(id)
+      Bm.Pi.prompt(id, "crash")
+
+      assert_receive {:pi, ^id, {:error, "pi exited with status 3" <> _}, %{status: :exited}},
+                     5_000
+
+      Bm.Pi.prompt(id, "again")
+      assert_receive {:pi, ^id, :status, %{status: :idle}}, 5_000
+      assert %{transcript: transcript, summary: %{session_epoch: new_epoch}} = settle(id)
+      assert %{role: :assistant, text: "echo: again"} = List.last(transcript)
+      assert new_epoch > epoch
+    end
   end
 
-  test "bridge reports arrive as events", %{id: id} do
-    Bm.Pi.prompt(id, "report")
+  describe "usage and spend" do
+    test "usage keeps the cost and spend adds confirmed cost per message", %{id: id} do
+      Bm.Pi.prompt(id, "hello")
+      %{summary: summary} = settle(id)
 
-    assert_receive {:pi, ^id, {:bridge, "result", %{"status" => "done", "summary" => "probe"}},
-                    _},
-                   5_000
+      assert summary.usage == %{input: 10, output: 2, cache_read: 5, cost: nil}
+      assert summary.spend == %{confirmed: 0.003, unknown: 0}
+    end
+
+    test "a message without cost counts as unknown, not zero", %{id: id} do
+      Bm.Pi.prompt(id, "nocost")
+      %{summary: summary} = settle(id)
+      assert summary.spend == %{confirmed: 0.0, unknown: 1}
+    end
   end
 
-  test "new_session clears the transcript and keeps the process", %{id: id} do
-    Bm.Pi.prompt(id, "hello")
-    settle(id)
+  describe "events" do
+    test "tool calls appear in the transcript and the summary", %{id: id} do
+      Bm.Pi.prompt(id, "tool please")
 
-    assert :ok = Bm.Pi.new_session(id)
-    assert %{transcript: [], summary: %{status: :idle}} = Bm.Pi.snapshot(id)
+      assert_receive {:pi, ^id, {:tool_start, "call-1", "read", "mix.exs"},
+                      %{tool: "read mix.exs"}},
+                     5_000
 
-    Bm.Pi.prompt(id, "again")
-    assert %{transcript: [_, %{role: :assistant, text: "echo: again"}]} = settle(id)
+      %{transcript: transcript, summary: summary} = settle(id)
+      assert Enum.any?(transcript, &match?(%{role: :tool, name: "read", status: :ok}, &1))
+      assert summary.tool == nil
+    end
+
+    test "model errors are reported", %{id: id} do
+      Bm.Pi.prompt(id, "fail")
+      assert %{transcript: transcript} = settle(id)
+      assert List.last(transcript) == %{role: :error, text: "boom"}
+    end
+
+    test "non-BM dialogs are declined so pi does not block", %{id: id} do
+      Bm.Pi.prompt(id, "dialog")
+      assert %{transcript: transcript} = settle(id)
+
+      assert Enum.any?(
+               transcript,
+               &match?(%{role: :notice, text: "Declined pi dialog: Allow?"}, &1)
+             )
+
+      assert %{role: :assistant, text: "dialog: cancelled"} = List.last(transcript)
+    end
+
+    test "streamed tool calls are proposals: early when complete, final at the end", %{id: id} do
+      Bm.Pi.prompt(id, "plan")
+
+      for key <- ["a", "b", "c"] do
+        assert_receive {:pi, ^id,
+                        {:tool_call, :early, %{name: "add_task", arguments: %{"id" => ^key}}}, _},
+                       5_000
+      end
+
+      for key <- ["a", "b", "c"] do
+        assert_receive {:pi, ^id,
+                        {:tool_call, :final, %{name: "add_task", arguments: %{"id" => ^key}}}, _},
+                       5_000
+      end
+
+      settle(id)
+      refute_received {:pi, ^id, {:tool_call, _, _}, _}
+    end
+
+    test "bridge telemetry arrives as events", %{id: id} do
+      Bm.Pi.prompt(id, "report")
+
+      assert_receive {:pi, ^id, {:bridge, "result", %{"status" => "done", "summary" => "probe"}},
+                      _},
+                     5_000
+    end
+  end
+
+  describe "authoritative bridge requests" do
+    @describetag owner: true
+
+    test "a bm: dialog is forwarded to the owner and the tool gets the owner's reply", %{id: id} do
+      Bm.Pi.prompt(id, "bm-dialog")
+
+      assert_receive {:pi_request, ^id,
+                      %{
+                        op: "submit_result",
+                        request_id: "req-1",
+                        payload: %{"status" => "done"},
+                        dialog_id: dialog_id,
+                        session_epoch: epoch
+                      }},
+                     5_000
+
+      assert is_integer(epoch)
+      Bm.Pi.respond(id, dialog_id, %{"ok" => true, "status" => "received"})
+
+      %{transcript: transcript} = settle(id)
+      assert %{text: ~s(bm reply: {"ok":true,"status":"received"})} = List.last(transcript)
+    end
+
+    test "a malformed request is rejected without reaching the owner", %{id: id} do
+      Bm.Pi.prompt(id, "bm-bad")
+      %{transcript: transcript} = settle(id)
+
+      assert %{text: ~s(bm reply: {"error":"malformed_request","ok":false})} =
+               List.last(transcript)
+
+      refute_received {:pi_request, _, _}
+    end
+
+    test "answers to unknown dialogs are ignored", %{id: id} do
+      Bm.Pi.respond(id, "no-such-dialog", %{"ok" => true})
+      assert :ok = Bm.Pi.prompt(id, "hello")
+      assert %{transcript: [_, %{text: "echo: hello"}]} = settle(id)
+    end
+  end
+
+  test "without an owner, bm: requests fail closed", %{id: id} do
+    Bm.Pi.prompt(id, "bm-dialog")
+    %{transcript: transcript} = settle(id)
+    assert %{text: ~s(bm reply: {"error":"no_owner","ok":false})} = List.last(transcript)
   end
 end
 
@@ -113,5 +201,6 @@ defmodule Bm.PiOptionsTest do
 
     assert_receive {:pi, ^id, :status, %{status: :idle}}, 5_000
     assert File.read!(log) =~ ~s("sessionName":"depth-99")
+    assert is_integer(Bm.Pi.os_pid(id))
   end
 end

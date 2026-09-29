@@ -20,14 +20,34 @@ defmodule Bm.Pi do
     end
   end
 
-  @doc "Sends a user prompt. While the agent is working, it is queued as a follow-up."
-  def prompt(id, text), do: GenServer.call(via(id), {:prompt, text})
+  # Commands wait for pi's correlated response; abort waits until pi is idle again.
+  @command_timeout 30_000
+  @abort_timeout 120_000
 
-  @doc "Clears the agent's pi session so a warm process can take a new task."
-  def new_session(id), do: GenServer.call(via(id), :new_session)
+  @doc """
+  Sends a user prompt; `:ok` once pi accepted it. While the agent is working, the prompt is
+  queued as a follow-up.
+  """
+  def prompt(id, text), do: GenServer.call(via(id), {:prompt, text}, @command_timeout)
 
-  @doc "Aborts the agent's current run."
-  def abort(id), do: GenServer.call(via(id), :abort)
+  @doc "Queues a message for delivery after the agent finishes its current work."
+  def follow_up(id, text), do: GenServer.call(via(id), {:follow_up, text}, @command_timeout)
+
+  @doc "Replaces the pi session; `:ok` only after pi confirmed it."
+  def new_session(id), do: GenServer.call(via(id), :new_session, @command_timeout)
+
+  @doc "Aborts the agent's current run; returns once pi is idle."
+  def abort(id), do: GenServer.call(via(id), :abort, @abort_timeout)
+
+  @doc """
+  Answers an authoritative request forwarded to the agent's owner as
+  `{:pi_request, agent_id, %{dialog_id: ...}}`. `reply` is JSON-encodable and should carry
+  `"ok"`. Answers to unknown or stale dialogs are ignored.
+  """
+  def respond(id, dialog_id, reply), do: GenServer.cast(via(id), {:respond, dialog_id, reply})
+
+  @doc "OS pid of the agent's current pi process, or nil."
+  def os_pid(id), do: GenServer.call(via(id), :os_pid)
 
   @doc "Returns `%{transcript: entries, summary: summary}` for the agent."
   def snapshot(id), do: GenServer.call(via(id), :snapshot)

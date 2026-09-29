@@ -1,0 +1,93 @@
+defmodule Bm.Bridge do
+  @moduledoc """
+  Authoritative handling of requests from BM's pi extensions.
+
+  A request reaches the agent's owner as `{:pi_request, agent_id, request}` (see `Bm.Pi.Agent`).
+  The owner calls `handle/4`, which:
+
+    1. checks that the agent's **role** may perform the operation (planners propose tasks,
+       workers report results);
+    2. returns the stored outcome if this `request_id` was already handled (duplicate delivery
+       has one logical effect);
+    3. otherwise runs the owner's `fun`, **persists** request and outcome in one transaction,
+       and only then returns the outcome for `Bm.Pi.respond/3`.
+
+  Identity comes from the channel: `agent_id` is the adapter the dialog arrived on and the
+  `session_epoch` is the adapter's, never values supplied by the model.
+  """
+
+  import Ecto.Query
+
+  alias Bm.Bridge.Request
+  alias Bm.Repo
+
+  @ops %{
+    planner: ~w(propose_task close_plan),
+    worker: ~w(submit_result)
+  }
+
+  @type role :: :planner | :worker
+  @type outcome :: %{required(String.t()) => term()}
+
+  @doc "Operations a role may perform."
+  def allowed_ops(role), do: Map.get(@ops, role, [])
+
+  @doc """
+  Handles one forwarded request. `fun` receives the request and returns the outcome map (it
+  must contain `"ok"`); it runs inside the transaction that persists the outcome.
+  """
+  @spec handle(role, String.t(), map(), (map() -> outcome)) :: outcome
+  def handle(role, agent_id, request, fun) do
+    cond do
+      request.op not in allowed_ops(role) ->
+        %{"ok" => false, "error" => "operation_not_allowed", "op" => request.op}
+
+      get(request.request_id) ->
+        stored_outcome(request.request_id, agent_id)
+
+      true ->
+        persist(role, agent_id, request, fun)
+    end
+  end
+
+  defp persist(role, agent_id, request, fun) do
+    Repo.transaction(fn ->
+      outcome = fun.(request)
+
+      attrs = %{
+        request_id: request.request_id,
+        agent_id: agent_id,
+        role: Atom.to_string(role),
+        op: request.op,
+        session_epoch: request.session_epoch,
+        payload: request.payload,
+        outcome: outcome
+      }
+
+      case %Request{} |> Request.changeset(attrs) |> Repo.insert() do
+        {:ok, _} -> outcome
+        # A concurrent duplicate committed first: undo this attempt and use its outcome.
+        {:error, %{errors: [request_id: _]}} -> Repo.rollback(:duplicate)
+        {:error, changeset} -> Repo.rollback(changeset)
+      end
+    end)
+    |> case do
+      {:ok, outcome} -> outcome
+      {:error, :duplicate} -> stored_outcome(request.request_id, agent_id)
+      {:error, reason} -> %{"ok" => false, "error" => "not_persisted: #{inspect(reason)}"}
+    end
+  end
+
+  # Never re-runs the handler: a duplicate returns what was recorded, or an explicit error.
+  # (The concurrent-commit path can't be exercised under the SQL sandbox, which shares one
+  # connection; it relies on the unique index on request_id.)
+  defp stored_outcome(request_id, agent_id) do
+    case get(request_id) do
+      %{agent_id: ^agent_id, outcome: outcome} -> outcome
+      %{} -> %{"ok" => false, "error" => "request_id_conflict"}
+      nil -> %{"ok" => false, "error" => "duplicate_unresolved"}
+    end
+  end
+
+  defp get(request_id), do: Repo.one(from r in Request, where: r.request_id == ^request_id)
+end

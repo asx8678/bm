@@ -3,11 +3,14 @@ defmodule Bm.Pi.ToolCallsTest do
 
   alias Bm.Pi.ToolCalls
 
-  defp run(events), do: Enum.map_reduce(events, ToolCalls.new(), &flip_apply/2)
+  defp run(events) do
+    {observations, _state} =
+      Enum.map_reduce(events, ToolCalls.new(), fn event, state ->
+        {state, observed} = ToolCalls.apply(state, event)
+        {observed, state}
+      end)
 
-  defp flip_apply(event, state) do
-    {state, ready} = ToolCalls.apply(state, event)
-    {ready, state}
+    observations
   end
 
   defp start(index, id),
@@ -21,59 +24,55 @@ defmodule Bm.Pi.ToolCallsTest do
   defp delta(index, text),
     do: %{"type" => "toolcall_delta", "contentIndex" => index, "delta" => text}
 
-  test "a call is ready as soon as its argument JSON is complete, before toolcall_end" do
-    {ready_per_event, _state} =
-      run([
-        start(0, "call-a"),
-        delta(0, ~s({"id":"a","ti)),
-        delta(0, ~s(tle":"A"})),
-        start(1, "call-b"),
-        delta(1, ~s({"id":"b"}))
-      ])
+  defp finish(index, id, arguments),
+    do: %{
+      "type" => "toolcall_end",
+      "contentIndex" => index,
+      "toolCall" => %{"id" => id, "name" => "add_task", "arguments" => arguments}
+    }
 
-    assert ready_per_event == [
+  test "a call is observed early as soon as its argument JSON is complete" do
+    assert run([
+             start(0, "call-a"),
+             delta(0, ~s({"id":"a","ti)),
+             delta(0, ~s(tle":"A"})),
+             start(1, "call-b"),
+             delta(1, ~s({"id":"b"}))
+           ]) == [
              [],
              [],
-             [%{id: "call-a", name: "add_task", arguments: %{"id" => "a", "title" => "A"}}],
+             [
+               {:early,
+                %{id: "call-a", name: "add_task", arguments: %{"id" => "a", "title" => "A"}}}
+             ],
              [],
-             [%{id: "call-b", name: "add_task", arguments: %{"id" => "b"}}]
+             [{:early, %{id: "call-b", name: "add_task", arguments: %{"id" => "b"}}}]
            ]
   end
 
-  test "toolcall_end does not report a call twice" do
-    end_event = %{
-      "type" => "toolcall_end",
-      "contentIndex" => 0,
-      "toolCall" => %{"id" => "call-a", "name" => "add_task", "arguments" => %{"id" => "a"}}
-    }
+  test "toolcall_end always yields a final observation with the provider's arguments" do
+    observed =
+      run([start(0, "call-a"), delta(0, ~s({"id":"a"})), finish(0, "call-a", %{"id" => "a2"})])
 
-    {ready_per_event, _} = run([start(0, "call-a"), delta(0, ~s({"id":"a"})), end_event])
-    assert ready_per_event |> List.flatten() |> length() == 1
+    assert List.flatten(observed) == [
+             {:early, %{id: "call-a", name: "add_task", arguments: %{"id" => "a"}}},
+             {:final, %{id: "call-a", name: "add_task", arguments: %{"id" => "a2"}}}
+           ]
   end
 
-  test "toolcall_end reports calls whose deltas never parsed, using the final arguments" do
-    end_event = %{
-      "type" => "toolcall_end",
-      "contentIndex" => 0,
-      "toolCall" => %{"id" => "call-a", "name" => "add_task", "arguments" => %{"id" => "a"}}
-    }
+  test "a call whose deltas never parsed is only observed at the end" do
+    observed =
+      run([start(0, "call-a"), delta(0, ~s({"id":)), finish(0, "call-a", %{"id" => "a"})])
 
-    {ready_per_event, _} = run([start(0, "call-a"), delta(0, ~s({"id":)), end_event])
-
-    assert List.last(ready_per_event) == [
-             %{id: "call-a", name: "add_task", arguments: %{"id" => "a"}}
+    assert List.flatten(observed) == [
+             {:final, %{id: "call-a", name: "add_task", arguments: %{"id" => "a"}}}
            ]
   end
 
   test "interleaved calls are tracked separately by content index" do
-    {ready_per_event, _} =
-      run([
-        start(0, "x"),
-        start(1, "y"),
-        delta(1, ~s({"id":"y"})),
-        delta(0, ~s({"id":"x"}))
-      ])
+    observed =
+      run([start(0, "x"), start(1, "y"), delta(1, ~s({"id":"y"})), delta(0, ~s({"id":"x"}))])
 
-    assert ready_per_event |> List.flatten() |> Enum.map(& &1.id) == ["y", "x"]
+    assert observed |> List.flatten() |> Enum.map(fn {:early, call} -> call.id end) == ["y", "x"]
   end
 end

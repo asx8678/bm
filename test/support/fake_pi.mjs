@@ -3,19 +3,27 @@
 //   "fail"      -> the assistant message ends with an error
 //   "dialog"    -> asks a confirm dialog and answers with how it was resolved
 //   "crash"     -> exits with status 3
-//   "report"    -> reports a result through a bm: notify record, as the bm_bridge extension does
+//   "report"    -> reports telemetry through a bm: notify record
+//   "bm-dialog" -> asks the BEAM through a bm: input dialog and answers with the reply it got
+//   "bm-bad"    -> sends a bm: input dialog with a malformed request
+//   "nocost"    -> answers, but the assistant message carries no usage/cost
+//   "break-reset" -> answers; the next new_session command fails
 //   "plan"      -> streams three add_task calls OpenAI-style (all toolcall_end events at the end)
 //   anything    -> answers "echo: <message>"
 let buffer = ""
 let waitingDialog = null
+let waitingBm = null
+let failNextReset = false
 
 const send = record => process.stdout.write(JSON.stringify(record) + "\n")
 const usage = {input: 10, output: 2, cacheRead: 5, cacheWrite: 0, totalTokens: 17}
 
-function answer(text, stopReason = "stop", errorMessage) {
+const finalUsage = {...usage, cost: {input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003}}
+
+function answer(text, stopReason = "stop", errorMessage, withCost = true) {
   send({type: "message_start", message: {role: "assistant", content: [], stopReason: "pending"}})
   if (text) send({type: "message_update", usage, assistantMessageEvent: {type: "text_delta", contentIndex: 0, delta: text}})
-  send({type: "message_end", message: {role: "assistant", stopReason, errorMessage}})
+  send({type: "message_end", message: {role: "assistant", stopReason, errorMessage, ...(withCost ? {usage: finalUsage} : {})}})
   send({type: "agent_end", messages: [], willRetry: false})
   send({type: "agent_settled"})
 }
@@ -46,7 +54,19 @@ function handle(command) {
                  // Echo the environment guard so tests can check it reached the process.
                  sessionName: process.env.PI_FABRIC_DEPTH ? `depth-${process.env.PI_FABRIC_DEPTH}` : undefined}})
   } else if (command.type === "new_session") {
-    send({id: command.id, type: "response", command: "new_session", success: true, data: {cancelled: false}})
+    if (failNextReset) {
+      failNextReset = false
+      send({id: command.id, type: "response", command: "new_session", success: false, error: "reset refused"})
+    } else {
+      send({id: command.id, type: "response", command: "new_session", success: true, data: {cancelled: false}})
+    }
+  } else if (command.type === "follow_up") {
+    send({id: command.id, type: "response", command: "follow_up", success: true})
+    send({type: "agent_start"})
+    answer(`followed: ${command.message}`)
+  } else if (command.type === "extension_ui_response" && waitingBm === command.id) {
+    waitingBm = null
+    answer(`bm reply: ${command.value ?? "cancelled"}`)
   } else if (command.type === "abort") {
     send({id: command.id, type: "response", command: "abort", success: true})
   } else if (command.type === "extension_ui_response" && waitingDialog === command.id) {
@@ -64,6 +84,17 @@ function handle(command) {
     if (message === "dialog") {
       waitingDialog = "ui-1"
       send({type: "extension_ui_request", id: "ui-1", method: "confirm", title: "Allow?", message: "Really?"})
+    } else if (message === "bm-dialog" || message === "bm-bad") {
+      waitingBm = "bm-1"
+      const placeholder = message === "bm-dialog"
+        ? JSON.stringify({v: 1, op: "submit_result", request_id: "req-1", payload: {status: "done", summary: "probe"}})
+        : "not json"
+      send({type: "extension_ui_request", id: "bm-1", method: "input", title: "bm:submit_result", placeholder})
+    } else if (message === "nocost") {
+      answer("no cost", "stop", undefined, false)
+    } else if (message === "break-reset") {
+      failNextReset = true
+      answer("reset will fail")
     } else if (message === "report") {
       send({type: "extension_ui_request", id: "n-1", method: "notify", notifyType: "info",
             message: `bm:${JSON.stringify({event: "result", data: {status: "done", summary: "probe"}})}`})

@@ -1,11 +1,23 @@
 defmodule Bm.Pi.Agent do
   @moduledoc """
-  One pi coding agent: owns a `pi --mode rpc` OS process through a Port.
+  Agent adapter: owns one `pi --mode rpc` OS process through a Port.
 
-  Commands go to pi's stdin as JSON lines; responses and session events come back
-  on stdout (see pi's docs/rpc.md). Events are reduced into a transcript and a
-  summary and broadcast through `Bm.Pi`. If pi exits, the agent stays up in the
-  `:exited` state and the next prompt starts a fresh pi process.
+  Commands go to pi's stdin as JSON lines; responses and session events come back on stdout
+  (see pi's docs/rpc.md). Commands issued through the public API wait for pi's correlated
+  response, so `:ok` means pi accepted the command.
+
+  Events are reduced into a transcript and a summary and broadcast through `Bm.Pi`:
+
+    * `{:tool_call, :early | :final, call}` - streamed tool calls. These are **proposals**;
+      nothing may act on them as an authorization.
+    * `{:bridge, event, data}` - best-effort telemetry from BM extensions (`bm:` notify).
+
+  Authoritative requests from BM extensions arrive as `bm:` input dialogs. They are forwarded
+  to the agent's `:owner` process as `{:pi_request, agent_id, request}`; the owner answers with
+  `Bm.Pi.respond/3`. Without an owner they are rejected, so tools fail closed.
+
+  If pi exits, the adapter stays up in the `:exited` state and the next prompt starts a fresh
+  pi process with a new session epoch.
   """
 
   use GenServer, restart: :transient
@@ -15,9 +27,11 @@ defmodule Bm.Pi.Agent do
   alias Bm.Pi.ToolCalls
   alias Bm.Pi.Transcript
 
-  # pi dialogs block until answered; this client has no dialog UI yet, so it declines them.
+  # pi dialogs block until answered. Non-BM dialogs are declined until an approval inbox exists.
   @dialog_methods ~w(select confirm input editor)
   @max_line_bytes 16 * 1024 * 1024
+  @max_buffer_bytes 32 * 1024 * 1024
+  @max_raw_log_bytes 64 * 1024 * 1024
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: Bm.Pi.via(Keyword.fetch!(opts, :id)))
@@ -26,6 +40,8 @@ defmodule Bm.Pi.Agent do
   @impl true
   def init(opts) do
     config = Application.get_env(:bm, Bm.Pi, [])
+    owner = opts[:owner]
+    if owner, do: Process.monitor(owner)
 
     state = %{
       id: Keyword.fetch!(opts, :id),
@@ -33,18 +49,27 @@ defmodule Bm.Pi.Agent do
       cwd: opts[:cwd] || config[:cwd] || File.cwd!(),
       # Extra OS environment for the pi process, e.g. %{"PI_FABRIC_DEPTH" => "99"}.
       env: opts[:env] || config[:env] || %{},
-      # When set, every stdout line from pi is appended to this file (for debugging and replay).
+      # When set, stdout lines from pi are appended to this file (debugging and replay fixtures).
       raw_log: opts[:raw_log],
-      tool_calls: ToolCalls.new(),
+      raw_log_bytes: 0,
+      owner: owner,
       port: nil,
+      os_pid: nil,
       buffer: "",
+      # Incremented every time the pi session is replaced (new process or confirmed new_session).
+      session_epoch: 0,
       status: :starting,
       model: nil,
       tool: nil,
       usage: nil,
+      spend: %{confirmed: 0.0, unknown: 0},
       transcript: [],
+      tool_calls: ToolCalls.new(),
       next_id: 1,
-      pending: %{}
+      # request id => %{type: command type, from: caller waiting for the response or nil}
+      pending: %{},
+      # dialog id => request forwarded to the owner and not yet answered
+      dialogs: %{}
     }
 
     {:ok, state, {:continue, :open}}
@@ -58,7 +83,7 @@ defmodule Bm.Pi.Agent do
     {:reply, %{transcript: state.transcript, summary: summary(state)}, state}
   end
 
-  def handle_call({:prompt, text}, _from, state) do
+  def handle_call({:prompt, text}, from, state) do
     state = if state.port, do: state, else: open_port(state)
 
     if state.port do
@@ -67,38 +92,81 @@ defmodule Bm.Pi.Agent do
           do: %{type: "prompt", message: text, streamingBehavior: "followUp"},
           else: %{type: "prompt", message: text}
 
-      {:reply, :ok, state |> emit({:user, text}) |> send_command(command)}
+      {:noreply, state |> emit({:user, text}) |> send_command(command, from)}
     else
       {:reply, {:error, :not_running}, state}
     end
   end
 
-  def handle_call(:new_session, _from, %{port: nil} = state),
+  def handle_call(:os_pid, _from, state), do: {:reply, state.os_pid, state}
+
+  def handle_call(_command, _from, %{port: nil} = state),
     do: {:reply, {:error, :not_running}, state}
 
-  def handle_call(:new_session, _from, state) do
-    state = %{state | tool_calls: ToolCalls.new()}
-    {:reply, :ok, state |> emit(:reset) |> send_command(%{type: "new_session"})}
+  def handle_call({:follow_up, text}, from, state) do
+    {:noreply,
+     state |> emit({:user, text}) |> send_command(%{type: "follow_up", message: text}, from)}
   end
 
-  def handle_call(:abort, _from, %{port: nil} = state), do: {:reply, :ok, state}
-  def handle_call(:abort, _from, state), do: {:reply, :ok, send_command(state, %{type: "abort"})}
+  def handle_call(:new_session, from, state),
+    do: {:noreply, send_command(state, %{type: "new_session"}, from)}
+
+  def handle_call(:abort, from, state),
+    do: {:noreply, send_command(state, %{type: "abort"}, from)}
+
+  @impl true
+  def handle_cast({:respond, dialog_id, reply}, state) do
+    case Map.pop(state.dialogs, dialog_id) do
+      {nil, _} ->
+        # Stale: the dialog belonged to an earlier session or was already answered.
+        {:noreply, state}
+
+      {_request, dialogs} ->
+        {:noreply, answer_dialog(%{state | dialogs: dialogs}, dialog_id, reply)}
+    end
+  end
 
   @impl true
   def handle_info({port, {:data, {:noeol, chunk}}}, %{port: port} = state) do
-    {:noreply, %{state | buffer: state.buffer <> chunk}}
+    {:noreply, append_buffer(state, chunk)}
   end
 
   def handle_info({port, {:data, {:eol, chunk}}}, %{port: port} = state) do
-    line = String.trim_trailing(state.buffer <> chunk, "\r")
-    {:noreply, handle_line(%{state | buffer: ""}, line)}
+    case append_buffer(state, chunk) do
+      %{buffer: :overflow} = state ->
+        {:noreply, emit(%{state | buffer: ""}, {:error, "Dropped an oversized line from pi."})}
+
+      state ->
+        line = String.trim_trailing(state.buffer, "\r")
+        {:noreply, handle_line(%{state | buffer: ""}, line)}
+    end
   end
 
   def handle_info({port, {:exit_status, code}}, %{port: port} = state) do
-    state = %{state | port: nil, buffer: "", status: :exited, tool: nil, pending: %{}}
+    for {_id, %{from: from}} <- state.pending, from, do: GenServer.reply(from, {:error, :exited})
+
+    state = %{
+      state
+      | port: nil,
+        os_pid: nil,
+        buffer: "",
+        status: :exited,
+        tool: nil,
+        pending: %{},
+        dialogs: %{}
+    }
 
     {:noreply,
      emit(state, {:error, "pi exited with status #{code}. Send a message to restart it."})}
+  end
+
+  def handle_info({:DOWN, _ref, :process, owner, _reason}, %{owner: owner} = state) do
+    state =
+      Enum.reduce(state.dialogs, %{state | owner: nil, dialogs: %{}}, fn {dialog_id, _}, acc ->
+        answer_dialog(acc, dialog_id, %{"ok" => false, "error" => "no_owner"})
+      end)
+
+    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -136,16 +204,30 @@ defmodule Bm.Pi.Agent do
             {:env, Enum.map(state.env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)}
           ])
 
-        %{state | port: port, status: :starting}
+        {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+        %{
+          state
+          | port: port,
+            os_pid: os_pid,
+            status: :starting,
+            session_epoch: state.session_epoch + 1,
+            tool_calls: ToolCalls.new()
+        }
         |> emit(:status)
-        |> send_command(%{type: "get_state"})
+        |> send_command(%{type: "get_state"}, nil)
     end
   end
 
-  defp send_command(state, command) do
+  defp send_command(state, command, from) do
     id = "bm-#{state.next_id}"
     Port.command(state.port, [JSON.encode!(Map.put(command, :id, id)), "\n"])
-    %{state | next_id: state.next_id + 1, pending: Map.put(state.pending, id, command.type)}
+
+    %{
+      state
+      | next_id: state.next_id + 1,
+        pending: Map.put(state.pending, id, %{type: command.type, from: from})
+    }
   end
 
   defp send_record(state, record) do
@@ -153,10 +235,18 @@ defmodule Bm.Pi.Agent do
     state
   end
 
+  defp append_buffer(%{buffer: :overflow} = state, _chunk), do: state
+
+  defp append_buffer(state, chunk) do
+    if byte_size(state.buffer) + byte_size(chunk) > @max_buffer_bytes,
+      do: %{state | buffer: :overflow},
+      else: %{state | buffer: state.buffer <> chunk}
+  end
+
   defp handle_line(state, ""), do: state
 
   defp handle_line(state, line) do
-    if state.raw_log, do: File.write(state.raw_log, [line, "\n"], [:append])
+    state = log_raw(state, line)
 
     case JSON.decode(line) do
       {:ok, record} when is_map(record) ->
@@ -171,18 +261,47 @@ defmodule Bm.Pi.Agent do
     end
   end
 
+  defp log_raw(%{raw_log: nil} = state, _line), do: state
+
+  defp log_raw(state, line) do
+    if state.raw_log_bytes + byte_size(line) > @max_raw_log_bytes do
+      Logger.warning("pi agent #{state.id}: raw log limit reached, logging stopped")
+      %{state | raw_log: nil}
+    else
+      File.write(state.raw_log, [line, "\n"], [:append])
+      %{state | raw_log_bytes: state.raw_log_bytes + byte_size(line) + 1}
+    end
+  end
+
   defp handle_record(state, %{"type" => "response"} = response) do
-    {command, pending} = Map.pop(state.pending, response["id"])
+    {entry, pending} = Map.pop(state.pending, response["id"])
     state = %{state | pending: pending}
+    success? = response["success"] != false
+    type = entry && entry.type
+
+    if entry && entry.from do
+      GenServer.reply(entry.from, if(success?, do: :ok, else: {:error, response["error"]}))
+    end
 
     cond do
-      response["success"] == false ->
+      not success? ->
         emit(state, {:error, "pi #{response["command"]} failed: #{response["error"]}"})
 
-      command == "get_state" ->
+      type == "get_state" ->
         data = response["data"] || %{}
         status = if(data["isStreaming"], do: :running, else: :idle)
         emit(%{state | model: model_name(data["model"]), status: status}, :status)
+
+      type == "new_session" ->
+        # The session is replaced only once pi confirms it.
+        state = %{
+          state
+          | session_epoch: state.session_epoch + 1,
+            tool_calls: ToolCalls.new(),
+            usage: nil
+        }
+
+        emit(state, :reset)
 
       true ->
         state
@@ -206,8 +325,11 @@ defmodule Bm.Pi.Agent do
         emit(state, {:assistant_delta, delta})
 
       %{"type" => "toolcall_" <> _} = event ->
-        {tool_calls, ready} = ToolCalls.apply(state.tool_calls, event)
-        Enum.reduce(ready, %{state | tool_calls: tool_calls}, &emit(&2, {:tool_call_ready, &1}))
+        {tool_calls, observed} = ToolCalls.apply(state.tool_calls, event)
+
+        Enum.reduce(observed, %{state | tool_calls: tool_calls}, fn {stage, call}, acc ->
+          emit(acc, {:tool_call, stage, call})
+        end)
 
       _ ->
         state
@@ -218,10 +340,12 @@ defmodule Bm.Pi.Agent do
          "type" => "message_end",
          "message" => %{"role" => "assistant"} = message
        }) do
+    state = add_spend(state, message["usage"])
+
     case message["stopReason"] do
       "error" -> emit(state, {:error, short_error(message["errorMessage"])})
       "aborted" -> emit(state, {:notice, "Stopped."})
-      _ -> state
+      _ -> emit(state, :status)
     end
   end
 
@@ -243,14 +367,36 @@ defmodule Bm.Pi.Agent do
     )
   end
 
-  defp handle_record(state, %{"type" => "extension_ui_request", "method" => method} = request)
-       when method in @dialog_methods do
-    state
-    |> send_record(%{type: "extension_ui_response", id: request["id"], cancelled: true})
-    |> emit({:notice, "Declined pi dialog: #{request["title"] || method}"})
+  # Authoritative BM request: an input dialog titled "bm:<op>" carrying a JSON request.
+  defp handle_record(
+         state,
+         %{
+           "type" => "extension_ui_request",
+           "method" => "input",
+           "title" => "bm:" <> op,
+           "id" => dialog_id
+         } = request
+       ) do
+    with {:ok, %{"v" => 1, "request_id" => request_id} = body} when is_binary(request_id) <-
+           JSON.decode(request["placeholder"] || ""),
+         owner when is_pid(owner) <- state.owner do
+      forwarded = %{
+        dialog_id: dialog_id,
+        op: op,
+        request_id: request_id,
+        payload: body["payload"] || %{},
+        session_epoch: state.session_epoch
+      }
+
+      send(owner, {:pi_request, state.id, forwarded})
+      %{state | dialogs: Map.put(state.dialogs, dialog_id, forwarded)}
+    else
+      nil -> answer_dialog(state, dialog_id, %{"ok" => false, "error" => "no_owner"})
+      _ -> answer_dialog(state, dialog_id, %{"ok" => false, "error" => "malformed_request"})
+    end
   end
 
-  # The bm_bridge extension reports its tool calls as `bm:`-prefixed notify records.
+  # The bm_* extensions report best-effort telemetry as `bm:`-prefixed notify records.
   defp handle_record(
          state,
          %{"type" => "extension_ui_request", "method" => "notify", "message" => "bm:" <> json}
@@ -261,14 +407,35 @@ defmodule Bm.Pi.Agent do
     end
   end
 
+  defp handle_record(state, %{"type" => "extension_ui_request", "method" => method} = request)
+       when method in @dialog_methods do
+    state
+    |> send_record(%{type: "extension_ui_response", id: request["id"], cancelled: true})
+    |> emit({:notice, "Declined pi dialog: #{request["title"] || method}"})
+  end
+
   defp handle_record(state, %{"type" => "extension_error"} = record) do
     emit(state, {:notice, "pi extension error: #{record["error"]}"})
   end
 
   defp handle_record(state, _record), do: state
 
+  defp answer_dialog(%{port: nil} = state, _dialog_id, _reply), do: state
+
+  defp answer_dialog(state, dialog_id, reply) do
+    send_record(state, %{
+      type: "extension_ui_response",
+      id: dialog_id,
+      value: JSON.encode!(reply)
+    })
+  end
+
   defp emit(state, event) do
-    state = %{state | transcript: Transcript.apply(state.transcript, event)}
+    state = %{
+      state
+      | transcript: state.transcript |> Transcript.apply(event) |> Transcript.limit()
+    }
+
     Bm.Pi.broadcast(state.id, event, summary(state))
     state
   end
@@ -279,9 +446,18 @@ defmodule Bm.Pi.Agent do
       model: state.model,
       tool: state.tool,
       usage: state.usage,
+      spend: state.spend,
+      session_epoch: state.session_epoch,
       cwd: state.cwd
     }
   end
+
+  # Confirmed spend comes from each finished assistant message; a message without a cost is
+  # counted as unknown, never as zero.
+  defp add_spend(state, %{"cost" => %{"total" => total}}) when is_number(total),
+    do: put_in(state.spend.confirmed, state.spend.confirmed + total)
+
+  defp add_spend(state, _usage), do: put_in(state.spend.unknown, state.spend.unknown + 1)
 
   # Provider errors can carry request details and a stack trace; keep the readable part.
   defp short_error(message) when is_binary(message) and message != "" do
@@ -294,11 +470,13 @@ defmodule Bm.Pi.Agent do
   defp model_name(%{"id" => id}), do: id
   defp model_name(_), do: nil
 
+  # Values pi didn't report stay nil (unknown) rather than 0.
   defp usage_summary(usage) do
     %{
-      input: usage["input"] || 0,
-      output: usage["output"] || 0,
-      cache_read: usage["cacheRead"] || 0
+      input: usage["input"],
+      output: usage["output"],
+      cache_read: usage["cacheRead"],
+      cost: get_in(usage, ["cost", "total"])
     }
   end
 

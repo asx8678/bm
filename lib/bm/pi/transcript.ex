@@ -45,8 +45,14 @@ defmodule Bm.Pi.Transcript do
 
   def apply(_entries, :reset), do: []
 
-  # Status updates and streamed tool calls (acted on by the orchestrator) leave it unchanged.
+  # Status updates, streamed tool-call proposals and bridge telemetry leave it unchanged.
   def apply(entries, :status), do: entries
-  def apply(entries, {:tool_call_ready, _call}), do: entries
+  def apply(entries, {:tool_call, _stage, _call}), do: entries
   def apply(entries, {:bridge, _event, _data}), do: entries
+
+  @max_entries 500
+
+  @doc "Keeps only the newest #{@max_entries} entries so a long session can't grow without bound."
+  def limit(entries) when length(entries) > @max_entries, do: Enum.take(entries, -@max_entries)
+  def limit(entries), do: entries
 end
