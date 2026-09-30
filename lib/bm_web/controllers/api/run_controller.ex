@@ -89,21 +89,18 @@ defmodule BmWeb.Api.RunController do
           }
         end
 
-      approvals = approvals(run)
+      %{approvals: approvals, decision: decision} = live(run)
 
       json(
         conn,
         Map.merge(run_summary(conn, run), %{
           plan_open: run.plan_open,
-          # An attempt left changes that wait for the user's Keep or Revert (plan 16.2), or
-          # the worker waits for an approval (plan 24.1).
+          # Changes wait for the user's Keep or Revert (plan 16.2), or the worker waits for an
+          # approval (plan 24.1). Taken from the coordinator's lane: an attempt BM stopped (a
+          # limit, repeated calls) after changing files holds it too (plan 28.4).
           waiting_for_you:
-            run.status in [:active, :paused] and
-              (approvals != [] or
-                 Enum.any?(
-                   tasks,
-                   &(&1.attempt && &1.attempt.status in [:held, :needs_reconciliation])
-                 )),
+            run.status in [:active, :paused] and (approvals != [] or decision != nil),
+          decision: decision,
           approvals: approvals,
           summary: run.planner && run.planner["summary"],
           tasks: tasks
@@ -180,24 +177,35 @@ defmodule BmWeb.Api.RunController do
     end
   end
 
-  defp approvals(%{id: id, status: status, workspace: workspace})
-       when status in [:active, :paused] do
+  # What the workspace's coordinator knows of this run right now: the worker's pending
+  # approvals and the attempt that holds the lane for the user's decision.
+  defp live(%{id: id, status: status, workspace: workspace}) when status in [:active, :paused] do
     case Coordinator.state(workspace.path) do
-      %{run_id: ^id, approvals: approvals} ->
-        for a <- approvals do
-          a.payload
-          |> Map.take(~w(method title message options placeholder prefill))
-          |> Map.merge(%{"id" => a.id, "timeout_s" => div(a.timeout, 1000), "since" => a.since})
-        end
+      %{run_id: ^id, approvals: approvals, lane: lane} ->
+        %{approvals: Enum.map(approvals, &approval_json/1), decision: decision(lane)}
 
       _ ->
-        []
+        %{approvals: [], decision: nil}
     end
   catch
-    :exit, _ -> []
+    :exit, _ -> %{approvals: [], decision: nil}
   end
 
-  defp approvals(_run), do: []
+  defp live(_run), do: %{approvals: [], decision: nil}
+
+  defp approval_json(a) do
+    a.payload
+    |> Map.take(~w(method title message options placeholder prefill))
+    |> Map.merge(%{"id" => a.id, "timeout_s" => div(a.timeout, 1000), "since" => a.since})
+  end
+
+  defp decision({:held, attempt_id}) do
+    attempt = Runs.get_attempt!(attempt_id)
+    task = Runs.get_task!(attempt.task_id)
+    %{task: task.key, attempt_status: attempt.status, reason: attempt.error}
+  end
+
+  defp decision(_lane), do: nil
 
   defp run_summary(conn, run) do
     %{
