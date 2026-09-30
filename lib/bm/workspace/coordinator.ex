@@ -40,7 +40,7 @@ defmodule Bm.Workspace.Coordinator do
     # tool runs.
     max_duration: 20 * 60_000,
     stall_timeout: 3 * 60_000,
-    prompt: &Bm.Prompts.worker/1
+    prompt: &Bm.Prompts.worker/2
   ]
 
   ## API
@@ -68,10 +68,35 @@ defmodule Bm.Workspace.Coordinator do
   @doc """
   Runs one task. `attrs`: task fields (`:title`, `:goal`, `:mutates`, `:writes`, `:done_when`,
   optional `:key`), optional `:verify_command` (saved on the workspace), and for a new run
-  `:run_goal` and `:budget_usd`.
+  `:run_goal` and `:budget_usd`. With `%{task_id: id}` it runs a queued task of the current run
+  instead (the planner's scheduler, plan 7.4).
   Returns `{:ok, attempt}` once admitted; the attempt continues asynchronously.
   """
   def run_task(path, attrs), do: call(path, {:run_task, Map.new(attrs)})
+
+  @doc """
+  Starts a goal run (milestone C): a new run with planning open, and its planner
+  (`Bm.Workspace.Planner`), which proposes tasks and has them run here one at a time. `attrs`:
+  `:goal`, optional `:verify_command` (saved on the workspace) and `:budget_usd`.
+  `planner_opts` go to the planner (tests pass a scripted prompt and limits).
+  Returns `{:ok, run}`; refused while the workspace has an unfinished run or a held lane.
+  """
+  def start_goal(path, attrs, planner_opts \\ []),
+    do: call(path, {:start_goal, Map.new(attrs), planner_opts})
+
+  @doc """
+  Ends the goal run `run_id` as `:done`, `:failed` or `:cancelled` with `reason`; queued tasks
+  are cancelled. Refused while an attempt runs or waits for the user's decision.
+  """
+  def end_run(path, run_id, status, reason),
+    do: call(path, {:end_run, run_id, status, reason})
+
+  @doc "Pauses the run `run_id` with `reason` (the planner lost or changed files)."
+  def pause_run(path, run_id, reason), do: call(path, {:pause_run, run_id, reason})
+
+  @doc "Resumes planning of the paused goal run `run_id` in a new planner session."
+  def resume_planning(path, run_id, planner_opts \\ []),
+    do: call(path, {:resume_planning, run_id, planner_opts})
 
   @doc "Lane, phase, run and current attempt."
   def state(path), do: call(path, :state)
@@ -166,7 +191,9 @@ defmodule Bm.Workspace.Coordinator do
       spend_seen: %{confirmed: 0.0, unknown: 0},
       tool: nil,
       running_since: nil,
-      last_event_at: nil
+      last_event_at: nil,
+      # Monitor of the goal run's planner process.
+      planner_ref: nil
     }
 
     # Attempts left in flight by an earlier coordinator have nobody looking after them.
@@ -189,7 +216,15 @@ defmodule Bm.Workspace.Coordinator do
               (attempt.status in [:failed, :cancelled, :needs_reconciliation] and holds?(attempt))
           end)
 
-        %{state | run: run, lane: if(held, do: {:held, held.id}, else: :free)}
+        planner = run.planner && Bm.Workspace.Planner.whereis(run.id)
+        planner_ref = if planner, do: Process.monitor(planner)
+
+        %{
+          state
+          | run: run,
+            lane: if(held, do: {:held, held.id}, else: :free),
+            planner_ref: planner_ref
+        }
     end
   end
 
@@ -215,6 +250,103 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_call({:run_task, _attrs}, _from, %{lane: lane} = state) when lane != :free,
     do: {:reply, {:error, :lane_busy}, state}
+
+  def handle_call({:run_task, %{task_id: _}}, _from, %{run: nil} = state),
+    do: {:reply, {:error, :run_not_active}, state}
+
+  def handle_call({:start_goal, _attrs, _opts}, _from, %{lane: lane} = state) when lane != :free,
+    do: {:reply, {:error, :lane_busy}, state}
+
+  def handle_call({:start_goal, _attrs, _opts}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:start_goal, attrs, opts}, _from, state) do
+    with {:ok, workspace} <- maybe_set_verify_command(state.workspace, attrs),
+         :ok <- if(workspace.verify_command, do: :ok, else: {:error, :no_verify_command}),
+         {:ok, baseline} <- Git.baseline(state.root),
+         {:ok, run} <-
+           Runs.start_run(workspace, %{
+             goal: attrs[:goal],
+             budget_usd: attrs[:budget_usd],
+             plan_open: true,
+             planner: %{"session" => 0, "waves" => 1, "log" => []},
+             baseline: %{
+               "head" => baseline.head,
+               "tree" => baseline.tree,
+               "user_owned" => baseline.user_owned
+             }
+           }),
+         {:ok, pid} <- start_planner(state, run, opts) do
+      state = %{state | workspace: workspace, run: run, planner_ref: Process.monitor(pid)}
+      broadcast_run(state, run)
+      {:reply, {:ok, run}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:end_run, run_id, status, reason}, _from, %{run: %{id: run_id}} = state) do
+    if state.phase == nil and state.lane == :free do
+      run = Runs.get_run!(run_id)
+
+      for task <- Runs.latest_tasks(run), task.status in [:queued, :running] do
+        Runs.update_task_status(task, :cancelled)
+      end
+
+      {:ok, run} = Runs.finish_run(run, status, reason)
+      if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
+      broadcast_run(state, run)
+      {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
+    else
+      {:reply, {:error, :lane_busy}, state}
+    end
+  end
+
+  def handle_call({:end_run, _run_id, _status, _reason}, _from, state),
+    do: {:reply, {:error, :run_not_active}, state}
+
+  def handle_call({:pause_run, run_id, reason}, _from, %{run: %{id: run_id}} = state) do
+    case Runs.get_run!(run_id) do
+      %{status: :active} = run ->
+        {:ok, run} = Runs.pause_run(run, reason)
+        broadcast_run(state, run)
+        {:reply, {:ok, run}, %{state | run: run}}
+
+      run ->
+        {:reply, {:ok, run}, state}
+    end
+  end
+
+  def handle_call({:pause_run, _run_id, _reason}, _from, state),
+    do: {:reply, {:error, :run_not_active}, state}
+
+  def handle_call({:resume_planning, run_id, opts}, _from, %{run: %{id: run_id}} = state) do
+    run = Runs.get_run!(run_id)
+
+    cond do
+      run.status != :paused or run.planner == nil ->
+        {:reply, {:error, :not_resumable}, state}
+
+      state.phase != nil or state.lane != :free ->
+        {:reply, {:error, :lane_busy}, state}
+
+      true ->
+        {:ok, run} = Runs.resume_run(run)
+
+        case start_planner(state, run, Keyword.put(opts, :resume, true)) do
+          {:ok, pid} ->
+            broadcast_run(state, run)
+            {:reply, {:ok, run}, %{state | run: run, planner_ref: Process.monitor(pid)}}
+
+          {:error, reason} ->
+            {:ok, run} = Runs.pause_run(run, "the planner did not start: #{inspect(reason)}")
+            {:reply, {:error, reason}, %{state | run: run}}
+        end
+    end
+  end
+
+  def handle_call({:resume_planning, _run_id, _opts}, _from, state),
+    do: {:reply, {:error, :not_resumable}, state}
 
   def handle_call({:run_task, attrs}, _from, state) do
     case Bm.Repo.transaction(fn -> admit_records(state, attrs) end) do
@@ -257,9 +389,22 @@ defmodule Bm.Workspace.Coordinator do
     do: {:reply, {:error, :no_run}, state}
 
   def handle_call(:finish_run, _from, %{lane: :free, phase: nil} = state) do
-    {:ok, run} = Runs.finish_run(Runs.get_run!(state.run.id), :done)
-    Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
-    {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil}}
+    run = Runs.get_run!(state.run.id)
+    {status, reason} = finish_status(run)
+
+    if run.planner do
+      if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
+      # Asynchronously: the planner may be calling this process right now.
+      Task.start(fn -> Bm.Workspace.Planner.stop(run.id) end)
+
+      for task <- Runs.latest_tasks(run), task.status in [:queued, :running] do
+        Runs.update_task_status(task, :cancelled)
+      end
+    end
+
+    {:ok, run} = Runs.finish_run(run, status, reason)
+    broadcast_run(state, run)
+    {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
   end
 
   def handle_call(:finish_run, _from, state), do: {:reply, {:error, :lane_busy}, state}
@@ -271,7 +416,7 @@ defmodule Bm.Workspace.Coordinator do
     with {:ok, workspace} <- maybe_set_verify_command(state.workspace, attrs),
          :ok <- if(workspace.verify_command, do: :ok, else: {:error, :no_verify_command}),
          {:ok, run} <- ensure_run(state, attrs),
-         {:ok, task} <- Runs.create_task(run, task_attrs(run, attrs)),
+         {:ok, task} <- admit_task(run, attrs),
          {:ok, attempt} <- Runs.create_attempt(task, %{role: role(task)}),
          {:ok, tree_before} <- Git.snapshot(state.root),
          {:ok, attempt} <-
@@ -364,6 +509,37 @@ defmodule Bm.Workspace.Coordinator do
     if state.cancel?, do: finish(state, :cancelled, %{}), else: start_worker(state)
   end
 
+  # A queued task of this run (the planner's), or a new one.
+  defp admit_task(run, %{task_id: id}) do
+    case Runs.get_task!(id) do
+      %{run_id: run_id, status: :queued} = task when run_id == run.id -> {:ok, task}
+      %{run_id: run_id} when run_id != run.id -> {:error, :run_not_active}
+      %{status: status} -> {:error, {:task_not_queued, status}}
+    end
+  end
+
+  defp admit_task(run, attrs), do: Runs.create_task(run, task_attrs(run, attrs))
+
+  defp start_planner(state, run, opts) do
+    Bm.Workspace.Planner.start(run.id, state.root, opts)
+  end
+
+  # A single-task run the user finishes is done. A goal run is done only if its plan is closed
+  # and every task was accepted; otherwise the user cancelled it.
+  defp finish_status(%{planner: nil}), do: {:done, nil}
+
+  defp finish_status(run) do
+    tasks = Runs.latest_tasks(run)
+
+    if not run.plan_open and tasks != [] and Enum.all?(tasks, &(&1.status == :accepted)),
+      do: {:done, "finished by the user"},
+      else: {:cancelled, "finished by the user before the plan was complete"}
+  end
+
+  defp broadcast_run(state, run) do
+    Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+  end
+
   defp maybe_set_verify_command(workspace, %{verify_command: command}) when is_binary(command),
     do: Runs.update_workspace(workspace, %{verify_command: command})
 
@@ -421,6 +597,21 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{job: {ref, kind}} = state) do
     {:noreply, job_done(%{state | job: nil}, kind, {:error, {:job_crashed, reason}})}
+  end
+
+  # The goal run's planner stopped without ending the run: pause it for the user.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{planner_ref: ref} = state) do
+    state = %{state | planner_ref: nil}
+
+    case state.run && Runs.get_run!(state.run.id) do
+      %{status: :active} = run ->
+        {:ok, run} = Runs.pause_run(run, "the planner stopped unexpectedly (#{inspect(reason)})")
+        broadcast_run(state, run)
+        {:noreply, %{state | run: run}}
+
+      _other ->
+        {:noreply, state}
+    end
   end
 
   # The worker's pi adapter died: settle with what we know.
@@ -646,13 +837,18 @@ defmodule Bm.Workspace.Coordinator do
       state.cancel? ->
         stop_worker(state)
 
-      Bm.Pi.prompt(state.agent_id, state.config.prompt.(state.task)) == :ok ->
+      Bm.Pi.prompt(state.agent_id, worker_prompt(state)) == :ok ->
         state
 
       true ->
         stop_worker(%{state | flags: ["prompt_failed" | state.flags]})
     end
   end
+
+  defp worker_prompt(%{config: %{prompt: prompt}, task: task}) when is_function(prompt, 2),
+    do: prompt.(task, Runs.dependency_context(task))
+
+  defp worker_prompt(%{config: %{prompt: prompt}, task: task}), do: prompt.(task)
 
   ## Settling (4.6)
 
@@ -802,10 +998,18 @@ defmodule Bm.Workspace.Coordinator do
     coordinator = self()
     root = state.root
     command = state.workspace.verify_command
+    check = state.task.check
     timeout = state.config.verify_timeout
 
+    # The task's check (plan 7.7) runs only after the workspace verify command passed.
     start_job(state, :verify, fn ->
-      Bm.Workspace.Verify.run(command, root, timeout, coordinator)
+      case Bm.Workspace.Verify.run(command, root, timeout, coordinator) do
+        %{"exit" => 0} = verify when is_binary(check) ->
+          Map.put(verify, "check", Bm.Workspace.Verify.run(check, root, timeout, coordinator))
+
+        verify ->
+          verify
+      end
     end)
   end
 
@@ -829,8 +1033,12 @@ defmodule Bm.Workspace.Coordinator do
       state.cancel? ->
         finish(state, :cancelled, Map.put(changes, :verify, verify))
 
-      verify["exit"] == 0 ->
+      verify["exit"] == 0 and check_passed?(verify) ->
         checkpoint(state, verify, changes)
+
+      verify["exit"] == 0 ->
+        error = if verify["check"]["timeout"], do: "check_timeout", else: "check_failed"
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: error}))
 
       verify["timeout"] ->
         finish(state, :held, Map.merge(changes, %{verify: verify, error: "verify_timeout"}))
@@ -839,6 +1047,10 @@ defmodule Bm.Workspace.Coordinator do
         finish(state, :held, Map.merge(changes, %{verify: verify, error: "verify_failed"}))
     end
   end
+
+  defp check_passed?(%{"check" => %{"exit" => 0}}), do: true
+  defp check_passed?(%{"check" => _failed}), do: false
+  defp check_passed?(_verify), do: true
 
   # The verify command may change files itself (formatters, generators). Those changes become
   # part of the attempt and of its checkpoint; changes to the user's files hold the lane.

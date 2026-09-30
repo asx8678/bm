@@ -560,6 +560,38 @@ and their summaries) or "Finish". No automatic restart of the planner.
 Verify: tests for done, failed and paused-by-recovery; resume produces a planner prompt that
 lists the accepted tasks; the workspace lock is released each time a run ends.
 
+**Status: Phase 7 done (2026-09-30).** 7.1 and 7.2 have their tests (validation table, scripted
+fake planner). For 7.3–7.9 the user asked for no new tests; they were verified with the existing
+suite (199 tests) and a live goal run with the real model (below).
+- 7.3: `Bm.Workspace.Planner`, one per goal run, started by `Coordinator.start_goal/3`
+  (run created with planning open and a `planner` map). It answers `propose_task` (validated,
+  stored as a queued task), `close_plan` and read-only `authorize`, adds its spend to the run and
+  aborts on an exhausted budget, and compares snapshots before and after each turn: a planner
+  that changed files pauses the run. **Decision (D20 note):** planner turns happen only while
+  the lane is free and tasks are admitted only while the planner is idle, so planner and worker
+  never run at once and each snapshot diff belongs to exactly one of them.
+- 7.4: scheduling in the planner; the coordinator admits an existing queued task
+  (`run_task(path, %{task_id: id})`, refused for another run). Blocked = a dependency's latest
+  revision failed, was blocked or cancelled.
+- 7.5: `Bm.Prompts.worker/2` gets `Runs.dependency_context/1` (title, summary, files changed).
+- 7.6: deliveries table (unique per task revision); failures are delivered at once, accepted
+  results in one batch when nothing else can run; each delivery reopens planning (a wave).
+  A re-plan is the same key proposed again (revision 2, once); a second failure fails the run.
+- 7.7: `tasks.check` runs after a passing verify command; a failing check holds the lane
+  (`check_failed` / `check_timeout`), its output is in `verify.check`.
+- 7.8: `max_rejections` (5 per wave), `max_waves` (5), a reminder then `plan_timeout` (5 min)
+  for an idle open plan, `turn_timeout` (15 min).
+- 7.9: done when the plan is closed and every latest task is accepted (failed otherwise);
+  `Coordinator.end_run/4` cancels queued tasks; recovery pauses goal runs whose planner is gone
+  ("planner lost", groups ended on the same boot), the coordinator pauses the run if the planner
+  process dies, and `Coordinator.resume_planning/3` starts a new session with a resume prompt.
+  Finishing a goal run by hand stops its planner: done only if the plan is closed and all
+  tasks were accepted, cancelled otherwise.
+- Live check (scratch script, real model): goal "shapes.py + area.py CLI + test_shapes.py" →
+  3 tasks (two depending on the first), all accepted and checkpointed, 2 waves, run done in 25 s
+  for $0.063, the user's dirty file intact. Noted: without a `.gitignore`, the verify command's
+  `__pycache__` files are attributed to the attempts (flagged, harmless).
+
 ---
 
 ## Phase 8: plan UI and milestone C gate

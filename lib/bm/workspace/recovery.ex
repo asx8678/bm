@@ -12,6 +12,10 @@ defmodule Bm.Workspace.Recovery do
        `needs_reconciliation` with its write set, and the run is paused until the user decides
        (Keep or Revert). An attempt that may have changed files is never retried automatically.
 
+  A **goal run** whose planner is gone (plan 7.9) is paused with the reason "planner lost": its
+  pi session is stopped, its recorded process groups are ended (same boot only), and the user
+  chooses Resume planning or Finish on the run page. The planner is never restarted by itself.
+
   Runs at application start (`run/0`) and when a workspace coordinator starts
   (`recover_workspace/1`).
   """
@@ -24,12 +28,44 @@ defmodule Bm.Workspace.Recovery do
 
   @doc "Recovers every in-flight attempt. Returns the recovered attempts."
   def run do
-    Runs.list_in_flight_attempts() |> Enum.map(&recover/1)
+    attempts = Runs.list_in_flight_attempts() |> Enum.map(&recover/1)
+    Enum.each(Runs.list_active_goal_runs(), &recover_planner/1)
+    attempts
   end
 
   @doc "Recovers the in-flight attempts of one workspace."
   def recover_workspace(workspace) do
-    Runs.list_in_flight_attempts(workspace) |> Enum.map(&recover/1)
+    attempts = Runs.list_in_flight_attempts(workspace) |> Enum.map(&recover/1)
+
+    Runs.list_active_goal_runs()
+    |> Enum.filter(&(&1.workspace_id == workspace.id))
+    |> Enum.each(&recover_planner/1)
+
+    attempts
+  end
+
+  @doc "Pauses a goal run whose planner process is gone (plan 7.9)."
+  def recover_planner(run) do
+    if Bm.Workspace.Planner.whereis(run.id) == nil do
+      planner = run.planner || %{}
+      if agent_id = planner["agent_id"], do: Bm.Pi.stop(agent_id)
+
+      if planner["boot_id"] != nil and planner["boot_id"] == Bm.Proc.boot_id() do
+        groups =
+          [planner["pgid"]]
+          |> Enum.reject(&is_nil/1)
+          |> Kernel.++(
+            if planner["pgid_file"], do: Bm.Proc.read_pgid_file(planner["pgid_file"]), else: []
+          )
+
+        Bm.Proc.terminate_groups(Bm.Proc.live_groups(groups))
+      end
+
+      {:ok, _run} =
+        Runs.pause_run(run, "planner lost: BM stopped while this run was planning or running")
+
+      Logger.warning("paused goal run #{run.id}: planner lost")
+    end
   end
 
   @doc "Recovers one attempt; returns it in its new status."

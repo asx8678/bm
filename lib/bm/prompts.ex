@@ -1,10 +1,14 @@
 defmodule Bm.Prompts do
-  @moduledoc "Prompts BM sends to its pi agents."
+  @moduledoc "Prompts BM sends to its pi agents: workers, and the planner of a goal run."
 
   alias Bm.Runs.Task
 
-  @doc "The prompt for a worker attempting `task`. The worker sees only this, not the plan."
-  def worker(%Task{} = task) do
+  @doc """
+  The prompt for a worker attempting `task`. The worker sees only this, not the plan; for each
+  accepted dependency it gets the title, the summary and the files changed (plan 7.5, from
+  `Bm.Runs.dependency_context/1`).
+  """
+  def worker(%Task{} = task, dependencies \\ []) do
     files =
       case task.writes do
         [] -> "Not declared."
@@ -21,10 +25,10 @@ defmodule Bm.Prompts do
 
     Done when:
     #{task.done_when || "The goal is achieved."}
-
+    #{check_section(task)}
     Files you are expected to change:
     #{files}
-
+    #{dependency_section(dependencies)}
     Rules:
     - Change only what the task needs. Prefer the declared files; if you must change others,
       say which and why in your summary.
@@ -38,4 +42,129 @@ defmodule Bm.Prompts do
       tried and could not. Summarize what you changed in at most five sentences.
     """
   end
+
+  defp check_section(%Task{check: nil}), do: ""
+
+  defp check_section(%Task{check: check}) do
+    "\nBM runs this command after your work; it must pass:\n    #{check}\n"
+  end
+
+  defp dependency_section([]), do: ""
+
+  defp dependency_section(dependencies) do
+    items =
+      Enum.map_join(dependencies, "\n", fn dep ->
+        files = if dep.writes == [], do: "no files", else: Enum.join(dep.writes, ", ")
+        "- #{dep.title} (#{dep.key}): #{dep.summary || "no summary"} Changed: #{files}."
+      end)
+
+    "\nDone before this task (already in the repository):\n#{items}\n"
+  end
+
+  @doc """
+  The first prompt of a goal run's planner. `context`: `:root`, `:verify_command`,
+  `:user_owned` (paths the plan must not change).
+  """
+  def planner(goal, context) do
+    """
+    You are the BM planner for this repository (#{context.root}). Turn the goal below into a
+    small plan of tasks for worker agents, then close the plan.
+
+    Goal:
+    #{goal}
+
+    How BM works:
+    - Look around first (read, grep, find, ls, and read-only bash such as tests or git log).
+      You cannot change files yourself; BM refuses writes and pauses the run if files change.
+    - Call propose_task once per task. BM validates each proposal and answers "accepted" or
+      "not accepted" with a reason; fix the proposal and propose it again if needed.
+    - Each task is done by a separate worker that sees only that task and short summaries of
+      the tasks it depends on, never this conversation. Make every goal self-contained.
+    - Tasks run one at a time, in order of `depends_on`. Keep tasks small; one to four tasks
+      are enough for most goals.
+    - `writes` must list every file the task creates or changes (required when mutates is
+      true). Never plan changes to these files with the user's uncommitted work:
+    #{user_owned(context.user_owned)}
+    - After every task BM runs the verify command `#{context.verify_command}`, and the task's
+      optional `check` command (use it to make done_when executable, e.g. a focused test).
+    - When you have proposed every task, call close_plan with a one-sentence summary. BM then
+      runs the tasks and reports back; you may propose more tasks then.
+    """
+  end
+
+  @doc """
+  The follow_up that reports finished tasks to the planner (plan 7.6). `results`: maps with
+  `:task`, `:status`, `:summary`, `:writes`, `:error`, `:verify_tail`. `run_state` lists the
+  tasks still queued.
+  """
+  def planner_delivery(results, queued) do
+    lines =
+      Enum.map_join(results, "\n", fn r ->
+        base = "- #{r.task.key} (#{r.task.title}): #{r.status}."
+        summary = if r.summary, do: " Worker: #{r.summary}", else: ""
+        files = if r.writes != [], do: " Changed: #{Enum.join(r.writes, ", ")}.", else: ""
+        error = if r.error, do: " Problem: #{r.error}.", else: ""
+
+        tail =
+          if r.verify_tail, do: "\n  Verification output (end):\n  #{r.verify_tail}", else: ""
+
+        base <> summary <> files <> error <> tail
+      end)
+
+    retry =
+      if Enum.any?(results, &(&1.status != :accepted)),
+        do:
+          "\nA task that did not succeed may be proposed once more with the same key (it " <>
+            "replaces the failed one); tasks that depended on it wait for it. If the goal " <>
+            "can't be reached, say why in close_plan.",
+        else: ""
+
+    still =
+      if queued == [],
+        do: "No tasks are waiting.",
+        else: "Still waiting: #{Enum.map_join(queued, ", ", & &1.key)}."
+
+    """
+    BM results:
+    #{lines}
+    #{still}#{retry}
+
+    Planning is open again. Propose further tasks only if the goal needs them, then call
+    close_plan (also when nothing more is needed).
+    """
+  end
+
+  @doc "Sent once per wave when the planner stops with the plan still open and nothing to run."
+  def planner_reminder do
+    """
+    The plan is still open and no task is waiting. Propose the remaining tasks, or call
+    close_plan if the goal needs nothing more.
+    """
+  end
+
+  @doc "The prompt of a new planner session that resumes a paused goal run."
+  def planner_resume(goal, context, tasks) do
+    done =
+      case tasks do
+        [] ->
+          "No tasks yet."
+
+        tasks ->
+          Enum.map_join(tasks, "\n", fn t ->
+            "- #{t.key} (#{t.title}): #{t.status}#{if t.revision > 1, do: ", re-planned", else: ""}"
+          end)
+      end
+
+    planner(goal, context) <>
+      """
+
+      This run was interrupted and is resumed in a new session. Tasks so far:
+      #{done}
+      Continue from here: propose what is still missing (or re-propose a task that did not
+      succeed, once), then call close_plan.
+      """
+  end
+
+  defp user_owned([]), do: "      (none)"
+  defp user_owned(paths), do: Enum.map_join(paths, "\n", &"      - #{&1}")
 end

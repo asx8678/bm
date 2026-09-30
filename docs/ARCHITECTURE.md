@@ -62,6 +62,8 @@ real pi/Fabric before anything relies on it.
 | D19 | **Snapshots are git trees** written from a private index (`<git-dir>/bm/index`): `read-tree HEAD` once, then `add -A` + `write-tree`. Write sets are `diff-tree` between two trees; checkpoints reuse the verified tree | One mechanism for D11 and D12; git's stat cache makes repeated snapshots cheap; trees also give exact content for conditional restore | Hashing every file in Elixir |
 | D20 | **Planner is its own process** per run (`Bm.Workspace.Planner`), decided 2026-09-29 after the milestone B review; it owns the planner session, validation, the task graph, scheduling and delivery, and asks the coordinator to admit tasks. Planner and reader get `bash` behind `bm_guard` in a **read-only policy mode**; a snapshot before and after the planner session holds the run if it changed anything. Tasks may carry an executable `check` run after the workspace verify | The coordinator already holds one state machine (the lane); planners must be able to run tests and `git log` to plan well; the workspace verify proves the checkout works, not that a task did its job | Planner logic inside the coordinator; planner limited to read tools; `done_when` as prose only |
 
+| D21 | **Planner and workers alternate** (2026-09-30, plan 7.3): a planner turn starts only while the lane is free, and the scheduler admits tasks only while the planner is idle | Each before/after snapshot then belongs to one agent, so "the planner changed files" is exact; parallel planning is not needed while tasks run one at a time | Planner turns during attempts (writes could not be attributed) |
+
 Revisit a decision by adding a row, not by deleting one.
 
 ---
@@ -354,8 +356,11 @@ may have changed files is never retried automatically.
   guarded by BM. Milestone B exit gate passed live;
   `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
 
-**Not implemented yet:** the planner flow (milestone C, D20). Phase 6.6 (browser-checked UI,
-baseline verification, harder benchmark, read-only bash for planner and reader) is in.
+- Planner flow (Phase 7, D20, D21): `Bm.Plan` (proposal validation), `Bm.Workspace.Planner`
+  (planner session, scheduling, deliveries, limits, completion), goal runs through
+  `Coordinator.start_goal/3`, task checks, dependency context for workers, planner recovery.
+
+**Not implemented yet:** the plan UI and the milestone C gate (Phase 8).
 A7 (replay fixtures) is optional (D17).
 
 ---

@@ -10,7 +10,7 @@ defmodule Bm.Runs do
   import Ecto.Query
 
   alias Bm.Repo
-  alias Bm.Runs.{Attempt, Run, Task, Workspace}
+  alias Bm.Runs.{Attempt, Delivery, Run, Task, Workspace}
 
   ## Workspaces
 
@@ -115,19 +115,50 @@ defmodule Bm.Runs do
     )
   end
 
-  @doc "Ends a run as `:done`, `:failed` or `:cancelled`; this releases the workspace."
-  def finish_run(%Run{} = run, status) when status in [:done, :failed, :cancelled] do
-    run |> Run.status_changeset(status) |> Repo.update()
+  @doc """
+  Ends a run as `:done`, `:failed` or `:cancelled`; this releases the workspace. `reason` says
+  why, in words (kept in `status_reason`).
+  """
+  def finish_run(%Run{} = run, status, reason \\ nil)
+      when status in [:done, :failed, :cancelled] do
+    run
+    |> Run.status_changeset(status)
+    |> Ecto.Changeset.change(status_reason: reason)
+    |> Repo.update()
+  end
+
+  @doc "Sets fields BM manages on a run: `plan_open`, `planner`, `status_reason`."
+  def update_run(%Run{} = run, attrs) do
+    run
+    |> Ecto.Changeset.change(Map.take(Map.new(attrs), [:plan_open, :planner, :status_reason]))
+    |> Repo.update()
   end
 
   def cancel_run(%Run{} = run), do: finish_run(run, :cancelled)
 
   @doc "Pauses a run (e.g. after recovery); it keeps the workspace until finished."
-  def pause_run(%Run{status: :active} = run),
-    do: run |> Run.status_changeset(:paused) |> Repo.update()
+  def pause_run(%Run{status: :active} = run, reason \\ nil) do
+    run
+    |> Run.status_changeset(:paused)
+    |> Ecto.Changeset.change(status_reason: reason || run.status_reason)
+    |> Repo.update()
+  end
 
-  def resume_run(%Run{status: :paused} = run),
-    do: run |> Run.status_changeset(:active) |> Repo.update()
+  def resume_run(%Run{status: :paused} = run) do
+    run
+    |> Run.status_changeset(:active)
+    |> Ecto.Changeset.change(status_reason: nil)
+    |> Repo.update()
+  end
+
+  @doc "Active runs driven by a planner (goal runs), with their workspaces."
+  def list_active_goal_runs do
+    Repo.all(
+      from r in Run,
+        where: r.status == :active and not is_nil(r.planner),
+        preload: :workspace
+    )
+  end
 
   ## Tasks
 
@@ -144,6 +175,76 @@ defmodule Bm.Runs do
 
   def update_task_status(%Task{} = task, status) do
     task |> Ecto.Changeset.change(status: status) |> Repo.update()
+  end
+
+  @doc "The latest revision of every task key in `run`, oldest key first."
+  def latest_tasks(%Run{} = run) do
+    run
+    |> list_tasks()
+    |> Enum.group_by(& &1.key)
+    |> Enum.map(fn {_key, revisions} -> Enum.max_by(revisions, & &1.revision) end)
+    |> Enum.sort_by(& &1.id)
+  end
+
+  @doc """
+  What a worker should know about `task`'s dependencies (plan 7.5): for each key in
+  `depends_on`, its accepted revision's title, the worker's summary and the files it changed.
+  """
+  def dependency_context(%Task{depends_on: []}), do: []
+
+  def dependency_context(%Task{run_id: run_id, depends_on: keys}) do
+    latest = %Run{id: run_id} |> latest_tasks() |> Map.new(&{&1.key, &1})
+
+    for key <- keys, task = latest[key], task.status == :accepted do
+      attempt =
+        Repo.one(
+          from a in Attempt,
+            where: a.task_id == ^task.id and a.status == :accepted,
+            order_by: [desc: a.id],
+            limit: 1
+        )
+
+      %{
+        key: key,
+        title: task.title,
+        summary: attempt && attempt.result && attempt.result["summary"],
+        writes: if(attempt, do: Enum.map(attempt.actual_writes, & &1["path"]), else: [])
+      }
+    end
+  end
+
+  ## Deliveries (plan 7.6)
+
+  @doc "Records that `task` ended in `status` (once per task; later calls change nothing)."
+  def receive_delivery(%Task{id: task_id, run_id: run_id}, status) do
+    %Delivery{run_id: run_id, task_id: task_id, status: status}
+    |> Repo.insert(on_conflict: :nothing, conflict_target: :task_id)
+  end
+
+  @doc "Deliveries of `run` not yet sent to the planner, with their tasks, oldest first."
+  def pending_deliveries(%Run{id: run_id}) do
+    Repo.all(
+      from d in Delivery,
+        where: d.run_id == ^run_id and is_nil(d.delivered_at),
+        order_by: [d.inserted_at, d.id],
+        preload: :task
+    )
+  end
+
+  def delivered_task_ids(%Run{id: run_id}) do
+    Repo.all(from d in Delivery, where: d.run_id == ^run_id, select: d.task_id)
+  end
+
+  def mark_delivered(deliveries) do
+    ids = Enum.map(deliveries, & &1.id)
+
+    from(d in Delivery, where: d.id in ^ids)
+    |> Repo.update_all(set: [delivered_at: DateTime.utc_now(), updated_at: DateTime.utc_now()])
+  end
+
+  @doc "The latest attempt of `task`, or nil."
+  def latest_attempt(%Task{id: task_id}) do
+    Repo.one(from a in Attempt, where: a.task_id == ^task_id, order_by: [desc: a.id], limit: 1)
   end
 
   ## Attempts
