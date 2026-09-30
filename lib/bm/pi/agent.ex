@@ -28,7 +28,8 @@ defmodule Bm.Pi.Agent do
   alias Bm.Pi.ToolCalls
   alias Bm.Pi.Transcript
 
-  # pi dialogs block until answered. Non-BM dialogs are declined until an approval inbox exists.
+  # pi dialogs block until answered. Other extensions' dialogs go to the owner when the agent
+  # was started with `approvals: true` (a worker's attempt, plan 24.1); otherwise declined.
   @dialog_methods ~w(select confirm input editor)
   @max_line_bytes 16 * 1024 * 1024
   @max_buffer_bytes 32 * 1024 * 1024
@@ -58,6 +59,8 @@ defmodule Bm.Pi.Agent do
       # Extension command that makes pi exit cleanly (profiles with a bm_* extension set it).
       shutdown_command: opts[:shutdown_command],
       owner: owner,
+      # Forward other extensions' dialogs to the owner for the user (plan 24.1).
+      approvals?: opts[:approvals] == true,
       port: nil,
       os_pid: nil,
       # pi leads its own process group (pgid == os_pid). pi's bash tool starts each command in
@@ -139,6 +142,9 @@ defmodule Bm.Pi.Agent do
         # Stale: the dialog belonged to an earlier session or was already answered.
         {:noreply, state}
 
+      {%{op: "approval"} = request, dialogs} ->
+        {:noreply, answer_approval(%{state | dialogs: dialogs}, request, reply)}
+
       {_request, dialogs} ->
         {:noreply, answer_dialog(%{state | dialogs: dialogs}, dialog_id, reply)}
     end
@@ -180,8 +186,12 @@ defmodule Bm.Pi.Agent do
 
   def handle_info({:DOWN, _ref, :process, owner, _reason}, %{owner: owner} = state) do
     state =
-      Enum.reduce(state.dialogs, %{state | owner: nil, dialogs: %{}}, fn {dialog_id, _}, acc ->
-        answer_dialog(acc, dialog_id, %{"ok" => false, "error" => "no_owner"})
+      Enum.reduce(state.dialogs, %{state | owner: nil, dialogs: %{}}, fn
+        {_dialog_id, %{op: "approval"} = request}, acc ->
+          answer_approval(acc, request, %{"cancelled" => true})
+
+        {dialog_id, _request}, acc ->
+          answer_dialog(acc, dialog_id, %{"ok" => false, "error" => "no_owner"})
       end)
 
     {:noreply, state}
@@ -503,6 +513,26 @@ defmodule Bm.Pi.Agent do
     end
   end
 
+  # Another extension asks the user (plan 24.1): in a worker's session the owner shows it on the
+  # run page and sends the answer back through respond/3.
+  defp handle_record(
+         %{approvals?: true, owner: owner} = state,
+         %{"type" => "extension_ui_request", "method" => method, "id" => dialog_id} = request
+       )
+       when method in @dialog_methods and is_pid(owner) do
+    forwarded = %{
+      dialog_id: dialog_id,
+      op: "approval",
+      request_id: dialog_id,
+      payload: Map.take(request, ~w(method title message options placeholder prefill timeout)),
+      session_epoch: state.session_epoch
+    }
+
+    send(owner, {:pi_request, state.id, forwarded})
+    state = %{state | dialogs: Map.put(state.dialogs, dialog_id, forwarded)}
+    emit(state, {:notice, "Waiting for your approval: #{request["title"] || method}"})
+  end
+
   defp handle_record(state, %{"type" => "extension_ui_request", "method" => method} = request)
        when method in @dialog_methods do
     state
@@ -525,6 +555,31 @@ defmodule Bm.Pi.Agent do
       value: JSON.encode!(reply)
     })
   end
+
+  # pi's own answer shapes: `confirmed` (confirm), `value` (select, input, editor), `cancelled`.
+  defp answer_approval(%{port: nil} = state, _request, _reply), do: state
+
+  defp answer_approval(state, request, reply) do
+    fields =
+      case Map.take(reply, ["confirmed", "value", "cancelled"]) do
+        empty when empty == %{} -> %{"cancelled" => true}
+        fields -> fields
+      end
+
+    question = request.payload["title"] || request.payload["method"]
+
+    state
+    |> send_record(
+      Map.merge(%{"type" => "extension_ui_response", "id" => request.dialog_id}, fields)
+    )
+    |> emit({:notice, "Approval #{approval_outcome(fields)}: #{question}"})
+  end
+
+  defp approval_outcome(%{"cancelled" => true}), do: "declined"
+  defp approval_outcome(%{"confirmed" => true}), do: "given (yes)"
+  defp approval_outcome(%{"confirmed" => false}), do: "refused (no)"
+  defp approval_outcome(%{"value" => value}), do: "answered #{inspect(value)}"
+  defp approval_outcome(_fields), do: "answered"
 
   defp emit(state, event) do
     state = %{

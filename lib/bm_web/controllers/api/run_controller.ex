@@ -8,6 +8,10 @@ defmodule BmWeb.Api.RunController do
     * `GET /api/runs` — recent runs (`limit`, default 20)
     * `GET /api/runs/:id` — one run with its tasks and their latest attempts
     * `POST /api/runs/:id/commit` — commit the run's accepted changes (plan 15.1, D26)
+    * `POST /api/runs/:id/keep`, `/revert`, `/cancel` — the run page's Keep, Revert and Stop,
+      for the workspace's current run (plan 24.2)
+    * `POST /api/runs/:id/approvals/:dialog_id` — answer a worker's pending approval with
+      `confirmed`, `value` or `cancelled` (plan 24.1)
   """
 
   use BmWeb, :controller
@@ -85,17 +89,22 @@ defmodule BmWeb.Api.RunController do
           }
         end
 
+      approvals = approvals(run)
+
       json(
         conn,
         Map.merge(run_summary(conn, run), %{
           plan_open: run.plan_open,
-          # An attempt left changes that wait for the user's Keep or Revert (plan 16.2).
+          # An attempt left changes that wait for the user's Keep or Revert (plan 16.2), or
+          # the worker waits for an approval (plan 24.1).
           waiting_for_you:
             run.status in [:active, :paused] and
-              Enum.any?(
-                tasks,
-                &(&1.attempt && &1.attempt.status in [:held, :needs_reconciliation])
-              ),
+              (approvals != [] or
+                 Enum.any?(
+                   tasks,
+                   &(&1.attempt && &1.attempt.status in [:held, :needs_reconciliation])
+                 )),
+          approvals: approvals,
           summary: run.planner && run.planner["summary"],
           tasks: tasks
         })
@@ -127,6 +136,68 @@ defmodule BmWeb.Api.RunController do
         conn |> put_status(:not_found) |> json(%{error: "No such run."})
     end
   end
+
+  @doc "Keep, Revert or Stop (`action`) in the workspace's current run `id` (plan 24.2)."
+  def decide(conn, %{"id" => id, "action" => action}) when action in ~w(keep revert cancel) do
+    with_current_run(conn, id, fn path ->
+      case action do
+        "keep" -> Coordinator.keep(path)
+        "revert" -> Coordinator.revert(path)
+        "cancel" -> Coordinator.cancel(path)
+      end
+    end)
+  end
+
+  def decide(conn, _params),
+    do: conn |> put_status(:not_found) |> json(%{error: "Unknown action."})
+
+  def answer(conn, %{"id" => id, "dialog_id" => dialog_id} = params) do
+    reply = Map.take(params, ["confirmed", "value", "cancelled"])
+    with_current_run(conn, id, &Coordinator.answer_approval(&1, dialog_id, reply))
+  end
+
+  defp with_current_run(conn, id, fun) do
+    with {id, ""} <- Integer.parse(String.replace_prefix(id, "BM-", "")),
+         %{} = run <- Runs.get_run_with_workspace(id),
+         path = run.workspace.path,
+         {:ok, _pid} <- Coordinator.ensure_started(path),
+         %{run_id: ^id} <- Coordinator.state(path),
+         :ok <- fun.(path) do
+      show(conn, %{"id" => to_string(id)})
+    else
+      {:error, reason} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: BmWeb.RunLive.explain_action(reason)})
+
+      %{run_id: _other} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: "This run is not the workspace's unfinished run."})
+
+      _ ->
+        conn |> put_status(:not_found) |> json(%{error: "No such run."})
+    end
+  end
+
+  defp approvals(%{id: id, status: status, workspace: workspace})
+       when status in [:active, :paused] do
+    case Coordinator.state(workspace.path) do
+      %{run_id: ^id, approvals: approvals} ->
+        for a <- approvals do
+          a.payload
+          |> Map.take(~w(method title message options placeholder prefill))
+          |> Map.merge(%{"id" => a.id, "timeout_s" => div(a.timeout, 1000), "since" => a.since})
+        end
+
+      _ ->
+        []
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  defp approvals(_run), do: []
 
   defp run_summary(conn, run) do
     %{

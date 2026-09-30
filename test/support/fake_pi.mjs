@@ -28,6 +28,8 @@ let waitingBm = null
 let failNextReset = false
 // Dialogs sent by runWork, waiting for the BEAM's extension_ui_response: id -> resolve.
 const pendingDialogs = new Map()
+// Other extensions' dialogs raised by a {"dialog": …} work step (plan 24.1): id -> resolve.
+const pendingUi = new Map()
 let abortWork = null
 let workAborted = false
 // Remaining scripted planner waves (plan:<json>).
@@ -103,6 +105,14 @@ async function runWork(steps) {
       const [path, text] = step.write
       mkdirSync(dirname(path), {recursive: true})
       writeFileSync(path, text)
+    } else if (step.dialog) {
+      // Like another extension asking the user; {"dialog_out": path} records pi's reply.
+      const id = `ui-${randomUUID()}`
+      const reply = await new Promise(resolve => {
+        pendingUi.set(id, resolve)
+        send({type: "extension_ui_request", id, ...step.dialog})
+      })
+      if (step.dialog_out) writeFileSync(step.dialog_out, JSON.stringify(reply))
     } else if (step.spawn) {
       runShell(`${step.spawn} >/dev/null 2>&1 &`)
       await new Promise(resolve => setTimeout(resolve, 100))
@@ -196,6 +206,10 @@ function handle(command) {
     const resolve = pendingDialogs.get(command.id)
     pendingDialogs.delete(command.id)
     resolve(command.cancelled ? undefined : command.value)
+  } else if (command.type === "extension_ui_response" && pendingUi.has(command.id)) {
+    const resolve = pendingUi.get(command.id)
+    pendingUi.delete(command.id)
+    resolve(command)
   } else if (command.type === "abort") {
     send({id: command.id, type: "response", command: "abort", success: true})
     if (abortWork) { abortWork(); abortWork = null } else { workAborted = true }

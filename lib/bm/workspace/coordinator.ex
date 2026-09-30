@@ -43,6 +43,8 @@ defmodule Bm.Workspace.Coordinator do
     # Refined limits (plan 11.5): one tool call running this long cancels the attempt; the Nth
     # identical guarded call is refused, the Mth cancels the attempt.
     tool_timeout: 10 * 60_000,
+    # Another extension's question to the user waits this long, then is declined (plan 24.1).
+    approval_timeout: 2 * 60_000,
     repeat_refuse: 4,
     repeat_cancel: 6,
     # The review prompt (plan 14.1); tests or scripts can replace it.
@@ -105,6 +107,13 @@ defmodule Bm.Workspace.Coordinator do
   """
   def end_run(path, run_id, status, reason),
     do: call(path, {:end_run, run_id, status, reason})
+
+  @doc """
+  Answers the worker's pending approval `dialog_id` (plan 24.1) with pi's answer fields:
+  `%{"confirmed" => boolean}`, `%{"value" => text}` or `%{"cancelled" => true}`.
+  """
+  def answer_approval(path, dialog_id, reply),
+    do: call(path, {:answer_approval, dialog_id, reply})
 
   @doc "Pauses the run `run_id` with `reason` (the planner lost or changed files)."
   def pause_run(path, run_id, reason), do: call(path, {:pause_run, run_id, reason})
@@ -250,7 +259,9 @@ defmodule Bm.Workspace.Coordinator do
       # Workers' questions waiting for the planner (plan 12.2): task ref => {agent_id, request}.
       asks: %{},
       # Monitor of the goal run's planner process.
-      planner_ref: nil
+      planner_ref: nil,
+      # Other extensions' questions to the user from the running worker (plan 24.1).
+      approvals: %{}
     }
 
     # Attempts left in flight by an earlier coordinator have nobody looking after them.
@@ -299,7 +310,8 @@ defmodule Bm.Workspace.Coordinator do
       lane: state.lane,
       phase: state.phase,
       run_id: state.run && state.run.id,
-      attempt_id: state.attempt && state.attempt.id
+      attempt_id: state.attempt && state.attempt.id,
+      approvals: approval_list(state)
     }
 
     {:reply, reply, state}
@@ -315,7 +327,8 @@ defmodule Bm.Workspace.Coordinator do
     touched: MapSet.new(),
     bash_ran?: false,
     pending_review: nil,
-    planner_ref: nil
+    planner_ref: nil,
+    approvals: %{}
   }
 
   def handle_call(message, from, state)
@@ -401,6 +414,13 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_call({:pause_run, _run_id, _reason}, _from, state),
     do: {:reply, {:error, :run_not_active}, state}
+
+  def handle_call({:answer_approval, dialog_id, reply}, _from, state) do
+    case Map.get(state, :approvals, %{}) do
+      %{^dialog_id => _approval} -> {:reply, :ok, reply_approval(state, dialog_id, reply)}
+      _other -> {:reply, {:error, :no_such_approval}, state}
+    end
+  end
 
   def handle_call({:pause_by_user, run_id}, _from, %{run: %{id: run_id}} = state) do
     case Runs.get_run!(run_id) do
@@ -627,7 +647,7 @@ defmodule Bm.Workspace.Coordinator do
 
     state =
       start_job(%{state | phase: :starting}, :start, fn ->
-        Profile.start(agent_id, role, owner: coordinator, cwd: root)
+        Profile.start(agent_id, role, owner: coordinator, cwd: root, approvals: true)
       end)
 
     broadcast_attempt(state)
@@ -1087,6 +1107,38 @@ defmodule Bm.Workspace.Coordinator do
   def handle_info({:pi_request, id, %{op: "ask_planner"} = request}, %{agent_id: id} = state),
     do: {:noreply, ask_planner(state, request)}
 
+  # Another extension asks the user (plan 24.1): shown on the run page until answered, declined
+  # after approval_timeout (or pi's own timeout, if sooner).
+  def handle_info({:pi_request, id, %{op: "approval"} = request}, %{agent_id: id} = state) do
+    timeout =
+      case request.payload["timeout"] do
+        ms when is_integer(ms) and ms > 0 -> min(ms, state.config.approval_timeout)
+        _ -> state.config.approval_timeout
+      end
+
+    approval = %{
+      id: request.dialog_id,
+      attempt_id: state.attempt.id,
+      payload: request.payload,
+      since: DateTime.utc_now(),
+      timeout: timeout,
+      timer: Process.send_after(self(), {:approval_timeout, request.dialog_id}, timeout)
+    }
+
+    approvals = Map.put(Map.get(state, :approvals, %{}), request.dialog_id, approval)
+    {:noreply, broadcast_approvals(Map.put(state, :approvals, approvals))}
+  end
+
+  def handle_info({:approval_timeout, dialog_id}, state) do
+    case Map.get(state, :approvals, %{}) do
+      %{^dialog_id => _approval} ->
+        {:noreply, reply_approval(state, dialog_id, %{"cancelled" => true})}
+
+      _answered ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:pi_request, id, request}, %{agent_id: id} = state) do
     {outcome, state} = handle_request(state, request)
     Bm.Pi.respond(id, request.dialog_id, outcome)
@@ -1251,7 +1303,9 @@ defmodule Bm.Workspace.Coordinator do
       now() - state.running_since >= state.config.max_duration ->
         request_cancel(state, "max_duration")
 
-      state.tool == nil and now() - state.last_event_at >= state.config.stall_timeout ->
+      # A question to the user holds the silence clock, like a running tool (plan 24.1).
+      state.tool == nil and Map.get(state, :approvals, %{}) == %{} and
+          now() - state.last_event_at >= state.config.stall_timeout ->
         request_cancel(state, "stall")
 
       state.tool != nil and state.tool_since != nil and
@@ -2027,6 +2081,7 @@ defmodule Bm.Workspace.Coordinator do
   # Ends the current attempt in `status`; the lane is held if the attempt left changes that
   # were not accepted.
   defp finish(state, status, attrs) do
+    state = drop_approvals(state)
     attempt = Runs.get_attempt!(state.attempt.id)
 
     attrs =
@@ -2174,6 +2229,50 @@ defmodule Bm.Workspace.Coordinator do
         Task.start(fn -> Bm.Pi.stop(agent_id) end)
         state
     end
+  end
+
+  ## Approvals (24.1)
+
+  # Answers pi and forgets the approval; the silence clock starts again from the answer.
+  defp reply_approval(state, dialog_id, reply) do
+    {approval, approvals} = Map.pop(state.approvals, dialog_id)
+    Process.cancel_timer(approval.timer)
+    if state.agent_id, do: Bm.Pi.respond(state.agent_id, dialog_id, reply)
+
+    state
+    |> Map.put(:approvals, approvals)
+    |> Map.put(:last_event_at, now())
+    |> broadcast_approvals()
+  end
+
+  # The attempt ended: its pi session and its questions are gone.
+  defp drop_approvals(state) do
+    case Map.get(state, :approvals, %{}) do
+      approvals when approvals == %{} ->
+        state
+
+      approvals ->
+        Enum.each(approvals, fn {_id, approval} -> Process.cancel_timer(approval.timer) end)
+        broadcast_approvals(Map.put(state, :approvals, %{}))
+    end
+  end
+
+  defp approval_list(state) do
+    state
+    |> Map.get(:approvals, %{})
+    |> Map.values()
+    |> Enum.sort_by(& &1.since, DateTime)
+    |> Enum.map(&Map.delete(&1, :timer))
+  end
+
+  defp broadcast_approvals(state) do
+    Phoenix.PubSub.broadcast(
+      Bm.PubSub,
+      topic(state.root),
+      {:workspace, state.root, {:approvals, state.run && state.run.id, approval_list(state)}}
+    )
+
+    state
   end
 
   ## Shutdown

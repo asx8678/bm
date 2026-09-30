@@ -42,6 +42,9 @@ defmodule BmWeb.RunLive do
        run: run,
        root: root,
        lane: lane(run),
+       # Other extensions' questions from the running worker (plan 24.1).
+       approvals: approvals(run),
+       approval_form: to_form(%{"id" => "", "value" => ""}, as: :approval),
        latest: List.last(attempts),
        form: to_form(%{"goal" => ""}, as: :next),
        goal_run?: run.planner != nil,
@@ -207,6 +210,18 @@ defmodule BmWeb.RunLive do
 
   defp lane(_run), do: :finished
 
+  defp approvals(%{id: id, status: status, workspace: workspace})
+       when status in [:active, :paused] do
+    case Coordinator.state(workspace.path) do
+      %{run_id: ^id, approvals: approvals} -> approvals
+      _ -> []
+    end
+  catch
+    :exit, _ -> []
+  end
+
+  defp approvals(_run), do: []
+
   # Stream items: the attempt, its task, and the diff of each changed file once it settled.
   defp decorate(attempt, root) do
     %{id: attempt.id, attempt: attempt, task: attempt.task, diffs: diffs(attempt, root)}
@@ -270,6 +285,31 @@ defmodule BmWeb.RunLive do
 
     {:noreply, socket}
   end
+
+  def handle_info(
+        {:workspace, _root, {:approvals, id, approvals}},
+        %{assigns: %{run: %{id: id}}} = socket
+      ) do
+    known = MapSet.new(socket.assigns.approvals, & &1.id)
+    new = Enum.reject(approvals, &MapSet.member?(known, &1.id))
+
+    socket =
+      case new do
+        [approval | _] ->
+          push_event(socket, "bm:notify", %{
+            title: "#{label(socket.assigns.run)} asks for your approval",
+            body: approval_question(approval)
+          })
+
+        [] ->
+          socket
+      end
+
+    {:noreply, assign(socket, approvals: approvals)}
+  end
+
+  def handle_info({:workspace, _root, {:approvals, _id, _approvals}}, socket),
+    do: {:noreply, socket}
 
   def handle_info(
         {:workspace, _root, {:task, %{run_id: id} = task}},
@@ -420,6 +460,27 @@ defmodule BmWeb.RunLive do
     end
   end
 
+  # An approval (plan 24.1): Yes/No for confirm, an option for select, Decline for any.
+  def handle_event("answer_approval", %{"id" => id} = params, socket) do
+    reply =
+      case params do
+        %{"answer" => "yes"} -> %{"confirmed" => true}
+        %{"answer" => "no"} -> %{"confirmed" => false}
+        %{"answer" => "option", "value" => value} -> %{"value" => value}
+        _decline -> %{"cancelled" => true}
+      end
+
+    {:noreply, answer_approval(socket, id, reply)}
+  end
+
+  # Text for input and editor.
+  def handle_event(
+        "answer_approval_text",
+        %{"approval" => %{"id" => id, "value" => value}},
+        socket
+      ),
+      do: {:noreply, answer_approval(socket, id, %{"value" => value})}
+
   def handle_event("pause", _params, socket) do
     case Coordinator.pause_by_user(socket.assigns.root, socket.assigns.run.id) do
       {:ok, _run} ->
@@ -481,6 +542,9 @@ defmodule BmWeb.RunLive do
     do: "a goal run's task can be undone while the run is paused or finished (Pause first)."
 
   def explain_action(:not_pausable), do: "only an active goal run can be paused."
+
+  def explain_action(:no_such_approval),
+    do: "that question is no longer waiting (answered, timed out, or the attempt ended)."
 
   def explain_action(:lane_held),
     do: "an attempt waits for your decision (Keep or Revert); decide that first."
@@ -635,6 +699,8 @@ defmodule BmWeb.RunLive do
           goal_run?={@goal_run?}
           planner_phase={@planner_phase}
           worker_tool={@worker_tool}
+          approvals={@approvals}
+          approval_form={@approval_form}
         />
 
         <section
@@ -872,6 +938,8 @@ defmodule BmWeb.RunLive do
   attr :planner_phase, :atom, default: nil
   attr :worker_tool, :map, default: nil
   attr :checkpoints_pruned?, :boolean, default: false
+  attr :approvals, :list, default: []
+  attr :approval_form, :any, default: nil
 
   defp action_bar(assigns) do
     ~H"""
@@ -881,6 +949,11 @@ defmodule BmWeb.RunLive do
     >
       <%= case @lane do %>
         <% {:busy, _id} -> %>
+          <.approval_card
+            :for={approval <- @approvals}
+            approval={approval}
+            form={@approval_form}
+          />
           <div class="flex items-center gap-3">
             <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
             <p class="min-w-0 flex-1 text-xs">
@@ -1087,6 +1160,101 @@ defmodule BmWeb.RunLive do
 
   defp held_reason(%{error: error}) when is_binary(error), do: "the last attempt #{error}."
   defp held_reason(_attempt), do: "the last attempt left changes BM could not accept."
+
+  attr :approval, :map, required: true
+  attr :form, :any, required: true
+
+  # Another extension's question to the user while the worker waits (plan 24.1).
+  defp approval_card(assigns) do
+    ~H"""
+    <div
+      id={"approval-#{@approval.id}"}
+      class="mb-2.5 rounded-lg border border-bm-run/40 bg-bm-run/5 px-3 py-2.5"
+    >
+      <p class="text-[11px] font-semibold uppercase tracking-wide text-bm-run">
+        Approval needed · the worker waits
+      </p>
+      <p class="mt-1 text-sm font-medium">{approval_question(@approval)}</p>
+      <pre
+        :if={@approval.payload["message"] && @approval.payload["title"]}
+        class="mt-0.5 whitespace-pre-wrap font-sans text-xs text-bm-muted"
+      >{@approval.payload["message"]}</pre>
+      <div class="mt-2 flex flex-wrap items-center gap-2">
+        <%= case @approval.payload["method"] do %>
+          <% "confirm" -> %>
+            <.approval_button id={@approval.id} answer="yes" primary>Yes</.approval_button>
+            <.approval_button id={@approval.id} answer="no">No</.approval_button>
+          <% "select" -> %>
+            <.approval_button
+              :for={option <- List.wrap(@approval.payload["options"])}
+              id={@approval.id}
+              answer="option"
+              value={to_string(option)}
+            >
+              {option}
+            </.approval_button>
+          <% _text -> %>
+            <.form
+              for={@form}
+              id={"approval-form-#{@approval.id}"}
+              phx-submit="answer_approval_text"
+              class="flex min-w-0 flex-1 flex-wrap items-center gap-2"
+            >
+              <.input field={@form[:id]} type="hidden" value={@approval.id} />
+              <div class="min-w-0 flex-1 [&_.fieldset]:mb-0">
+                <.input
+                  field={@form[:value]}
+                  type={if @approval.payload["method"] == "editor", do: "textarea", else: "text"}
+                  value={@approval.payload["prefill"] || ""}
+                  placeholder={@approval.payload["placeholder"] || "Your answer"}
+                  aria-label="Your answer"
+                  class="w-full rounded-md border border-bm-line bg-bm-surface px-2.5 py-1.5 text-[13px] outline-none transition-colors focus:border-bm-muted"
+                />
+              </div>
+              <button
+                type="submit"
+                class="rounded-md bg-bm-text px-3 py-1.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
+              >
+                Send
+              </button>
+            </.form>
+        <% end %>
+        <.approval_button id={@approval.id} answer="decline">Decline</.approval_button>
+        <span class="ml-auto text-[11px] text-bm-muted">
+          declined by itself after {div(@approval.timeout, 1000)} s
+        </span>
+      </div>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :answer, :string, required: true
+  attr :value, :string, default: nil
+  attr :primary, :boolean, default: false
+  slot :inner_block, required: true
+
+  defp approval_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={"approval-#{@id}-#{@answer}#{if @value, do: "-" <> @value}"}
+      phx-click="answer_approval"
+      phx-value-id={@id}
+      phx-value-answer={@answer}
+      phx-value-value={@value}
+      class={[
+        "rounded-md px-3 py-1.5 text-xs font-semibold transition-opacity hover:opacity-85",
+        if(@primary,
+          do: "bg-bm-text text-bm-surface",
+          else: "border border-bm-line bg-bm-surface text-bm-text"
+        )
+      ]}
+    >
+      {render_slot(@inner_block)}
+    </button>
+    """
+  end
 
   attr :id, :string, required: true
   attr :event, :string, required: true
@@ -1331,6 +1499,16 @@ defmodule BmWeb.RunLive do
   defp tool_tone("ok"), do: "text-bm-idle"
   defp tool_tone("error"), do: "text-bm-error"
   defp tool_tone(_running), do: "text-bm-muted"
+
+  defp answer_approval(socket, id, reply) do
+    case Coordinator.answer_approval(socket.assigns.root, id, reply) do
+      :ok -> put_flash(socket, :info, "Answer sent.")
+      {:error, reason} -> put_flash(socket, :error, "Not sent: #{explain_action(reason)}")
+    end
+  end
+
+  defp approval_question(%{payload: payload}),
+    do: payload["title"] || payload["message"] || "A question from pi (#{payload["method"]})"
 
   # Undo a task (13.3): in a finished run, and during a run (plan 23.1) while a goal run is paused
   # or a single-task run is active; the coordinator refuses it while an attempt runs.
