@@ -1238,3 +1238,64 @@ needs a repository the user names, so it moves out of this phase and waits as it
 **Waiting for the user: a trial on one of their projects.** Starts when the user names the
 repository and its verify command (and says whether BM may commit accepted changes there with
 `mix bm.commit`). BM never picks a repository itself.
+
+---
+
+## Phase 21: resume after a restart
+
+Chosen by the user 2026-09-30. Evidence: trial runs 62 and 68 were interrupted by BM restarts and
+needed a manual Resume planning; after every restart a goal run pauses ("planner lost") even when
+nothing waits for the user. No tests (user's instruction).
+
+**21.1 An interruption is not a failure.** In a goal run, an attempt that recovery finds
+interrupted with no changes (`failed`, "interrupted (no changes; safe to run again)") no longer
+fails its task: the task goes back to `queued`, so the scheduler runs it again. Until now it
+counted as the task's one re-plan, and if the interrupted attempt was already the re-planned one,
+the resumed run ended "failed again after its re-plan". Single-task runs keep the task failed
+(nothing would run it again; the user re-runs it).
+
+**21.2 Resume by itself after a restart.** At application start only (not when a coordinator
+alone restarts), a goal run whose planner was lost resumes planning in a new session instead of
+waiting, when all hold: automatic resume is on (`config :bm, auto_resume:`, default true), the
+lane is free (no interrupted or held changes wait for the user), the budget is not spent, and the
+run was resumed this way fewer than 3 times (a crash loop stops there). Otherwise it pauses as
+before, and the reason says why it did not resume. Attempts that changed files are never retried
+or reverted by themselves: the recovery snapshot cannot tell the worker's writes from the user's.
+
+**21.3 `mix bm.goal` waits out a restart.** It gave up ("Lost the run") on the first poll that
+found the server down. Now `Bm.CLI.fetch/1` tells a server that does not answer from an error it
+answered with; `mix bm.goal` waits up to 2 minutes, saying so, and follows the run again.
+`mix bm.runs`, `bm.status` and `bm.commit` are unchanged.
+
+**Status 21.1–21.2 (2026-09-30).** `Recovery.recover/1` queues the task again when a goal run's
+attempt is interrupted with no changes (and no longer touches the task of an attempt that was not
+orphaned); `Recovery.run/0` passes `auto_resume: true` to `recover_planner/2`, which reloads the
+run (an attempt with changes may have paused it), pauses it as before and then resumes it through
+`Coordinator.resume_planning/2` or records why not. Checked with the fake pi across two BEAMs (A
+starts a run and halts while the worker runs; B runs the startup recovery): no changes → resumed
+("1 of 3" note, attempt failed "interrupted", task queued, new planner); worker had written →
+paused, "changes wait for your decision (Keep or Revert)"; budget spent → paused, "the
+run's budget is spent"; `auto_resumes` 3 → paused, "already resumed by itself 3 times";
+`auto_resume: false` → paused, "turned off". Live on a sandbox clone (`/tmp/bm-sandbox-21`): run
+104, the dev server stopped (SIGTERM) as soon as the worker ran and started again; recovery
+queued the task, resumed planning, the task ran again and was accepted, review approved, run done
+($0.073, of which ≈$0.014 for the resumed planner's extra turn).
+
+**Status 21.3 (2026-09-30).** Live, run 105: the server was down 7 s while `mix bm.goal` followed
+the run; it printed "BM does not answer (restarting?)…", then "BM answers again." and the rest of
+the run through "done" ($0.040). Both runs' changes checked by hand (tests 50 and 56, own probes).
+
+Review fixes: recovery runs next to the web server's start, so `mix bm.goal` could see a run in
+its short "planner lost" pause before it resumes, and stop there. It now looks again (up to 5
+polls) at a pause whose reason is recovery's bare "planner lost: BM stopped…" without "; not
+resumed by itself" or "; resuming failed" (checked by reading and on those reason strings). The
+reason for a lane held before the restart no longer says "interrupted". Also changed: when an
+attempt turns out not to be orphaned (`:stale`), recovery leaves its task and run alone (it used
+to mark the task failed and could pause the run).
+
+Not seen live: a restart during the planner's first turn (no attempt yet; same path, lane free →
+resume) and during verification or review (the attempt has changes → paused for the user). Single-task
+runs are unchanged: an interrupted task fails and the user runs it again.
+
+**Status: Phase 21 done (2026-09-30).** Not done: a resumed run whose plan was already closed still
+spends one planner turn before its queued task runs (≈$0.014 in each of runs 104 and 105).
