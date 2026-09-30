@@ -112,6 +112,27 @@ defmodule Bm.Runs do
     Repo.all(from w in Workspace, order_by: [desc: w.updated_at, desc: w.id])
   end
 
+  @doc """
+  Runs whose goal or workspace path contains `text` (case-insensitive; blank matches all), with
+  status `status` (nil for any), most recently updated first, at most `limit`, with their
+  workspaces. Returns `{runs, more?}`.
+  """
+  def search_runs(text, status, limit) do
+    pattern = "%" <> String.replace(String.trim(text || ""), ~r/[\\%_]/, &("\\" <> &1)) <> "%"
+
+    query =
+      from r in Run,
+        join: w in assoc(r, :workspace),
+        where: ilike(r.goal, ^pattern) or ilike(w.path, ^pattern),
+        order_by: [desc: r.updated_at, desc: r.id],
+        limit: ^(limit + 1),
+        preload: [workspace: w]
+
+    query = if status, do: where(query, [r], r.status == ^status), else: query
+    runs = Repo.all(query)
+    {Enum.take(runs, limit), length(runs) > limit}
+  end
+
   @doc "The most recently updated runs, with their workspaces."
   def list_recent_runs(limit \\ 20) do
     Repo.all(

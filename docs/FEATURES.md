@@ -149,7 +149,7 @@ Each has a precondition; don't start one before it holds.
 | Feature | Size |
 |---|---|
 | Live **canvas** of planner, workers and tasks — **done 2026-09-30** (plan 10.1) | M |
-| Run history and search | M |
+| Run history and search — **done 2026-09-30** (plan 10.5): text and status filter, paging | M |
 | Short labels for runs and agents (`BM-12`) | S |
 | Transcript per attempt — **done 2026-09-30** as a stored compact transcript and an Activity fold (plan 10.4), not pi `export_html` | S |
 | Pruning old `refs/bm/…` checkpoints — **done 2026-09-30** (plan 10.3) | S |

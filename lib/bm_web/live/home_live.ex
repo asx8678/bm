@@ -15,9 +15,12 @@ defmodule BmWeb.HomeLive do
 
   alias Bm.Workspace.Coordinator
 
+  @page 20
+  @statuses ~w(active paused done failed cancelled)
+
   @impl true
   def mount(params, _session, socket) do
-    runs = Runs.list_recent_runs()
+    {runs, more?} = Runs.search_runs("", nil, @page)
     workspaces = Runs.list_workspaces()
 
     {:ok,
@@ -25,6 +28,9 @@ defmodule BmWeb.HomeLive do
      |> assign(
        page_title: "Tasks",
        runs_empty?: runs == [],
+       search: to_form(%{"text" => "", "status" => ""}, as: :search),
+       runs_limit: @page,
+       more_runs?: more?,
        workspaces: workspaces,
        mode: if(params["mode"] == "task", do: :task, else: :goal),
        form: default_form(workspaces, params["path"]),
@@ -54,6 +60,15 @@ defmodule BmWeb.HomeLive do
   end
 
   @impl true
+  def handle_event("search", %{"search" => params}, socket) do
+    {:noreply,
+     socket |> assign(search: to_form(params, as: :search), runs_limit: @page) |> load_runs()}
+  end
+
+  def handle_event("more_runs", _params, socket) do
+    {:noreply, socket |> assign(runs_limit: socket.assigns.runs_limit + @page) |> load_runs()}
+  end
+
   def handle_event("mode", %{"mode" => mode}, socket) do
     {:noreply, assign(socket, mode: if(mode == "task", do: :task, else: :goal))}
   end
@@ -95,6 +110,17 @@ defmodule BmWeb.HomeLive do
         form = to_form(params, as: :task, errors: [{field, {message, []}}], action: :validate)
         {:noreply, assign(socket, form: form)}
     end
+  end
+
+  # Refills the runs list from the search form and the current page size.
+  defp load_runs(socket) do
+    params = socket.assigns.search.params
+    status = if params["status"] in @statuses, do: String.to_existing_atom(params["status"])
+    {runs, more?} = Runs.search_runs(params["text"], status, socket.assigns.runs_limit)
+
+    socket
+    |> assign(more_runs?: more?, runs_empty?: runs == [])
+    |> stream(:runs, runs, reset: true)
   end
 
   defp goal_attrs(params) do
@@ -408,7 +434,40 @@ defmodule BmWeb.HomeLive do
         </section>
 
         <section aria-labelledby="runs-title" class="min-w-0">
-          <h2 id="runs-title" class="text-sm font-semibold">Recent runs</h2>
+          <h2 id="runs-title" class="text-sm font-semibold">Runs</h2>
+          <.form
+            for={@search}
+            id="run-search"
+            phx-change="search"
+            phx-submit="search"
+            class="mt-2 flex gap-2"
+          >
+            <input
+              type="search"
+              name={@search[:text].name}
+              value={@search[:text].value}
+              id="run-search-text"
+              placeholder="Search goals and repositories"
+              phx-debounce="250"
+              autocomplete="off"
+              class="min-w-0 flex-1 rounded-md border border-bm-line bg-bm-bg px-2.5 py-1 text-xs outline-none transition-colors placeholder:text-bm-muted/70 focus:border-bm-muted"
+            />
+            <select
+              name={@search[:status].name}
+              id="run-search-status"
+              aria-label="Status"
+              class="rounded-md border border-bm-line bg-bm-bg px-1.5 py-1 text-xs outline-none focus:border-bm-muted"
+            >
+              <option value="" selected={@search[:status].value in [nil, ""]}>Any</option>
+              <option
+                :for={status <- ~w(active paused done failed cancelled)}
+                value={status}
+                selected={@search[:status].value == status}
+              >
+                {String.capitalize(status)}
+              </option>
+            </select>
+          </.form>
           <ol id="runs" phx-update="stream" class="mt-3 space-y-1">
             <li id="runs-empty" class="hidden text-xs text-bm-muted only:block">No runs yet.</li>
             <li :for={{dom_id, run} <- @streams.runs} id={dom_id}>
@@ -431,6 +490,15 @@ defmodule BmWeb.HomeLive do
               </.link>
             </li>
           </ol>
+          <button
+            :if={@more_runs?}
+            id="more-runs-btn"
+            type="button"
+            phx-click="more_runs"
+            class="mt-2 w-full rounded-md border border-bm-line px-3 py-1.5 text-xs text-bm-muted transition-colors hover:bg-bm-surface hover:text-bm-text"
+          >
+            Show more
+          </button>
         </section>
       </div>
     </Layouts.app>

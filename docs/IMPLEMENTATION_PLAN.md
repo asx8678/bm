@@ -28,7 +28,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 7 | Planner | 7.1–7.9 | goal → plan → sequential tasks with the fake pi |
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
-| 10 | Optional: seeing a run | 10.1–10.4 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts |
+| 10 | Optional: seeing a run | 10.1–10.5 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search |
 
 ---
 
@@ -752,3 +752,8 @@ coordinator's stop job), its transcript is read first and stored compacted on th
 1,500 characters, errors and notices; at most 300 entries; the prompt is left out, it is the
 task). The attempt card has an Activity fold ("4 tool calls, 1 failed"). Checked live (run 48):
 read, edit, bash (the check), submit_result, all ✓.
+
+**10.5 Run history and search.** The Tasks page's run list (`#run-search`) filters by text in the
+goal or the repository path (case-insensitive, `%` and `_` escaped) and by status, 20 at a time
+with Show more (`Runs.search_runs/3`). Checked in the browser: "greet" + Done lists the four
+matching runs.
