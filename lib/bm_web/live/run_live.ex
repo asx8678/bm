@@ -1231,6 +1231,15 @@ defmodule BmWeb.RunLive do
   defp terminal?(status),
     do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]
 
+  defp verify_label(%{"skipped" => _, "check" => %{"exit" => 0}}),
+    do: "no changes; task check passed"
+
+  defp verify_label(%{"skipped" => _, "check" => %{"timeout" => true}}),
+    do: "no changes; task check timed out"
+
+  defp verify_label(%{"skipped" => _, "check" => %{"exit" => code}}),
+    do: "no changes; task check failed (exit #{code})"
+
   defp verify_label(%{"exit" => 0, "check" => %{"timeout" => true}}),
     do: "passed; task check timed out"
 
@@ -1238,6 +1247,7 @@ defmodule BmWeb.RunLive do
     do: "passed; task check failed (exit #{code})"
 
   defp verify_label(%{"exit" => 0, "check" => %{"exit" => 0}}), do: "passed; task check passed"
+
   defp verify_label(%{"skipped" => reason}), do: "skipped (#{reason})"
   defp verify_label(%{"timeout" => true}), do: "timed out"
   defp verify_label(%{"exit" => 0}), do: "passed"

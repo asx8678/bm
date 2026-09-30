@@ -1047,3 +1047,8 @@ checked by scratch scripts and live runs only.
 
 **Status: Phase 15 done except 15.3** (a trial on a project of the user's, waiting for the
 repository and its verify command).
+
+**Status 15.3 (2026-09-30); Phase 15 done.** Trial on the user's `kiro-fabric` (docs/TRIALS.md):
+two goals done ($0.055 from the terminal, $0.43 via the web page with Review goal), both correct
+and verified by hand in the clone. Found and fixed F4: a task that changed nothing but has a check
+now runs that check (and fails if it fails) instead of being accepted unchecked.
