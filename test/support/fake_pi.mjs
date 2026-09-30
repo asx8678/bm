@@ -13,6 +13,9 @@
 //                  group id in BM_PGID_FILE (as bm_guard's prefix does) and starts a background
 //                  job, plus a plain child in pi's own group; then answers
 //   "work:<json>" -> runs scripted steps like a worker, then answers "worked" (see runWork)
+//   "plan:<json>" -> a scripted planner: a list of waves; the prompt runs the first wave and each
+//                  follow_up the next one (see runPlanWave); without waves left, follow_ups are
+//                  answered "followed: ..."
 //   anything    -> answers "echo: <message>"
 import {spawn} from "node:child_process"
 import {randomUUID} from "node:crypto"
@@ -27,6 +30,8 @@ let failNextReset = false
 const pendingDialogs = new Map()
 let abortWork = null
 let workAborted = false
+// Remaining scripted planner waves (plan:<json>).
+let planWaves = null
 
 const send = record => process.stdout.write(JSON.stringify(record) + "\n")
 const usage = {input: 10, output: 2, cacheRead: 5, cacheWrite: 0, totalTokens: 17}
@@ -121,6 +126,44 @@ async function runWork(steps) {
   answer("worked")
 }
 
+// A planner wave: {"tasks": [proposal, ...], "close": true (default) | false, "summary": text,
+// "write": [path, text] (writes a file first, like a misbehaving planner), "bash": cmd (asks
+// authorize, runs it if allowed), "stream_hang": true (streams a propose_task call without ever
+// sending its dialog, then waits until aborted), "hang": true (waits until aborted at the end)}.
+// Answers with one line per proposal: "key: accepted" or "key: rejected (reason)".
+async function runPlanWave(wave) {
+  workAborted = false
+  const lines = []
+  if (wave.write) {
+    const [path, text] = wave.write
+    mkdirSync(dirname(path), {recursive: true})
+    writeFileSync(path, text)
+  }
+  if (wave.bash) {
+    const reply = await bmRequest("authorize", {tool: "bash", input: {command: wave.bash}})
+    if (reply.allow) await runShell(wave.bash)
+    lines.push(`bash: ${reply.allow ? "ran" : `denied (${reply.reason})`}`)
+  }
+  if (wave.stream_hang) {
+    const update = event => send({type: "message_update", usage, assistantMessageEvent: event})
+    send({type: "message_start", message: {role: "assistant", content: [], stopReason: "pending"}})
+    update({type: "toolcall_start", contentIndex: 0, id: "call-p", toolName: "propose_task"})
+    update({type: "toolcall_delta", contentIndex: 0, delta: JSON.stringify(wave.tasks?.[0] ?? {key: "x"})})
+    if (!workAborted) await new Promise(resolve => { abortWork = resolve })
+    return answer("aborted", "aborted")
+  }
+  for (const task of wave.tasks ?? []) {
+    const reply = await bmRequest("propose_task", task)
+    lines.push(`${task.key}: ${reply.status ?? reply.error}${reply.reason ? ` (${reply.reason})` : ""}`)
+  }
+  if (wave.close !== false) await bmRequest("close_plan", {summary: wave.summary ?? "planned"})
+  if (wave.hang) {
+    if (!workAborted) await new Promise(resolve => { abortWork = resolve })
+    return answer("aborted", "aborted")
+  }
+  answer(lines.join("; ") || "planned")
+}
+
 function handle(command) {
   if (command.type === "get_state") {
     send({id: command.id, type: "response", command: "get_state", success: true,
@@ -137,7 +180,8 @@ function handle(command) {
   } else if (command.type === "follow_up") {
     send({id: command.id, type: "response", command: "follow_up", success: true})
     send({type: "agent_start"})
-    answer(`followed: ${command.message}`)
+    if (planWaves && planWaves.length > 0) runPlanWave(planWaves.shift())
+    else answer(`followed: ${command.message}`)
   } else if (command.type === "extension_ui_response" && waitingBm === command.id) {
     waitingBm = null
     answer(`bm reply: ${command.value ?? "cancelled"}`)
@@ -186,6 +230,9 @@ function handle(command) {
       spawn("sh", ["-c", script], {detached: true, stdio: "ignore"}).on("exit", () => answer("spawned"))
     } else if (message.startsWith("work:")) {
       runWork(JSON.parse(message.slice("work:".length)))
+    } else if (message.startsWith("plan:")) {
+      planWaves = JSON.parse(message.slice("plan:".length))
+      runPlanWave(planWaves.shift() ?? {})
     } else if (message === "plan") {
       streamPlan()
     } else if (message === "fail") {

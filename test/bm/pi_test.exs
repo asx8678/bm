@@ -239,6 +239,48 @@ defmodule Bm.PiTest do
     end
   end
 
+  describe "scripted planner (fake pi)" do
+    @describetag owner: true
+
+    defp answer_request(id, op, reply) do
+      assert_receive {:pi_request, ^id, %{op: ^op, dialog_id: dialog_id} = request}, 5_000
+      Bm.Pi.respond(id, dialog_id, reply)
+      request
+    end
+
+    test "waves propose tasks and close the plan; a follow_up runs the next wave", %{id: id} do
+      waves = [
+        %{tasks: [%{key: "a", title: "A"}, %{key: "b", title: "B"}], summary: "two"},
+        %{tasks: [%{key: "c", title: "C"}], close: false}
+      ]
+
+      :ok = Bm.Pi.prompt(id, "plan:" <> JSON.encode!(waves))
+      accepted = %{"ok" => true, "status" => "accepted"}
+      assert %{payload: %{"key" => "a"}} = answer_request(id, "propose_task", accepted)
+
+      assert %{payload: %{"key" => "b"}} =
+               answer_request(id, "propose_task", %{
+                 "ok" => true,
+                 "status" => "rejected",
+                 "reason" => "no"
+               })
+
+      assert %{payload: %{"summary" => "two"}} = answer_request(id, "close_plan", %{"ok" => true})
+      %{transcript: transcript} = settle(id)
+      assert %{text: "a: accepted; b: rejected (no)"} = List.last(transcript)
+
+      :ok = Bm.Pi.follow_up(id, "results")
+      assert %{payload: %{"key" => "c"}} = answer_request(id, "propose_task", accepted)
+      %{transcript: transcript} = settle(id)
+      assert %{text: "c: accepted"} = List.last(transcript)
+      # No close_plan in the second wave, and no waves left: follow_ups are echoed.
+      refute_received {:pi_request, ^id, %{op: "close_plan"}}
+      :ok = Bm.Pi.follow_up(id, "more")
+      assert %{transcript: transcript} = settle(id)
+      assert %{text: "followed: more"} = List.last(transcript)
+    end
+  end
+
   defp eventually(fun, attempts \\ 50) do
     cond do
       fun.() -> true
