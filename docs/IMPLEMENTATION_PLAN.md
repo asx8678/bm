@@ -1154,3 +1154,24 @@ it. The real sandbox was not touched (clones in /tmp).
   ignore it, which holds the attempt as a reviewer write.
 
 **Status: Phase 18 done and reviewed (2026-09-30).**
+
+---
+
+## Phase 19: real use on the sandbox
+
+Scoped 2026-09-30 by the user's choice (the open optional features have no evidence from real use
+yet): confirm on `~/projects/bm-sandbox` itself, not a throwaway clone, that Phase 18's reviewer
+catches boundary bugs, and fix what turns up. No tests (user's instruction).
+
+**19.1 See what the reviewer ran.** The review records the reviewer's bash commands and the
+policy's answer (allowed, or refused with the reason) with the review; the run page lists them
+under the review's reason. Until now only the reviewer's own summary said whether it probed.
+
+**19.2 Close 18.4's known limits.** A heredoc body (`node <<'EOF' … EOF`) is the command's input,
+not shell, unless a shell reads it (`bash <<EOF` is checked as a command). Read-only sessions
+(planner, reader, reviewer) run with `PYTHONDONTWRITEBYTECODE=1`, so a `python3 -c` probe
+doesn't write `__pycache__/`.
+
+**19.3 Goals on the sandbox.** Two or three goals with contracts that have edge cases, started
+with `mix bm.goal`, each change checked by hand (code read, own probes of the boundaries) and
+committed with `mix bm.commit`. Findings go to TRIALS.md and are fixed in this phase.
