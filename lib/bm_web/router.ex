@@ -36,6 +36,8 @@ defmodule BmWeb.Router do
     get "/runs", RunController, :index
     get "/runs/:id", RunController, :show
     post "/runs/:id/commit", RunController, :commit
+    post "/runs/:id/approvals/:dialog_id", RunController, :answer
+    post "/runs/:id/:action", RunController, :decide
   end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
