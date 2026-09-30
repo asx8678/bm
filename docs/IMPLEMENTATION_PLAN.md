@@ -1574,3 +1574,58 @@ checks; tasks, attempts and deliveries went with them), 113 workspaces left with
 bridge requests of those attempts and planners. Kept: the sandbox's 6 runs (77–79, 88–90).
 
 **Status: Phase 27 done (2026-09-30).**
+
+---
+
+## Phase 28: BM on its own code
+
+Chosen by the user 2026-09-30 ("yes BM"): the trial on a real project runs on BM itself, on a
+fresh clone in /tmp (never the checkout the dev server runs from). Verify command
+`mix compile --warnings-as-errors && mix format --check-formatted`; the goals ask for no new or run
+tests (the user's instruction). Each accepted change is checked by hand, including running it from
+the clone, and committed in the clone with `mix bm.commit` so the next goal builds on it; nothing
+reaches the real repository unless the user asks for it.
+
+The user picked three goals from real gaps between the terminal and BM:
+
+**28.1 Status filter.** `GET /api/runs?status=…` and `mix bm.runs --status …` (the query supported a
+status already; the API never passed one).
+
+**28.2 `mix bm.status` shows what a run waits for.** Pending approvals and a held attempt, with a
+hint to use `mix bm.attach` (the API has reported them since Phase 24).
+
+**28.3 Pause, Resume and Undo from the terminal.** API endpoints and `mix bm.pause`, `mix bm.resume`,
+`mix bm.undo`, with the run page's rules.
+
+**28.4 A stopped attempt's wait is reported (found in 28.1).** When BM stops an attempt itself (a
+limit, repeated calls) after it changed files, the lane is held for the user's Keep or Revert; the
+run page showed it, but the API's `waiting_for_you` looked only for held or reconciling attempts,
+so `mix bm.goal` said nothing and the run sat. The API now takes the wait from the coordinator's
+lane and adds `decision` (task, attempt status, reason); `Bm.CLI.follow/2` asks for that decision.
+Committed in the real repository (and brought into the clone before 28.2).
+
+**Status 28.1 (2026-09-30).** Run 136, $0.314. The first attempt put `String.trim/1` in a guard (does
+not compile) and then repeated the same failing edit until the repeat guard cancelled it; the run
+then waited silently (28.4). Reverted through `POST /api/runs/136/revert`; the planner re-planned
+and the second attempt was accepted, review approved. Checked by hand on the clone's own server
+(port 4012): `?status=done` lists only done runs, `paused` none, `bogus` gives 422 "Unknown status.
+Allowed: active, paused, done, failed, cancelled."; `mix bm.runs --status …` shows the same.
+
+**Status 28.2 (2026-09-30).** Run 137, $0.174, one task, review approved. Checked with a staged
+run on a scratch server (real repository's code, fake pi): while the worker's select question
+waited, the clone's `mix bm.status` printed "Which mode? A, B" and the hint; after the attempt
+was stopped with a file written, it printed "ask waits for Keep or Revert", and the API reported
+`waiting_for_you: true` with the decision (28.4), which `mix bm.attach --watch` announced.
+
+**Status 28.3 (2026-09-30).** Run 139, $0.563, two tasks. The reviewer rejected the first API
+attempt with a real bug: pause and resume succeed with `{:ok, run}` but the shared helper expected
+`:ok`, so a successful pause would have answered 404; BM reverted it, the re-planned task and then
+the three mix tasks were accepted. Checked on the clone's server with a staged goal run: `mix
+bm.pause` while task 1 ran → paused; again → "only an active goal run can be paused"; `mix bm.undo`
+with an unknown key → "No such task in this run."; on t1 → a.txt gone; `mix bm.resume` → resumed,
+t1 cancelled, t2 blocked. Missed by the reviewer: `mix bm.undo`'s moduledoc cites plan 15.1 / D26
+(committing) instead of 13.3 / 23.1 / D28, and leaves out active single-task runs.
+
+**Status: Phase 28 done (2026-09-30).** Three goals, all accepted, $1.05. The clone
+`/tmp/bm-trial-28` holds them as commits on top of the real repository's phase-28 branch; they
+reach the real repository only if the user asks.

@@ -214,19 +214,17 @@ defmodule Bm.CLI do
   end
 
   # Changes BM could not accept wait for Keep or Revert (plan 16.2), each once.
-  defp decision(st, %{"waiting_for_you" => true, "approvals" => []} = run) do
-    held =
-      Enum.find(
-        run["tasks"] || [],
-        &(get_in(&1, ["attempt", "status"]) in ["held", "needs_reconciliation"])
-      )
+  # The attempt holding the lane, as the server's coordinator reports it (plan 28.4): also one
+  # BM stopped after it changed files.
+  defp decision(st, %{"decision" => %{} = decision} = run) do
+    task = Enum.find(run["tasks"] || [], &(&1["key"] == decision["task"])) || %{}
+    key = "#{decision["task"]}/#{task["revision"]}/#{decision["attempt_status"]}"
 
-    key = held && "#{held["key"]}/#{held["revision"]}/#{held["attempt"]["status"]}"
-
-    if key == nil or MapSet.member?(st.asked, key) do
+    if MapSet.member?(st.asked, key) do
       st
     else
       info(@bell <> "#{run["label"]} waits for your decision (Keep or Revert) at #{run["url"]}")
+      if decision["reason"], do: info("  #{decision["task"]}: #{decision["reason"]}")
 
       if st.ask? do
         case lower(answer("  Keep or revert the changes (Enter leaves it for the page) [k/r]: ")) do

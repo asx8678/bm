@@ -139,3 +139,19 @@ Throwaway clones of the sandbox (`/tmp/bm-sandbox-26a` … `26d`), real planner,
 
 Found and fixed: Pause was offered only while no attempt ran (plan 26.4).
 
+## BM on its own code (plan 28, 2026-09-30)
+
+Clone `/tmp/bm-trial-28` of this repository; verify `mix compile --warnings-as-errors && mix format
+--check-formatted`; goals ask for no tests (the user's instruction).
+
+| Run | Goal | Outcome | Cost |
+|---|---|---|---|
+| 136 | Status filter for the run list (API and `mix bm.runs`) | 1st attempt: guard with a remote call, then the same failing edit until the repeat guard stopped it; reverted via the API, re-planned, accepted | $0.314 |
+| 137 | `mix bm.status` shows what a run waits for | accepted, review approved | $0.174 |
+| 139 | Pause, Resume and Undo from the terminal (API and three mix tasks) | reviewer rejected the first API attempt (successful pause/resume answered 404); re-planned, accepted | $0.563 |
+
+- **F7 (fixed, 28.4):** an attempt BM stops after changing files holds the lane, but the API did
+  not report it as waiting, so the terminal stayed silent.
+- The reviewer caught a real bug in run 139; it missed a wrong reference in a moduledoc.
+- Every change was run from the clone: its own server on port 4012 and its own mix tasks.
+
