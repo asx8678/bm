@@ -1038,3 +1038,12 @@ showed "committed as c06358e7 on your branch".
 **15.2 One run of the existing test suite** (the user approved the phase that listed it).
 
 **15.3 A trial on a project of the user's** — waits for the repository and its verify command.
+
+**Status 15.2 (2026-09-30).** `mix test`: 199 passed, 6 excluded; `mix test --only live`: 5 passed
+(qualification with the current planner/reader/writer profiles, milestone B gate). Nothing broke
+in phases 12–15; no fixes were needed. Still: the planner, scheduler, reviewer, ask_planner,
+freshness, protection and commit paths have no tests of their own (user's instruction); they were
+checked by scratch scripts and live runs only.
+
+**Status: Phase 15 done except 15.3** (a trial on a project of the user's, waiting for the
+repository and its verify command).
