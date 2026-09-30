@@ -1755,7 +1755,12 @@ defmodule Bm.Workspace.Coordinator do
       {:changed, paths, changes} ->
         state = add_review_spend(state, review_cost(result))
         list = Enum.join(paths, ", ")
-        review = %{"verdict" => "invalid", "reason" => "files changed during the review: #{list}"}
+
+        review = %{
+          "verdict" => "invalid",
+          "reason" => "files changed during the review: #{list}",
+          "commands" => review_commands(result)
+        }
 
         finish(
           state,
@@ -1775,6 +1780,10 @@ defmodule Bm.Workspace.Coordinator do
 
   defp review_cost({:ok, %{cost: cost}}), do: cost
   defp review_cost(_result), do: 0.0
+
+  # The reviewer's bash commands and the policy's answers (plan 19.1).
+  defp review_commands({:ok, %{commands: commands}}), do: commands
+  defp review_commands(_result), do: []
 
   # Compares the workspace with the tree the reviewer was shown. Like the verify command's
   # changes (reattribute_after_verify), whatever changed becomes part of the attempt, so Keep
@@ -1813,7 +1822,14 @@ defmodule Bm.Workspace.Coordinator do
     case result do
       {:ok, %{verdict: verdict, reason: reason, cost: cost}} ->
         state = add_review_spend(state, cost)
-        review = %{"verdict" => Atom.to_string(verdict), "reason" => reason, "cost" => cost}
+
+        review = %{
+          "verdict" => Atom.to_string(verdict),
+          "reason" => reason,
+          "cost" => cost,
+          "commands" => review_commands(result)
+        }
+
         verify = Map.put(verify, "review", review)
 
         cond do

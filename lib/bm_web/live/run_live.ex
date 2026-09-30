@@ -1220,6 +1220,24 @@ defmodule BmWeb.RunLive do
             <p class="mt-1 rounded-md bg-bm-bg px-3 py-2 text-xs leading-relaxed">
               {@attempt.verify["review"]["reason"]}
             </p>
+            <%!-- What the reviewer ran to probe the change, and the policy's answers (plan 19.1) --%>
+            <ul
+              :if={(@attempt.verify["review"]["commands"] || []) != []}
+              id={"review-commands-#{@attempt.id}"}
+              class="mt-1 max-h-60 space-y-1 overflow-y-auto rounded-md bg-bm-bg px-3 py-2 font-mono text-[11px] leading-relaxed"
+            >
+              <li :for={command <- @attempt.verify["review"]["commands"]} class="flex gap-2">
+                <span class={tool_tone(if(command["allowed"], do: "ok", else: "error"))}>
+                  {tool_mark(if(command["allowed"], do: "ok", else: "error"))}
+                </span>
+                <div class="min-w-0">
+                  <pre class="whitespace-pre-wrap break-all font-mono">{command["command"]}</pre>
+                  <p :if={command["reason"]} class="font-sans text-bm-error">
+                    refused: {command["reason"]}
+                  </p>
+                </div>
+              </li>
+            </ul>
           </div>
           <div :if={is_map(@attempt.verify["check"])} class="mt-2">
             <p class="text-[11px] text-bm-muted">
