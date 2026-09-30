@@ -133,8 +133,8 @@ Each has a precondition; don't start one before it holds.
 
 | Feature | Size |
 |---|---|
-| **Freshness check** on edit/write (hash of files the worker read) | M |
-| **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** is done (plan 11.4); per-task rollback inside a run is not | M |
+| **Freshness check** on edit/write (hash of files the worker read) — **done** for whole-file writes against the attempt's start (plan 13.2); files edited during a run are protected (13.1) | M |
+| **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** (plan 11.4) and **one task of a finished run** with dependency checks (plan 13.3) are done; undo inside an active run is not | M |
 | **Full recovery**: resume attempts that provably changed nothing | M |
 | **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); provider/approval timeouts and in-flight estimates not | S–M |
 | **Approval inbox** in the browser for non-`bm:` dialogs | M |

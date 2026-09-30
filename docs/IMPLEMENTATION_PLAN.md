@@ -967,3 +967,11 @@ per attempt `touched` (paths allowed for edit/write) and `bash_ran?`. Checked (f
 edited while the worker was busy → its `write` refused ("README.md changed since your task
 started, and not by you…"), the concurrent edit intact; a worker writing its own a.txt twice →
 allowed, accepted.
+
+**Status 13.3 (2026-09-30); Phase 13 done.** `Coordinator.revert_task/2` (finished runs only: in
+an active run, BM's own undo would look like an outside change to 13.1 at the next admission).
+Attempt cards of finished, not-reverted runs have "Undo this task" (with a confirmation).
+Checked in the browser on the trial clone, run 62: undoing `shared_money_helper` was refused
+("use_money_everywhere depends on this task. Undo it first."); undoing `use_money_everywhere`
+restored its two files; then undoing `shared_money_helper` restored `lib/bm.ex` and deleted the
+test file it added; the clone was back to the user's README edit only.

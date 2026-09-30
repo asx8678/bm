@@ -120,6 +120,14 @@ defmodule Bm.Workspace.Coordinator do
   """
   def revert_run(path, run_id), do: call(path, {:revert_run, run_id})
 
+  @doc """
+  Undoes one task of a finished run (plan 13.3): a conditional restore of its accepted attempt's
+  write set to `tree_before`. Refused if a later change touched those files
+  (`{:changed_since, paths}`, nothing touched), if an accepted task depends on it
+  (`{:dependents, keys}`), while the workspace has an unfinished run, or for an unfinished run.
+  """
+  def revert_task(path, task_id), do: call(path, {:revert_task, task_id})
+
   @doc "Lane, phase, run and current attempt."
   def state(path), do: call(path, :state)
 
@@ -383,6 +391,26 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_call({:resume_planning, _run_id, _opts}, _from, state),
     do: {:reply, {:error, :not_resumable}, state}
+
+  def handle_call({:revert_task, _task_id}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:revert_task, _task_id}, _from, %{phase: phase} = state) when phase != nil,
+    do: {:reply, {:error, :attempt_running}, state}
+
+  def handle_call({:revert_task, task_id}, _from, state) do
+    task = Runs.get_task!(task_id)
+    run = Runs.get_run!(task.run_id)
+
+    reply =
+      cond do
+        run.workspace_id != state.workspace.id -> {:error, :run_not_in_workspace}
+        run.status in [:active, :paused] -> {:error, :run_not_finished}
+        true -> do_revert_task(state, run, task)
+      end
+
+    {:reply, reply, state}
+  end
 
   def handle_call({:revert_run, _run_id}, _from, %{run: %{}} = state),
     do: {:reply, {:error, :workspace_busy}, state}
@@ -682,6 +710,55 @@ defmodule Bm.Workspace.Coordinator do
           {:ok, run} = Runs.update_run(run, %{reverted_at: DateTime.utc_now()})
           broadcast_run(state, run)
           {:ok, run}
+        end
+    end
+  end
+
+  ## Undoing one task (13.3)
+
+  defp do_revert_task(state, run, task) do
+    attempt =
+      task
+      |> Runs.latest_attempt()
+      |> case do
+        %{status: :accepted, actual_writes: [_ | _]} = a ->
+          a
+
+        %{status: status, actual_writes: [_ | _], flags: flags} = a when status != :reverted ->
+          if "kept" in flags, do: a
+
+        _ ->
+          nil
+      end
+
+    dependents =
+      for t <- Runs.latest_tasks(run), task.key in t.depends_on, t.status == :accepted, do: t.key
+
+    cond do
+      attempt == nil ->
+        {:error, :nothing_to_revert}
+
+      dependents != [] ->
+        {:error, {:dependents, dependents}}
+
+      true ->
+        with :ok <-
+               Git.restore(
+                 state.root,
+                 attempt.actual_writes,
+                 attempt.tree_before,
+                 attempt.tree_after
+               ),
+             {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted) do
+          {:ok, task} = Runs.update_task_status(task, :cancelled)
+
+          Phoenix.PubSub.broadcast(
+            Bm.PubSub,
+            topic(state.root),
+            {:workspace, state.root, {:attempt, attempt, state.lane}}
+          )
+
+          {:ok, task}
         end
     end
   end

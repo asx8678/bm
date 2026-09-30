@@ -324,6 +324,34 @@ defmodule BmWeb.RunLive do
   # The canvas reports drags; positions are not stored.
   def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
 
+  def handle_event("revert_task", %{"task" => task_id}, socket) do
+    case Coordinator.revert_task(socket.assigns.root, String.to_integer(task_id)) do
+      {:ok, task} ->
+        {:noreply,
+         put_flash(socket, :info, "Undone: the files of task #{task.key} are back as before it.")}
+
+      {:error, {:changed_since, paths}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Not undone: #{Enum.join(paths, ", ")} changed since the task. Nothing was touched."
+         )}
+
+      {:error, {:dependents, keys}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Not undone: #{Enum.join(keys, ", ")} #{if length(keys) == 1, do: "depends", else: "depend"} " <>
+             "on this task. Undo #{if length(keys) == 1, do: "it", else: "them"} first."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not undone: #{explain_action(reason)}")}
+    end
+  end
+
   def handle_event("revert_run", _params, socket) do
     case Coordinator.revert_run(socket.assigns.root, socket.assigns.run.id) do
       {:ok, run} ->
@@ -526,7 +554,10 @@ defmodule BmWeb.RunLive do
             No attempts yet.
           </li>
           <li :for={{dom_id, item} <- @streams.attempts} id={dom_id}>
-            <.attempt_card item={item} />
+            <.attempt_card
+              item={item}
+              undo?={@run.status in [:done, :failed, :cancelled] and @run.reverted_at == nil}
+            />
           </li>
         </ol>
       </div>
@@ -941,6 +972,7 @@ defmodule BmWeb.RunLive do
   end
 
   attr :item, :map, required: true
+  attr :undo?, :boolean, default: false
 
   defp attempt_card(%{item: %{attempt: attempt, task: task}} = assigns) do
     assigns = assign(assigns, attempt: attempt, task: task, result: attempt.result || %{})
@@ -1061,6 +1093,22 @@ defmodule BmWeb.RunLive do
             >{@attempt.verify["check"]["output"]}</pre>
           </div>
         </details>
+
+        <div
+          :if={@undo? and @attempt.status == :accepted and @attempt.actual_writes != []}
+          class="flex justify-end"
+        >
+          <button
+            id={"undo-task-#{@task.id}"}
+            type="button"
+            phx-click="revert_task"
+            phx-value-task={@task.id}
+            data-confirm={"Put back the files task #{@task.key} changed, as they were before it?"}
+            class="rounded-md border border-bm-line px-2.5 py-1 text-[11px] font-medium text-bm-muted transition-colors hover:bg-bm-raised hover:text-bm-text"
+          >
+            Undo this task
+          </button>
+        </div>
 
         <div :if={@item.diffs != []} id={"diff-#{@attempt.id}"} class="space-y-1.5">
           <p class="text-xs font-medium">
