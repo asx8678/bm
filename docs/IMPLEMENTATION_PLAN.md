@@ -1366,6 +1366,32 @@ applies to both: the planner turn is stopped and the run paused with the reason;
 counts as not run (the existing "not reviewed" path). Cost estimates for requests in flight are
 left out: the stream's partial usage could not be shown to carry a cost.
 
+**Status 23.1 (2026-09-30).** `Coordinator.revert_task/2` also works in an unfinished run
+(`revert_task_in_run`): refused while an attempt runs, while the lane is held, and for an active
+goal run (`:run_not_paused`). New `Coordinator.pause_by_user/2` and a Pause button for an active
+goal run: the planner is stopped (and no longer watched), the run paused "paused by the user"; a
+running attempt finishes first. After an undo, `remember_workspace/2` stores the workspace tree in
+`run.baseline["known_tree"]` with the newest attempt that ran, and `last_known_tree/1` uses it
+while no attempt ran since (first version used the newest attempt of all, which at admission is
+the one being admitted: task 3's write was refused as the user's; fixed). `Runs.drop_delivery/1`
+makes the planner hear of the undo; the undone attempt gets flag `undone` and "undone by the
+user; its changes are reverted"; the planner's delivery adds "Propose it again only if the goal
+still needs it"; a run that ends without the task names it "undone by the user". Checked with the
+fake pi: single-task run t1, t2, undo t1 (a.txt gone), t3 writes a.txt → accepted, nothing
+protected; goal run: undo refused while t2 ran, Pause while t2 ran → planner stopped, t2 accepted
+after, run "paused by the user"; undo t1 → a.txt gone, b.txt kept; Resume → the planner's results
+say "t1: cancelled … undone by the user … Propose it again only if the goal still needs it".
+
+**Status 23.2 (2026-09-30).** Planner: `stall_timeout` (3 minutes) checked on its tick, from the
+time of its model's last pi event, not while one of its commands runs; a silent planning turn
+pauses the run ("the planner's model sent nothing for 3 minutes"), a silent answer turn leaves the
+worker's question unanswered. Reviewer: no pi event for 3 minutes while no command runs ends the
+review as `:model_silent` (not reviewed); `config :bm, review_silence_ms:` sets it. Checked with
+the fake pi at 2 s: a hanging planner turn → run paused after 2.3 s with the reason; a hanging
+reviewer → the change accepted with `not_reviewed`, reason `:model_silent`.
+
+**Status: Phase 23 done (2026-09-30).**
+
 ## Phase 24: control from anywhere
 
 **24.1 Approval inbox.** pi dialogs that are not BM's own (`select`, `confirm`, `input`,

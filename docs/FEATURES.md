@@ -134,9 +134,9 @@ Each has a precondition; don't start one before it holds.
 | Feature | Size |
 |---|---|
 | **Freshness check** on edit/write (hash of files the worker read) — **done** for whole-file writes against the attempt's start (plan 13.2); files edited during a run are protected (13.1) | M |
-| **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** (plan 11.4) and **one task of a finished run** with dependency checks (plan 13.3) are done; undo inside an active run is not | M |
+| **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** (plan 11.4) and **one task of a finished run** with dependency checks (plan 13.3) are done; undo **during a run** (paused goal run, active single-task run; plan 23.1, D28) is done | M |
 | **Full recovery**: resume attempts that provably changed nothing — **done for goal runs** after a restart (plan 21, D27): the task is queued again and planning resumes by itself; attempts that changed files still wait for the user | M |
-| **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); provider/approval timeouts and in-flight estimates not | S–M |
+| **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); a silent model stops planner and review turns too (plan 23.2); approval timeout with the inbox (plan 24.1); in-flight estimates not | S–M |
 | **Approval inbox** in the browser for non-`bm:` dialogs | M |
 | **Reviewer role** (read-only; silent / message / stop) — **done** as a review before accepting each goal-run task (plan 14.1, D25) | M |
 | **`ask_planner`** tool for workers — **done** (plan 12.2, D24); seen with the fake pi, no real worker has asked yet | S |
