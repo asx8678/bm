@@ -118,7 +118,7 @@ defmodule Bm.Review do
   end
 
   defp record(commands, "bash", %{"command" => command}, decision) when is_binary(command) do
-    entry = %{"command" => String.slice(command, 0, 500), "allowed" => decision == :allow}
+    entry = %{"command" => String.slice(command, 0, 2_000), "allowed" => decision == :allow}
 
     case decision do
       {:deny, reason} -> [Map.put(entry, "reason", reason) | commands]

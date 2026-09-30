@@ -1167,7 +1167,7 @@ catches boundary bugs, and fix what turns up. No tests (user's instruction).
 policy's answer (allowed, or refused with the reason) with the review; the run page lists them
 under the review's reason. Until now only the reviewer's own summary said whether it probed.
 
-**Status 19.1 (2026-09-30).** `Bm.Review` returns the reviewer's bash commands (at most 40, 500
+**Status 19.1 (2026-09-30).** `Bm.Review` returns the reviewer's bash commands (at most 40, 2,000
 characters each) with the policy's answer; the coordinator stores them as `review.commands`, also
 when files changed during the review; the run page lists them under the reason (✓ ran, ✕ refused
 with the reason). Checked with the fake pi (run 87): a heredoc probe and a `python3 -c` import
