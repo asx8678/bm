@@ -98,6 +98,15 @@ defmodule Bm.Workspace.Coordinator do
   def resume_planning(path, run_id, planner_opts \\ []),
     do: call(path, {:resume_planning, run_id, planner_opts})
 
+  @doc """
+  Reverts every change a finished run left in the workspace (plan 11.4): one all-or-nothing
+  conditional restore over the union of the write sets of its attempts whose changes stayed
+  (accepted, or kept by the user), from the earliest one's `tree_before` to the latest one's
+  `tree_after`. `{:error, {:changed_since, paths}}` changes nothing. Refused while the workspace
+  has an unfinished run, and for a run already reverted.
+  """
+  def revert_run(path, run_id), do: call(path, {:revert_run, run_id})
+
   @doc "Lane, phase, run and current attempt."
   def state(path), do: call(path, :state)
 
@@ -354,6 +363,28 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:resume_planning, _run_id, _opts}, _from, state),
     do: {:reply, {:error, :not_resumable}, state}
 
+  def handle_call({:revert_run, _run_id}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:revert_run, _run_id}, _from, %{phase: phase} = state) when phase != nil,
+    do: {:reply, {:error, :attempt_running}, state}
+
+  def handle_call({:revert_run, run_id}, _from, state) do
+    case Runs.get_run!(run_id) do
+      %{workspace_id: workspace_id} when workspace_id != state.workspace.id ->
+        {:reply, {:error, :run_not_in_workspace}, state}
+
+      %{reverted_at: %DateTime{}} ->
+        {:reply, {:error, :already_reverted}, state}
+
+      %{status: status} when status in [:active, :paused] ->
+        {:reply, {:error, :run_not_finished}, state}
+
+      run ->
+        {:reply, do_revert_run(state, run), state}
+    end
+  end
+
   def handle_call({:run_task, attrs}, _from, state) do
     case Bm.Repo.transaction(fn -> admit_records(state, attrs) end) do
       {:ok, records} ->
@@ -545,6 +576,45 @@ defmodule Bm.Workspace.Coordinator do
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+  end
+
+  ## Reverting a whole run (11.4)
+
+  defp do_revert_run(state, run) do
+    # Attempts in order; their changes stayed if accepted, or kept by the user.
+    stayed =
+      run
+      |> Runs.list_run_attempts()
+      |> Enum.sort_by(& &1.id)
+      |> Enum.filter(fn attempt ->
+        attempt.actual_writes != [] and is_binary(attempt.tree_before) and
+          is_binary(attempt.tree_after) and
+          (attempt.status == :accepted or
+             (attempt.status != :reverted and "kept" in attempt.flags))
+      end)
+
+    case stayed do
+      [] ->
+        {:error, :nothing_to_revert}
+
+      [first | _] ->
+        last = List.last(stayed)
+        entries = Enum.flat_map(stayed, & &1.actual_writes)
+
+        with :ok <- Git.restore(state.root, entries, first.tree_before, last.tree_after) do
+          for attempt <- stayed do
+            case Runs.transition_attempt(attempt, :reverted) do
+              {:ok, _} -> :ok
+              # A kept failed/cancelled attempt that can't move: the files are back anyway.
+              {:error, _} -> Runs.add_attempt_flag(attempt, "run_reverted")
+            end
+          end
+
+          {:ok, run} = Runs.update_run(run, %{reverted_at: DateTime.utc_now()})
+          broadcast_run(state, run)
+          {:ok, run}
+        end
+    end
   end
 
   ## Pruning checkpoints

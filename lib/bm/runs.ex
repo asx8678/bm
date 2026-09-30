@@ -155,10 +155,12 @@ defmodule Bm.Runs do
     |> Repo.update()
   end
 
-  @doc "Sets fields BM manages on a run: `plan_open`, `planner`, `status_reason`."
+  @doc "Sets fields BM manages on a run: `plan_open`, `planner`, `status_reason`, `reverted_at`."
   def update_run(%Run{} = run, attrs) do
     run
-    |> Ecto.Changeset.change(Map.take(Map.new(attrs), [:plan_open, :planner, :status_reason]))
+    |> Ecto.Changeset.change(
+      Map.take(Map.new(attrs), [:plan_open, :planner, :status_reason, :reverted_at])
+    )
     |> Repo.update()
   end
 

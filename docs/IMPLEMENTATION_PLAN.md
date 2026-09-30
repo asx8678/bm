@@ -849,3 +849,15 @@ user's dirty README never touched. One real problem found and fixed: a goal BM h
 "done"; a task-less plan after rejected proposals now ends failed with the planner's summary
 (checked live, run 57). Noted: planner checks ran the clone's own tests, which share the test
 database with this checkout.
+
+**Status 11.4 (2026-09-30).** `Coordinator.revert_run/2`: one `Git.restore` over the union of
+the write sets of the run's attempts whose changes stayed (accepted, or kept by the user), from
+the earliest one's `tree_before` to the latest one's `tree_after`; refused while the workspace has
+an unfinished run or an attempt runs, for unfinished or already reverted runs, and with
+`changed_since` (nothing touched) when a file changed after the run. Those attempts become
+`reverted`, the run records `reverted_at`, checkpoints stay. Run page: "Revert this run" (with a
+confirmation) on finished runs; the finished note says when it was reverted. Checked on the trial
+clone through the UI: reverting run 55 put its 4 files back (run 54's file and the user's README
+untouched); run 54 with a hand edit in its file was refused ("lib/mix/tasks/bm.runs.ex changed
+since the run. Nothing was touched.") and the edit survived; after undoing the edit, reverting run
+54 deleted the file it had added; the clone was back to the user's README change only.
