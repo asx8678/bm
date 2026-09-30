@@ -76,6 +76,11 @@ defmodule Bm.Pi.Profile do
     # internal variable is only an additional guard.
     env = if spec.fabric?, do: %{"PI_FABRIC_DEPTH" => "99"}, else: %{}
 
+    # Read-only sessions probe code with one-off `python3 -c`; without this Python writes
+    # __pycache__/ into repositories that don't ignore it, which counts as a change (plan 19.2).
+    env =
+      if "edit" in spec.tools, do: env, else: Map.put(env, "PYTHONDONTWRITEBYTECODE", "1")
+
     %{role: role, command: command, env: env, spec: spec}
   end
 

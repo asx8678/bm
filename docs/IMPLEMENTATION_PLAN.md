@@ -1167,10 +1167,25 @@ catches boundary bugs, and fix what turns up. No tests (user's instruction).
 policy's answer (allowed, or refused with the reason) with the review; the run page lists them
 under the review's reason. Until now only the reviewer's own summary said whether it probed.
 
+**Status 19.1 (2026-09-30).** `Bm.Review` returns the reviewer's bash commands (at most 40, 500
+characters each) with the policy's answer; the coordinator stores them as `review.commands`, also
+when files changed during the review; the run page lists them under the reason (✓ ran, ✕ refused
+with the reason). Checked with the fake pi (run 87): a heredoc probe and a `python3 -c` import
+listed as run, a `touch` after the verdict listed as refused with the policy's reason.
+
 **19.2 Close 18.4's known limits.** A heredoc body (`node <<'EOF' … EOF`) is the command's input,
 not shell, unless a shell reads it (`bash <<EOF` is checked as a command). Read-only sessions
 (planner, reader, reviewer) run with `PYTHONDONTWRITEBYTECODE=1`, so a `python3 -c` probe
 doesn't write `__pycache__/`.
+
+**Status 19.2 (2026-09-30).** `Bm.Policy`: a heredoc body is blanked before the checks unless the
+line holding `<<` runs a shell (then the body is checked as a command); one heredoc per line.
+Compared with the policy before on 46 commands in both modes: only six read-only heredoc probes
+changed (refused → allowed); `bash <<EOF` with `git push`, `sh <<X` with `rm -rf` outside, `cat
+<<EOF | sh` with `npm install`, `git commit -F - <<EOF` and a command after a heredoc are still
+refused. `Bm.Pi.Profile` gives roles without `edit` (planner, reader) `PYTHONDONTWRITEBYTECODE=1`.
+Checked with the fake pi: the reviewer's `python3 -c "import mod"` left no `__pycache__/` (the
+same import without it writes one) and the change was approved.
 
 **19.3 Goals on the sandbox.** Two or three goals with contracts that have edge cases, started
 with `mix bm.goal`, each change checked by hand (code read, own probes of the boundaries) and

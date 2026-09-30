@@ -24,7 +24,8 @@ defmodule Bm.Policy do
   **This is a safety net, not a sandbox.** Shell parsing here is approximate: variables, `eval`,
   scripts and interpreters can do anything a permitted command can. Quoted text is an argument
   (`node -e 'x => x > 0'` writes nothing), except a `sh -c` or `eval` string, which is checked
-  as a command, and double quotes holding `$(` or a backtick. Snapshots attribute every
+  as a command, and double quotes holding `$(` or a backtick. A heredoc body is the command's
+  input, unless a shell reads it (`bash <<EOF`, `cat <<EOF | sh`): then it is checked too. Snapshots attribute every
   change afterwards (decision D11), whatever made it.
   """
 
@@ -90,13 +91,17 @@ defmodule Bm.Policy do
   end
 
   def authorize("bash", %{"command" => command}, ctx) when is_binary(command) do
+    {command, shell_inputs} = heredocs(command)
+
     checks =
       Enum.map(redirect_targets(command), &{:write_target, &1}) ++
-        Enum.map(segments(command), &{:segment, &1})
+        Enum.map(segments(command), &{:segment, &1}) ++
+        Enum.map(shell_inputs, &{:shell_input, &1})
 
     Enum.find_value(checks, :allow, fn
       {:write_target, target} -> denied(check_write_target(target, ctx))
       {:segment, tokens} -> denied(check_segment(tokens, ctx))
+      {:shell_input, script} -> denied(authorize("bash", %{"command" => script}, ctx))
     end)
   end
 
@@ -182,6 +187,81 @@ defmodule Bm.Policy do
     |> Enum.reject(&(&1 == []))
   end
 
+  @shells ~w(sh bash zsh dash ksh)
+
+  # Heredoc bodies (`node <<'EOF'` … `EOF`) are the command's input, not shell (plan 19.2): they
+  # are blanked. A body on a line that runs a shell (`bash <<EOF`, `cat <<EOF | sh`) is also
+  # returned, to be checked as a command. Returns `{command with bodies blanked, shell inputs}`.
+  defp heredocs(command), do: heredocs(command, "", [])
+
+  defp heredocs(rest, done, inputs) do
+    masked = mask_quotes(rest)
+
+    with {at, delimiter, tabs?} <- next_heredoc(rest, masked),
+         {newline, 1} <- :binary.match(masked, "\n", scope: {at, byte_size(masked) - at}) do
+      body_from = newline + 1
+      after_operator = binary_part(rest, body_from, byte_size(rest) - body_from)
+      {body, after_body} = take_body(after_operator, delimiter, tabs?)
+      inputs = if shell_line?(operator_line(rest, masked, at)), do: [body | inputs], else: inputs
+      heredocs(after_body, done <> binary_part(rest, 0, body_from) <> blank(body), inputs)
+    else
+      _ -> {done <> rest, Enum.reverse(inputs)}
+    end
+  end
+
+  # The first `<<WORD`, `<<-WORD`, `<<'WORD'` or `<<"WORD"` outside quotes (not `<<<`).
+  defp next_heredoc(rest, masked) do
+    ~r/(?<!<)<<(?!<)/
+    |> Regex.scan(masked, return: :index)
+    |> Enum.find_value(fn [{at, _}] ->
+      case Regex.run(
+             ~r/\A<<(-?)\s*(['"]?)([A-Za-z_][\w.-]*)\2/,
+             binary_part(rest, at, byte_size(rest) - at)
+           ) do
+        [_, dash, _quote, delimiter] -> {at, delimiter, dash == "-"}
+        nil -> nil
+      end
+    end)
+  end
+
+  # The body ends before the line holding only the delimiter (after tabs for `<<-`), or at the
+  # end of the command.
+  defp take_body(text, delimiter, tabs?) do
+    tabs = if tabs?, do: "\t*", else: ""
+
+    case Regex.run(~r/^#{tabs}#{Regex.escape(delimiter)}$/m, text, return: :index) do
+      [{at, _}] -> {binary_part(text, 0, at), binary_part(text, at, byte_size(text) - at)}
+      nil -> {text, ""}
+    end
+  end
+
+  defp operator_line(rest, masked, at) do
+    from =
+      case :binary.matches(binary_part(masked, 0, at), "\n") do
+        [] -> 0
+        matches -> matches |> List.last() |> elem(0) |> Kernel.+(1)
+      end
+
+    to =
+      case :binary.match(masked, "\n", scope: {at, byte_size(masked) - at}) do
+        {newline, _} -> newline
+        :nomatch -> byte_size(rest)
+      end
+
+    binary_part(rest, from, to - from)
+  end
+
+  defp shell_line?(line) do
+    Enum.any?(segments(line), fn tokens ->
+      case Enum.drop_while(tokens, &prefix_word?/1) do
+        [cmd | _] -> Path.basename(cmd) in @shells
+        [] -> false
+      end
+    end)
+  end
+
+  defp blank(text), do: for(<<byte <- text>>, into: "", do: if(byte == ?\n, do: "\n", else: " "))
+
   # Text in quotes is one word to the shell, not redirections or command separators, so
   # `node -e 'xs.map(x => x > 0)'` is one command (the reviewer's probes, plan 18, were refused
   # as writes to `x`). Quoted text is blanked byte for byte, so positions found in the mask cut
@@ -218,7 +298,7 @@ defmodule Bm.Policy do
 
   # `sh -c "…"` and `eval "…"`: the string is a command of its own (quoted text is otherwise not
   # looked into, see mask_quotes/1).
-  defp check_command(shell, args, ctx) when shell in ~w(sh bash zsh dash ksh) do
+  defp check_command(shell, args, ctx) when shell in @shells do
     case Enum.drop_while(args, &(not (&1 =~ ~r/^-[a-zA-Z]*c[a-zA-Z]*$/))) do
       [_flag, inner | _] -> authorize("bash", %{"command" => inner}, ctx)
       _ -> :allow
