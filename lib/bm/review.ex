@@ -12,6 +12,9 @@ defmodule Bm.Review do
   alias Bm.Pi.Profile
 
   @timeout 300_000
+  # No pi event for this long while no command runs: the model is silent (plan 23.2).
+  # `config :bm, review_silence_ms:` changes it (scratch checks use a few seconds).
+  @silence 180_000
   @max_commands 40
 
   @doc """
@@ -69,9 +72,11 @@ defmodule Bm.Review do
 
   # Answers the session's requests until it is idle again; returns its submitted verdict and the
   # bash commands it asked for (newest first).
-  defp serve(id, root, user_owned, deadline, running?, verdict, commands) do
+  defp serve(id, root, user_owned, deadline, running?, verdict, commands, tool? \\ false) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-    loop = &serve(id, root, user_owned, deadline, &1, &2, &3)
+    silence = Application.get_env(:bm, :review_silence_ms, @silence)
+    wait = if tool?, do: remaining, else: min(remaining, silence)
+    loop = &serve(id, root, user_owned, deadline, &1, &2, &3, tool?)
 
     receive do
       {:pi_request, ^id, %{op: "authorize", payload: payload} = request} ->
@@ -101,8 +106,9 @@ defmodule Bm.Review do
         Bm.Pi.respond(id, request.dialog_id, %{"ok" => false, "error" => "not_allowed"})
         loop.(running?, verdict, commands)
 
-      {:pi, ^id, :status, %{status: :running}} ->
-        loop.(true, verdict, commands)
+      {:pi, ^id, :status, %{status: :running} = summary} ->
+        tool? = Map.get(summary, :tool) != nil
+        serve(id, root, user_owned, deadline, true, verdict, commands, tool?)
 
       {:pi, ^id, :status, %{status: :idle}} when running? ->
         {{:ok, verdict}, commands}
@@ -110,10 +116,13 @@ defmodule Bm.Review do
       {:pi, ^id, _event, %{status: :exited}} ->
         {if(verdict, do: {:ok, verdict}, else: {:error, :reviewer_exited}), commands}
 
-      {:pi, ^id, _event, _summary} ->
-        loop.(running?, verdict, commands)
+      {:pi, ^id, _event, summary} ->
+        tool? = is_map(summary) and Map.get(summary, :tool) != nil
+        serve(id, root, user_owned, deadline, running?, verdict, commands, tool?)
     after
-      remaining -> {if(verdict, do: {:ok, verdict}, else: {:error, :timeout}), commands}
+      wait ->
+        error = if wait < remaining, do: :model_silent, else: :timeout
+        {if(verdict, do: {:ok, verdict}, else: {:error, error}), commands}
     end
   end
 

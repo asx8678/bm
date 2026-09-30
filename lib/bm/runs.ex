@@ -268,6 +268,12 @@ defmodule Bm.Runs do
     )
   end
 
+  @doc "Forgets that `task` was reported to the planner, so it is reported again (plan 23.1)."
+  def drop_delivery(%Task{id: task_id}) do
+    Repo.delete_all(from d in Delivery, where: d.task_id == ^task_id)
+    :ok
+  end
+
   def delivered_task_ids(%Run{id: run_id}) do
     Repo.all(from d in Delivery, where: d.run_id == ^run_id, select: d.task_id)
   end

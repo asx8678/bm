@@ -45,6 +45,8 @@ defmodule Bm.Workspace.Planner do
     max_waves: 5,
     plan_timeout: 5 * 60_000,
     turn_timeout: 15 * 60_000,
+    # A turn whose model sends nothing this long is stopped (plan 23.2), like a worker's stall.
+    stall_timeout: 3 * 60_000,
     # While idle, the planner re-checks the run this often: events can be missed (a restarted
     # coordinator, a recovery), and the lane state is the coordinator's.
     tick: 5_000
@@ -223,7 +225,12 @@ defmodule Bm.Workspace.Planner do
   ## pi events and requests
 
   def handle_info({:pi, id, event, summary}, %{agent_id: id} = state) do
-    state = track_spend(state, summary)
+    # Map.put: planners started by older code (the dev server's code reloader) lack the key.
+    state =
+      state
+      |> track_spend(summary)
+      |> Map.put(:last_event_at, now())
+      |> Map.put(:tool_running?, is_map(summary) and Map.get(summary, :tool) != nil)
 
     case {event, summary} do
       {:status, %{status: :running}} ->
@@ -301,7 +308,12 @@ defmodule Bm.Workspace.Planner do
 
   def handle_info(:tick, state) do
     Process.send_after(self(), :tick, state.config.tick)
-    if state.phase == :idle, do: advance(state), else: {:noreply, state}
+
+    cond do
+      state.phase == :idle -> advance(state)
+      silent?(state) -> silent_turn(state)
+      true -> {:noreply, state}
+    end
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -311,6 +323,32 @@ defmodule Bm.Workspace.Planner do
     Bm.Pi.stop(state.agent_id)
     :ok
   end
+
+  ## A silent model (plan 23.2)
+
+  # Like a worker's stall: not while one of its commands runs (the turn timeout covers that).
+  defp silent?(%{phase: phase} = state) when phase in [:busy, :answering] do
+    stall = Map.get(state.config, :stall_timeout, 3 * 60_000)
+    since = Map.get(state, :last_event_at)
+    not Map.get(state, :tool_running?, false) and is_integer(since) and now() - since >= stall
+  end
+
+  defp silent?(_state), do: false
+
+  # A question stays unanswered (the worker decides itself); a planning turn pauses the run, and
+  # stopping the planner ends its pi session and the hanging request with it.
+  defp silent_turn(%{phase: :answering} = state) do
+    GenServer.reply(state.answering, :unavailable)
+    {:noreply, abort(%{state | phase: :idle, answering: nil})}
+  end
+
+  defp silent_turn(state) do
+    ms = Map.get(state.config, :stall_timeout, 3 * 60_000)
+    span = if ms >= 60_000, do: "#{div(ms, 60_000)} minutes", else: "#{div(ms, 1000)} seconds"
+    pause(state, "the planner's model sent nothing for #{span}")
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
 
   ## Start results
 
@@ -414,6 +452,7 @@ defmodule Bm.Workspace.Planner do
       {:ok, tree} ->
         turn = state.turn + 1
         state = %{state | turn: turn, turn_tree: tree, phase: :busy, seen_running?: false}
+        state = Map.put(state, :last_event_at, now())
         state = cancel_plan_timer(state)
         log(state, kind_label(kind), logged)
         Process.send_after(self(), {:turn_timeout, turn}, state.config.turn_timeout)
@@ -743,6 +782,15 @@ defmodule Bm.Workspace.Planner do
     end
   end
 
+  defp ended_label(%{status: :cancelled} = task) do
+    case Runs.latest_attempt(task) do
+      %{flags: flags} -> if "undone" in flags, do: "undone by the user", else: "cancelled"
+      nil -> "cancelled"
+    end
+  end
+
+  defp ended_label(task), do: Atom.to_string(task.status)
+
   # An accepted task whose attempt raised no flag (undeclared writes, files changed by the
   # verify command, kept by the user, leftover processes, ...).
   defp clean?(%{status: :accepted, task: task}) do
@@ -836,6 +884,7 @@ defmodule Bm.Workspace.Planner do
     %{
       task: task,
       status: delivery.status,
+      undone?: attempt != nil and "undone" in attempt.flags,
       summary: attempt && attempt.result && attempt.result["summary"],
       writes: if(attempt, do: Enum.map(attempt.actual_writes, & &1["path"]), else: []),
       error: attempt && attempt.error,
@@ -881,7 +930,7 @@ defmodule Bm.Workspace.Planner do
         end_run(state, :done, accepted_reason(length(tasks)))
 
       true ->
-        keys = Enum.map_join(failed, ", ", &"#{&1.key} (#{&1.status})")
+        keys = Enum.map_join(failed, ", ", &"#{&1.key} (#{ended_label(&1)})")
         end_run(state, :failed, "not every task succeeded: #{keys}")
     end
   end

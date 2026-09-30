@@ -182,6 +182,11 @@ defmodule Bm.Prompts do
         files = if r.writes != [], do: " Changed: #{Enum.join(r.writes, ", ")}.", else: ""
         error = if r.error, do: " Problem: #{r.error}.", else: ""
 
+        error =
+          if Map.get(r, :undone?),
+            do: error <> " Propose it again only if the goal still needs it.",
+            else: error
+
         check =
           if r.task.check && r.status != :accepted && r.error && r.error =~ "check",
             do: " Its check was: #{r.task.check}",
