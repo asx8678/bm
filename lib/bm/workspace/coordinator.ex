@@ -45,6 +45,8 @@ defmodule Bm.Workspace.Coordinator do
     tool_timeout: 10 * 60_000,
     repeat_refuse: 4,
     repeat_cancel: 6,
+    # The review prompt (plan 14.1); tests or scripts can replace it.
+    review_prompt: &Bm.Prompts.reviewer/3,
     prompt: &Bm.Prompts.worker/2
   ]
 
@@ -228,6 +230,8 @@ defmodule Bm.Workspace.Coordinator do
       # Paths this attempt was allowed to edit/write, and whether it ran bash (plan 13.2).
       touched: MapSet.new(),
       bash_ran?: false,
+      # The verification result and changes waiting for the reviewer (plan 14.1).
+      pending_review: nil,
       # Workers' questions waiting for the planner (plan 12.2): task ref => {agent_id, request}.
       asks: %{},
       # Monitor of the goal run's planner process.
@@ -284,6 +288,25 @@ defmodule Bm.Workspace.Coordinator do
     }
 
     {:reply, reply, state}
+  end
+
+  # Fields added to the state over time. A coordinator started by older code (the dev server's
+  # code reloader keeps running processes) gets them before it admits new work, instead of
+  # crashing on a missing key (seen twice in the Phase 12–14 trials).
+  @late_fields %{
+    tool_since: nil,
+    repeats: %{},
+    asks: %{},
+    touched: MapSet.new(),
+    bash_ran?: false,
+    pending_review: nil,
+    planner_ref: nil
+  }
+
+  def handle_call(message, from, state)
+      when is_tuple(message) and elem(message, 0) in [:run_task, :start_goal] and
+             not is_map_key(state, :pending_review) do
+    handle_call(message, from, Map.merge(@late_fields, state))
   end
 
   def handle_call({:run_task, _attrs}, _from, %{lane: lane} = state) when lane != :free,
@@ -1229,6 +1252,7 @@ defmodule Bm.Workspace.Coordinator do
   defp job_done(state, :stop, _result), do: stopped(state)
   defp job_done(state, :verify, result), do: verified(state, result)
   defp job_done(state, :baseline, result), do: baseline_verified(state, result)
+  defp job_done(state, :review, result), do: job_done_review(state, result)
 
   defp worker_started(state, agent_pid) do
     summary = Bm.Pi.snapshot(state.agent_id).summary
@@ -1484,7 +1508,7 @@ defmodule Bm.Workspace.Coordinator do
         finish(state, :cancelled, Map.put(changes, :verify, verify))
 
       verify["exit"] == 0 and check_passed?(verify) ->
-        checkpoint(state, verify, changes)
+        maybe_review(state, verify, changes)
 
       # A goal run's task check is written by BM's own planner, so its failure is a planning
       # error, not the user's to decide: revert and let the planner re-plan (decision D23).
@@ -1507,14 +1531,16 @@ defmodule Bm.Workspace.Coordinator do
   # its task is reported to the planner as failed), then its changes are reverted, but only if
   # the files still hold exactly what the attempt left; otherwise it stays held for the user,
   # as before.
-  defp revert_for_replan(state, verify, changes) do
+  defp revert_for_replan(state, verify, changes, reason \\ nil) do
     check = verify["check"] || %{}
     command = state.task.check
 
     reason =
-      if check["timeout"],
-        do: "the task's check `#{command}` timed out",
-        else: "the task's check `#{command}` exited #{check["exit"]}"
+      cond do
+        reason -> reason
+        check["timeout"] -> "the task's check `#{command}` timed out"
+        true -> "the task's check `#{command}` exited #{check["exit"]}"
+      end
 
     state = finish(state, :failed, Map.merge(changes, %{verify: verify, error: reason}))
     attempt = Runs.get_attempt!(state.attempt.id)
@@ -1546,6 +1572,105 @@ defmodule Bm.Workspace.Coordinator do
         broadcast_attempt(%{state | attempt: attempt})
     end
   end
+
+  ## Review (14.1, D25)
+
+  # In a goal run, a change that passed verification is reviewed before it is accepted, unless
+  # the workspace turned review off (settings "review": false).
+  defp maybe_review(state, verify, changes) do
+    attempt = Runs.get_attempt!(state.attempt.id)
+    writes = Map.get(changes, :actual_writes, attempt.actual_writes)
+
+    if state.run.planner != nil and writes != [] and state.workspace.settings["review"] != false do
+      tree_after = Map.get(changes, :tree_after, attempt.tree_after)
+      diff = review_diff(state.root, attempt.tree_before, tree_after, writes)
+      prompt = state.config.review_prompt.(state.task, Runs.dependency_context(state.task), diff)
+      agent_id = "review-#{attempt.id}"
+      root = state.root
+      owned = user_owned(state)
+
+      state = %{state | phase: :reviewing, pending_review: {verify, changes, agent_id}}
+
+      state
+      |> start_job(:review, fn -> Bm.Review.run(agent_id, root, prompt, owned) end)
+      |> broadcast_attempt()
+    else
+      checkpoint(state, verify, changes)
+    end
+  end
+
+  @max_review_diff 20_000
+
+  defp review_diff(root, before, after_tree, writes) do
+    {text, left} =
+      Enum.reduce(writes, {"", 0}, fn %{"path" => path}, {acc, left} ->
+        cond do
+          byte_size(acc) >= @max_review_diff ->
+            {acc, left + 1}
+
+          true ->
+            diff =
+              case Git.file_diff(root, before, after_tree, path) do
+                {:ok, text} -> text
+                {:error, _} -> "(no diff for #{path})"
+              end
+
+            {acc <> diff <> "\n", left}
+        end
+      end)
+
+    text = String.slice(text, 0, @max_review_diff)
+    if left > 0, do: text <> "\n(… #{left} more files not shown)", else: text
+  end
+
+  defp job_done_review(state, result) do
+    {verify, changes, _agent_id} = state.pending_review
+    state = %{state | pending_review: nil}
+
+    case result do
+      {:ok, %{verdict: verdict, reason: reason, cost: cost}} ->
+        state = add_review_spend(state, cost)
+        review = %{"verdict" => Atom.to_string(verdict), "reason" => reason, "cost" => cost}
+        verify = Map.put(verify, "review", review)
+
+        cond do
+          state.cancel? ->
+            finish(state, :cancelled, Map.put(changes, :verify, verify))
+
+          verdict == :approve ->
+            checkpoint(state, verify, changes)
+
+          true ->
+            revert_for_replan(
+              state,
+              verify,
+              changes,
+              "the reviewer rejected the change: #{String.trim_trailing(reason, ".")}"
+            )
+        end
+
+      error ->
+        if state.cancel? do
+          finish(state, :cancelled, Map.put(changes, :verify, verify))
+        else
+          # The reviewer could not run: verification passed, so the change is accepted and
+          # flagged as not reviewed rather than blocked.
+          Logger.warning("attempt #{state.attempt.id}: review skipped: #{inspect(error)}")
+          review = %{"verdict" => "skipped", "reason" => inspect(error)}
+          flags = Map.get(changes, :flags, Runs.get_attempt!(state.attempt.id).flags)
+          changes = Map.put(changes, :flags, flags ++ ["not_reviewed"])
+          checkpoint(state, Map.put(verify, "review", review), changes)
+        end
+    end
+  end
+
+  defp add_review_spend(state, cost) when is_number(cost) and cost > 0 do
+    run = Runs.add_spend(state.run, cost, 0)
+    broadcast_run(state, run)
+    %{state | run: run}
+  end
+
+  defp add_review_spend(state, _cost), do: state
 
   defp check_passed?(%{"check" => %{"exit" => 0}}), do: true
   defp check_passed?(%{"check" => _failed}), do: false
@@ -1763,6 +1888,12 @@ defmodule Bm.Workspace.Coordinator do
 
       phase when phase in [:verifying, :baseline] ->
         tap(state, &(&1.verify_pgid && Bm.Proc.terminate_groups([&1.verify_pgid])))
+
+      # Stopping the reviewer's session ends its job; job_done_review sees cancel?.
+      :reviewing ->
+        {_verify, _changes, agent_id} = state.pending_review
+        Task.start(fn -> Bm.Pi.stop(agent_id) end)
+        state
     end
   end
 

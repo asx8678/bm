@@ -40,3 +40,13 @@ user's `README.md` line is intact after all four runs; no attempt was held, flag
 - **Safety held:** the user's uncommitted `README.md` was never changed; every accepted change was
   checkpointed; the lane was never held.
 - **Cost and time** on real code are close to the toy goals: $0.02–0.16 per goal, 19–69 s.
+
+## Phase 14 (2026-09-30)
+
+- Run 68 (via the UI, after a resume): `Bm.Runs.count_runs/0` — reviewer approved with a specific
+  reason ($0.027 for the review), run done ($0.17 total).
+- Run 69/70 (via `mix bm.goal`): `Bm.Runs.count_tasks/0` needed `lib/bm/runs.ex`, which held run 68's
+  accepted but uncommitted change. **F3 (fixed):** the planner correctly refused, but the run ended
+  "done"; now `close_plan(blocked: true)` → failed with the planner's reason (run 70).
+- **Note for users:** BM never commits. Commit or stash accepted changes before the next goal that
+  touches the same files, or BM will treat them as your uncommitted work and leave them alone.

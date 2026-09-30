@@ -1078,11 +1078,23 @@ defmodule BmWeb.RunLive do
             <span class={["font-mono text-[11px]", verify_tone(@attempt.verify)]}>
               {verify_label(@attempt.verify)}
             </span>
+            <span
+              :if={is_map(@attempt.verify["review"])}
+              class={["font-mono text-[11px]", review_tone(@attempt.verify["review"])]}
+            >
+              · {review_label(@attempt.verify["review"])}
+            </span>
           </summary>
           <pre
             :if={@attempt.verify["output"] not in [nil, ""]}
             class="mt-2 max-h-72 overflow-auto rounded-md bg-bm-bg px-3 py-2 font-mono text-[11px] leading-relaxed"
           >{@attempt.verify["output"]}</pre>
+          <div :if={is_map(@attempt.verify["review"])} class="mt-2">
+            <p class="text-[11px] text-bm-muted">Review</p>
+            <p class="mt-1 rounded-md bg-bm-bg px-3 py-2 text-xs leading-relaxed">
+              {@attempt.verify["review"]["reason"]}
+            </p>
+          </div>
           <div :if={is_map(@attempt.verify["check"])} class="mt-2">
             <p class="text-[11px] text-bm-muted">
               Task check <code class="font-mono">{@task.check}</code>
@@ -1137,7 +1149,8 @@ defmodule BmWeb.RunLive do
        when status in [:held, :failed, :reverted] and is_map(verify),
        do:
          verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0) or
-           (is_map(verify["check"]) and verify["check"]["exit"] != 0)
+           (is_map(verify["check"]) and verify["check"]["exit"] != 0) or
+           match?(%{"verdict" => "reject"}, verify["review"])
 
   defp verify_needs_reading?(_attempt), do: false
 
@@ -1155,6 +1168,14 @@ defmodule BmWeb.RunLive do
   defp tool_tone("ok"), do: "text-bm-idle"
   defp tool_tone("error"), do: "text-bm-error"
   defp tool_tone(_running), do: "text-bm-muted"
+
+  defp review_label(%{"verdict" => "approve"}), do: "review approved"
+  defp review_label(%{"verdict" => "reject"}), do: "review rejected"
+  defp review_label(_review), do: "not reviewed"
+
+  defp review_tone(%{"verdict" => "approve"}), do: "text-bm-idle"
+  defp review_tone(%{"verdict" => "reject"}), do: "text-bm-error"
+  defp review_tone(_review), do: "text-bm-muted"
 
   defp terminal?(status),
     do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]
@@ -1193,6 +1214,9 @@ defmodule BmWeb.RunLive do
   defp flag_help("leftover_processes"), do: "Left processes running; BM ended them"
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
+
+  defp flag_help("not_reviewed"),
+    do: "The reviewer could not run; verification passed, so the change was accepted unreviewed"
 
   defp flag_help("auto_reverted"),
     do: "The planner's check failed; BM reverted the changes and asked the planner to re-plan"

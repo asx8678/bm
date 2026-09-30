@@ -23,10 +23,19 @@ defmodule BmWeb.Router do
     live "/flow", FlowLive
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", BmWeb do
-  #   pipe_through :api
-  # end
+  # BM's local JSON API for the terminal client (plan 14.2); only answers this machine.
+  pipeline :local_api do
+    plug :accepts, ["json"]
+    plug BmWeb.Plugs.LocalOnly
+  end
+
+  scope "/api", BmWeb.Api do
+    pipe_through :local_api
+
+    post "/goals", RunController, :create_goal
+    get "/runs", RunController, :index
+    get "/runs/:id", RunController, :show
+  end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development
   if Application.compile_env(:bm, :dev_routes) do

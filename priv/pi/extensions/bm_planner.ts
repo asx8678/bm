@@ -81,6 +81,12 @@ const closePlan = defineTool({
 	description: "Tell BM that you have proposed every task for now. Call it once, after your last propose_task.",
 	parameters: Type.Object({
 		summary: Type.String({ description: "One or two sentences describing the plan." }),
+		blocked: Type.Optional(
+			Type.Boolean({
+				description:
+					"true if the goal can't be reached (e.g. it needs files with the user's uncommitted work); say why in the summary.",
+			}),
+		),
 	}),
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 		await bmRequest(ctx, "close_plan", params);
