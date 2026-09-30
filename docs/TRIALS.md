@@ -98,3 +98,18 @@ recorded (plan 19.1). The goals state a contract with edge cases without listing
   with `Number()` like `truncate` does, so `0x10`, `1e1` and `" 5"` are accepted as 16, 10 and 5.
 - Total: 3 goals, 3 tasks, $0.16; HEAD moved only through `mix bm.commit`.
 
+## Seeded boundary bugs (plan 20.1, 2026-09-30)
+
+Does the reviewer catch a bug the tests miss? Throwaway clones of the sandbox; goal: `ellipsize(text,
+max)` (unchanged if it fits, else max - 1 characters and "…", never longer than max, max 0 → "",
+RangeError otherwise). Real planner and reviewer; the worker was told to write a given
+implementation with one bug and tests that miss it. Each run was ended after the first review.
+
+| Run | Seeded bug | Tests and verify | Review | Cost |
+|---|---|---|---|---|
+| 92 | `text.length < max` (exact limit cut) | passed | **rejected**: `ellipsize("hello", 5)` returns "hell…", must be "hello" | $0.038 |
+| 93 | no `max === 0` case | passed | **rejected**: `ellipsize('hello', 0)` returns 'hell…' (5 chars), must be '' | $0.043 |
+
+Both rejections came from a recorded `node -e` probe of the failing input; BM reverted the change
+and passed the reason to the planner.
+
