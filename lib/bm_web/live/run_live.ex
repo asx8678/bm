@@ -16,6 +16,7 @@ defmodule BmWeb.RunLive do
 
   alias Bm.Runs
   alias Bm.Workspace.{Coordinator, Git, Planner}
+  alias BmWeb.RunGraph
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -44,10 +45,103 @@ defmodule BmWeb.RunLive do
        latest: List.last(attempts),
        form: to_form(%{"goal" => ""}, as: :next),
        goal_run?: run.planner != nil,
-       planner_phase: planner_phase(run)
+       planner_phase: planner_phase(run),
+       # Live activity from pi: node id => data merged into the canvas; agents watched; the
+       # running worker's agent and task key, and its current tool for the action bar.
+       live: %{},
+       watching: MapSet.new(),
+       worker: nil,
+       worker_tool: nil,
+       graph: if(run.planner, do: RunGraph.build(run, Runs.latest_tasks(run)))
      )
      |> stream(:tasks, if(run.planner, do: Runs.list_tasks(run), else: []))
-     |> stream(:attempts, Enum.map(attempts, &decorate(&1, root)))}
+     |> stream(:attempts, Enum.map(attempts, &decorate(&1, root)))
+     |> then(&if(connected?(&1), do: watch_live(&1, List.last(attempts)), else: &1))}
+  end
+
+  ## Live activity (canvas and action bar)
+
+  # Watches the planner's pi session and the running worker's, if any.
+  defp watch_live(socket, attempt) do
+    run = socket.assigns.run
+
+    socket =
+      case run.planner do
+        %{"agent_id" => agent_id} when run.status == :active -> watch(socket, agent_id)
+        _ -> socket
+      end
+
+    watch_worker(socket, attempt)
+  end
+
+  defp watch_worker(socket, %{status: status, id: id} = attempt)
+       when status in [:admitted, :running, :result_received, :settling] do
+    agent_id = "attempt-#{id}"
+    task = attempt.task || Runs.get_task!(attempt.task_id)
+    socket |> watch(agent_id) |> assign(worker: {agent_id, task.key})
+  end
+
+  defp watch_worker(socket, _attempt) do
+    case socket.assigns.worker do
+      {agent_id, key} ->
+        Bm.Pi.unsubscribe(agent_id)
+
+        socket
+        |> assign(
+          worker: nil,
+          worker_tool: nil,
+          watching: MapSet.delete(socket.assigns.watching, agent_id),
+          live: Map.delete(socket.assigns.live, RunGraph.task_node(key))
+        )
+
+      nil ->
+        socket
+    end
+  end
+
+  # The worker's activity: the tool running now (nil between tools), the last one, and how many
+  # tool calls it made. Tools often run for milliseconds, so the last one is what users see.
+  defp next_activity(nil, tool), do: next_activity(%{now: nil, last: nil, calls: 0}, tool)
+
+  defp next_activity(activity, nil), do: %{activity | now: nil}
+  defp next_activity(%{now: tool} = activity, tool), do: activity
+
+  defp next_activity(activity, tool),
+    do: %{activity | now: tool, last: tool, calls: activity.calls + 1}
+
+  defp watch(socket, agent_id) do
+    if MapSet.member?(socket.assigns.watching, agent_id) do
+      socket
+    else
+      Bm.Pi.subscribe(agent_id)
+      assign(socket, watching: MapSet.put(socket.assigns.watching, agent_id))
+    end
+  end
+
+  # Redraws the canvas of a goal run from the database plus the live activity.
+  defp refresh_graph(%{assigns: %{goal_run?: true}} = socket) do
+    run = socket.assigns.run
+
+    push_event(
+      socket,
+      "flow:set_graph",
+      RunGraph.build(run, Runs.latest_tasks(run), socket.assigns.live)
+    )
+  end
+
+  defp refresh_graph(socket), do: socket
+
+  # Merges live data into one canvas node, pushing only what changed.
+  defp update_live(socket, node, data) do
+    if Map.get(socket.assigns.live, node) == data do
+      socket
+    else
+      socket = assign(socket, live: Map.put(socket.assigns.live, node, data))
+
+      if socket.assigns.goal_run?,
+        do: push_event(socket, "flow:update_node", %{id: node, data: data}),
+        else: socket
+    end
   end
 
   defp planner_phase(%{planner: nil}), do: nil
@@ -105,18 +199,41 @@ defmodule BmWeb.RunLive do
       {:noreply,
        socket
        |> assign(lane: lane, latest: attempt, run: reload(socket.assigns.run))
+       |> watch_worker(attempt)
        |> stream_insert(:tasks, task)
-       |> stream_insert(:attempts, decorate(attempt, socket.assigns.root))}
+       |> stream_insert(:attempts, decorate(attempt, socket.assigns.root))
+       |> refresh_graph()}
     else
       {:noreply, socket}
     end
+  end
+
+  # pi activity of the planner or of the running worker.
+  def handle_info({:pi, agent_id, _event, summary}, socket) do
+    socket =
+      case socket.assigns do
+        %{worker: {^agent_id, key}} ->
+          activity = next_activity(socket.assigns.worker_tool, summary[:tool])
+
+          socket
+          |> assign(worker_tool: activity)
+          |> update_live(RunGraph.task_node(key), RunGraph.task_live(summary, activity))
+
+        %{run: %{planner: %{"agent_id" => ^agent_id}}} ->
+          update_live(socket, RunGraph.planner_node(), RunGraph.planner_live(summary))
+
+        _other ->
+          socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info(
         {:workspace, _root, {:task, %{run_id: id} = task}},
         %{assigns: %{run: %{id: id}}} = socket
       ),
-      do: {:noreply, stream_insert(socket, :tasks, task)}
+      do: {:noreply, socket |> stream_insert(:tasks, task) |> refresh_graph()}
 
   def handle_info(
         {:workspace, _root, {:planner, id, info}},
@@ -140,7 +257,16 @@ defmodule BmWeb.RunLive do
           |> assign(planner_phase: nil),
         else: socket
 
-    {:noreply, assign(socket, run: run, lane: lane)}
+    socket = assign(socket, run: run, lane: lane)
+
+    # A resumed run has a new planner session to watch.
+    socket =
+      case run.planner do
+        %{"agent_id" => agent_id} when run.status == :active -> watch(socket, agent_id)
+        _ -> socket
+      end
+
+    {:noreply, refresh_graph(socket)}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
@@ -182,6 +308,9 @@ defmodule BmWeb.RunLive do
          put_flash(socket, :error, "Could not finish the run: #{explain_action(reason)}")}
     end
   end
+
+  # The canvas reports drags; positions are not stored.
+  def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
 
   def handle_event("resume_planning", _params, socket) do
     case Coordinator.resume_planning(socket.assigns.root, socket.assigns.run.id) do
@@ -302,7 +431,19 @@ defmodule BmWeb.RunLive do
           form={@form}
           goal_run?={@goal_run?}
           planner_phase={@planner_phase}
+          worker_tool={@worker_tool}
         />
+
+        <section
+          :if={@goal_run?}
+          id="run-canvas"
+          phx-hook="FlowCanvas"
+          phx-update="ignore"
+          data-graph={JSON.encode!(@graph)}
+          class="mt-6 hidden h-80 overflow-hidden rounded-xl border border-bm-line md:block"
+          aria-label="Run graph: planner, tasks and dependencies"
+        >
+        </section>
 
         <section
           :if={@goal_run?}
@@ -520,6 +661,7 @@ defmodule BmWeb.RunLive do
   attr :form, :any, required: true
   attr :goal_run?, :boolean, default: false
   attr :planner_phase, :atom, default: nil
+  attr :worker_tool, :map, default: nil
 
   defp action_bar(assigns) do
     ~H"""
@@ -531,8 +673,16 @@ defmodule BmWeb.RunLive do
         <% {:busy, _id} -> %>
           <div class="flex items-center gap-3">
             <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
-            <p class="flex-1 text-xs">
+            <p class="min-w-0 flex-1 text-xs">
               An attempt is running. Its changes are checked when it finishes.
+              <span
+                :if={@worker_tool}
+                id="worker-tool"
+                class="mt-0.5 block truncate font-mono text-[11px] text-bm-run"
+                title={@worker_tool.now || @worker_tool.last}
+              >
+                {activity_text(@worker_tool)}
+              </span>
             </p>
             <.action id="stop-btn" event="stop" style={:secondary} disable_with="Stopping…">
               Stop
@@ -654,6 +804,14 @@ defmodule BmWeb.RunLive do
     </div>
     """
   end
+
+  defp activity_text(%{now: now, calls: calls}) when is_binary(now),
+    do: "Now: #{now} · #{calls} tool #{if calls == 1, do: "call", else: "calls"}"
+
+  defp activity_text(%{last: last, calls: calls}) when is_binary(last),
+    do: "Thinking · last: #{last} · #{calls} tool #{if calls == 1, do: "call", else: "calls"}"
+
+  defp activity_text(_activity), do: "Thinking…"
 
   defp revertable?(%{status: :accepted, actual_writes: [_ | _]}), do: true
   defp revertable?(_attempt), do: false

@@ -362,7 +362,7 @@ defmodule Bm.Workspace.Planner do
   defp kind_label(:reminder), do: "reminder"
 
   defp turn_ended(state) do
-    state = %{state | phase: :idle, seen_running?: false}
+    state = broadcast(%{state | phase: :idle, seen_running?: false})
     log(state, "reply", last_reply(state.agent_id))
 
     with {:ok, tree} <- Git.snapshot(state.root),
