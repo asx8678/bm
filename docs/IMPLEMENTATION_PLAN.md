@@ -1574,3 +1574,25 @@ checks; tasks, attempts and deliveries went with them), 113 workspaces left with
 bridge requests of those attempts and planners. Kept: the sandbox's 6 runs (77–79, 88–90).
 
 **Status: Phase 27 done (2026-09-30).**
+
+---
+
+## Phase 28: BM on its own code
+
+Chosen by the user 2026-09-30 ("yes BM"): the trial on a real project runs on BM itself, on a
+fresh clone in /tmp (never the checkout the dev server runs from). Verify command
+`mix compile --warnings-as-errors && mix format --check-formatted`; the goals ask for no new or run
+tests (the user's instruction). Each accepted change is checked by hand, including running it from
+the clone, and committed in the clone with `mix bm.commit` so the next goal builds on it; nothing
+reaches the real repository unless the user asks for it.
+
+The user picked three goals from real gaps between the terminal and BM:
+
+**28.1 Status filter.** `GET /api/runs?status=…` and `mix bm.runs --status …` (the query supported a
+status already; the API never passed one).
+
+**28.2 `mix bm.status` shows what a run waits for.** Pending approvals and a held attempt, with a
+hint to use `mix bm.attach` (the API has reported them since Phase 24).
+
+**28.3 Pause, Resume and Undo from the terminal.** API endpoints and `mix bm.pause`, `mix bm.resume`,
+`mix bm.undo`, with the run page's rules.
