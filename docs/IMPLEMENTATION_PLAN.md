@@ -616,3 +616,36 @@ Verify: results recorded; FEATURES.md updated with the decision.
 for real bugs as in earlier phases, probe recovery with a killed planner, and update
 ARCHITECTURE.md §13 (verified facts) and §16 (code map).
 Verify: findings fixed and listed in the Status note.
+
+**Status: Phase 8 done (2026-09-30); milestone C exit gate passed (live).** At the user's request
+no new test files were written in this phase; the existing suite (199 tests) passes, and the
+gate ran as live scenarios from a scratch script with the real model.
+- 8.1: Tasks page has Goal / Single task modes (`#goal-form`, `#task-form`); the run page of a
+  goal run shows the planner (`#planner`: phase, wave, plan open/closed, summary, log with the
+  planner's replies as markdown), the task list (`#tasks`, live), the run's reason
+  (`#run-reason`), and Resume planning / Finish when paused. Checked in a browser on desktop and
+  phone with a goal submitted through the form (run done, 2 tasks, $0.04);
+  screenshots `docs/screenshots/goal-run*.png`.
+- 8.2 gate (live): **A** finishing a run while the planner is still thinking ends it cancelled
+  with no task, no attempt, no file change and the planner gone; **B** killing the planner after
+  the first accepted task pauses the run ("the planner stopped unexpectedly"), Resume planning
+  starts session 2 with the tasks so far, and the run ends done: 3 tasks, 3 checkpoints, the
+  goal's check passes, the user's staged change and dirty file intact, HEAD untouched. Earlier
+  live runs: 3-task goal done in 25 s ($0.063), 2-task goal via the UI done in 20 s ($0.04).
+  The fake-pi "abort mid-stream" test of the plan was not written (no new tests); scenario A
+  covers the cancelled-planner case live.
+- 8.3 benchmark (`mix bm.bench --goals`, docs/BENCHMARK_GOALS.md, 18 runs): both modes pass the
+  goals' checks 9/9; plain pi $0.12 / 68 s, BM planner $0.60 / 356 s (about 5× on these small
+  goals: planner turns, a fresh pi per task, the verify command after every task). Plain pi
+  changed the user's uncommitted `text.py` in 3/3 runs, BM in 0/3: its planner put the word
+  counting into `wc.py` instead. The goal's check tests only `wc.py`, so for BM "verified" there
+  means the observable goal works while the part that needs the user's file was not done.
+  **Decision:** parallel read-only workers are *not* next (the time is not planner-side
+  reading); the next optional work is cutting per-goal overhead: warm worker reuse (start-up per
+  task) and ending a run without a final "all done" planner turn when the plan is closed and
+  every task was accepted (each benchmark run spent its second wave on it).
+- 8.4 review, fixed: an idle planner never noticed a coordinator that had died (it now re-checks
+  every 5 s and restarts the coordinator); with the budget spent and the plan open, the
+  scheduler could still send a paid reminder turn (it now ends the run); a single task started
+  from the Tasks page while a goal run was active would have joined that run behind the
+  planner's back (now refused: "A planner run is active in this workspace").

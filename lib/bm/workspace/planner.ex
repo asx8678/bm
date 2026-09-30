@@ -44,7 +44,10 @@ defmodule Bm.Workspace.Planner do
     max_rejections: 5,
     max_waves: 5,
     plan_timeout: 5 * 60_000,
-    turn_timeout: 15 * 60_000
+    turn_timeout: 15 * 60_000,
+    # While idle, the planner re-checks the run this often: events can be missed (a restarted
+    # coordinator, a recovery), and the lane state is the coordinator's.
+    tick: 5_000
   ]
 
   @ended [:failed, :blocked, :cancelled]
@@ -152,6 +155,7 @@ defmodule Bm.Workspace.Planner do
         Profile.start(agent_id, :planner, owner: coordinator, cwd: root)
       end)
 
+    Process.send_after(self(), :tick, state.config.tick)
     broadcast(state)
     {:ok, state}
   end
@@ -247,6 +251,12 @@ defmodule Bm.Workspace.Planner do
   end
 
   def handle_info(:advance, %{phase: :idle} = state), do: advance(state)
+
+  def handle_info(:tick, state) do
+    Process.send_after(self(), :tick, state.config.tick)
+    if state.phase == :idle, do: advance(state), else: {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -457,9 +467,20 @@ defmodule Bm.Workspace.Planner do
 
   defp lane_free?(state, run) do
     case Coordinator.state(state.root) do
-      %{lane: :free, phase: nil, run_id: run_id} -> run_id == run.id
-      _other -> false
+      %{lane: :free, phase: nil, run_id: run_id} ->
+        run_id == run.id
+
+      {:error, :not_started} ->
+        # The coordinator died (it is :temporary); start it again. Its start-up recovery
+        # leaves this run alone because this planner is alive, and it monitors us again.
+        Coordinator.ensure_started(state.root)
+        false
+
+      _other ->
+        false
     end
+  catch
+    :exit, _ -> false
   end
 
   defp schedule(state, run) do
@@ -596,7 +617,9 @@ defmodule Bm.Workspace.Planner do
   end
 
   defp plan_left_open(%{reminded?: false} = state) do
-    begin_turn(%{state | reminded?: true}, :reminder, Bm.Prompts.planner_reminder())
+    if Runs.budget_exhausted?(Runs.get_run!(state.run_id)),
+      do: end_run(state, :failed, "the run's budget is spent"),
+      else: begin_turn(%{state | reminded?: true}, :reminder, Bm.Prompts.planner_reminder())
   end
 
   defp plan_left_open(state) do

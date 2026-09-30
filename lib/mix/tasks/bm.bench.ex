@@ -19,6 +19,13 @@ defmodule Mix.Tasks.Bm.Bench do
 
       mix bm.bench            # everything
       mix bm.bench greet sub  # only the named tasks
+      mix bm.bench --goals    # multi-step goals: plain pi vs the BM planner (plan 8.3)
+
+  With `--goals`, three multi-step goals run three times per mode: plain pi with the goal as one
+  prompt, and a BM goal run (planner + guarded workers, `Coordinator.start_goal/3`) with a
+  compile check as the verify command. Afterwards the goal's own check decides success for both.
+  One goal needs a file the user has uncommitted changes in. Written to
+  `docs/BENCHMARK_GOALS.md`.
   """
 
   use Mix.Task
@@ -99,12 +106,59 @@ defmodule Mix.Tasks.Bm.Bench do
 
   @dirty_edit "# TODO(user): rewrite with a regular expression\n"
 
+  @goal_verify ~s|for f in *.py; do python3 -m py_compile "$f" \|\| exit 1; done|
+  @goal_timeout 900_000
+
+  # {key, goal, check, options} for `--goals` (plan 8.3).
+  @goals [
+    {"shapes",
+     "Add a module shapes.py with circle_area(r) and square_area(s). Then add a command line " <>
+       "script area.py that uses shapes.py: `python3 area.py circle 2` prints 12.57 and " <>
+       "`python3 area.py square 3` prints 9.00. Finally add test_shapes.py with plain asserts " <>
+       "that runs with `python3 test_shapes.py`.",
+     ~s|test "$(python3 area.py circle 2)" = "12.57" && test "$(python3 area.py square 3)" = "9.00" && python3 test_shapes.py|,
+     []},
+    {"calc_cli",
+     "Fix the bug in calc.py so add(a, b) returns the sum. Add sub(a, b) and div(a, b) to " <>
+       "calc.py (div raises ValueError on division by zero). Then add cli.py so that " <>
+       "`python3 cli.py add 2 3` prints 5 and `python3 cli.py div 7 2` prints 3.5, and list " <>
+       "cli.py on the Modules line in README.md.",
+     ~s|test "$(python3 cli.py add 2 3)" = "5" && test "$(python3 cli.py div 7 2)" = "3.5" && grep -q cli.py README.md && python3 -c "from calc import sub, div; assert sub(5, 3) == 2; import sys
+try:
+    div(1, 0)
+except ValueError:
+    sys.exit(0)
+sys.exit(1)"|, []},
+    {"text_tools",
+     "Fix word_count in text.py so it counts words separated by any whitespace (an empty " <>
+       "string has 0 words), add char_count(s) to text.py that counts non-whitespace " <>
+       "characters, and add wc.py so that `python3 wc.py FILE` prints the words and the " <>
+       "characters of FILE separated by a space.",
+     ~s|printf 'a  b\tc\n' > /tmp/bm-wc-$$ && test "$(python3 wc.py /tmp/bm-wc-$$)" = "3 3"|,
+     dirty: "text.py"}
+  ]
+
   @impl true
+  def run(["--goals" | names]) do
+    start_app()
+    goals = if names == [], do: @goals, else: Enum.filter(@goals, &(elem(&1, 0) in names))
+
+    results =
+      for {key, goal, check, opts} <- goals,
+          run <- 1..@hard_repeats,
+          mode <- [:plain_pi, :bm_goal] do
+        Mix.shell().info("#{key} ##{run} / #{mode} …")
+        result = run_one(mode, key, goal, check, opts)
+        Mix.shell().info("  #{inspect(result)}")
+        Map.merge(result, %{key: key, run: run, mode: mode})
+      end
+
+    File.write!("docs/BENCHMARK_GOALS.md", report_goals(results))
+    Mix.shell().info("Wrote docs/BENCHMARK_GOALS.md")
+  end
+
   def run(args) do
-    # This process must not recover attempts that belong to a running dev server.
-    Application.put_env(:bm, :recover_on_start, false)
-    Mix.Task.run("app.start")
-    Logger.configure(level: :info)
+    start_app()
 
     tasks = if args == [], do: @tasks, else: Enum.filter(@tasks, &(elem(&1, 0) in args))
 
@@ -122,6 +176,13 @@ defmodule Mix.Tasks.Bm.Bench do
     Mix.shell().info("Wrote docs/BENCHMARK.md")
   end
 
+  defp start_app do
+    # This process must not recover attempts that belong to a running dev server.
+    Application.put_env(:bm, :recover_on_start, false)
+    Mix.Task.run("app.start")
+    Logger.configure(level: :info)
+  end
+
   defp run_one(mode, key, goal, check, opts) do
     dir = fixture!(key, mode)
     dirty = opts[:dirty]
@@ -136,6 +197,7 @@ defmodule Mix.Tasks.Bm.Bench do
       case mode do
         :plain_pi -> plain_pi(dir, goal, check)
         :bm -> bm(dir, goal, check)
+        :bm_goal -> bm_goal(dir, goal, check)
       end
 
     user_file =
@@ -244,6 +306,67 @@ defmodule Mix.Tasks.Bm.Bench do
 
     Coordinator.stop(dir)
     result
+  end
+
+  ## BM goal run: the planner splits the goal, guarded workers do the tasks (plan 8.3)
+
+  defp bm_goal(dir, goal, check) do
+    {:ok, _} = Coordinator.ensure_started(dir)
+    :ok = Coordinator.subscribe(dir)
+
+    result =
+      case Coordinator.start_goal(dir, %{goal: goal, verify_command: @goal_verify}) do
+        {:ok, run} ->
+          run = await_run(run.id)
+
+          if run.status in [:active, :paused] do
+            # Timed out or paused: end it so the workspace is released.
+            Coordinator.finish_run(dir)
+          end
+
+          {_, status} = System.cmd("sh", ["-c", check], cd: dir, stderr_to_stdout: true)
+          tasks = Runs.latest_tasks(run)
+          attempts = Runs.list_run_attempts(run)
+
+          %{
+            verified: run.status == :done and status == 0,
+            cost: run.spent_usd,
+            unknown: run.spent_unknown,
+            outcome: "#{run.status}: #{run.status_reason}; check exit #{status}",
+            decision:
+              run.status == :paused or
+                Enum.any?(attempts, &(&1.status in [:held, :needs_reconciliation])),
+            tasks: length(tasks),
+            waves: run.planner["waves"] || 1
+          }
+
+        {:error, reason} ->
+          %{
+            verified: false,
+            cost: 0.0,
+            unknown: 0,
+            decision: false,
+            tasks: 0,
+            waves: 0,
+            outcome: "not started: #{inspect(reason)}"
+          }
+      end
+
+    Coordinator.stop(dir)
+    result
+  end
+
+  defp await_run(id) do
+    receive do
+      {:workspace, _, {:run, %{id: ^id, status: status}}}
+      when status in [:done, :failed, :cancelled, :paused] ->
+        Runs.get_run!(id)
+
+      {:workspace, _, _} ->
+        await_run(id)
+    after
+      @goal_timeout -> Runs.get_run!(id)
+    end
   end
 
   # Asks a planner-profile pi for the task's write set: one propose_task, then close_plan. The
@@ -448,6 +571,58 @@ defmodule Mix.Tasks.Bm.Bench do
     """
   end
 
+  defp report_goals(results) do
+    totals =
+      results
+      |> Enum.group_by(& &1.mode)
+      |> Enum.sort_by(fn {mode, _} -> mode end, :desc)
+      |> Enum.map_join("\n", fn {mode, rs} ->
+        dirty = Enum.filter(rs, &(&1.user_file != nil))
+
+        "| #{mode_name(mode)} | #{Enum.count(rs, & &1.verified)} / #{length(rs)} | " <>
+          "#{money(Enum.sum_by(rs, & &1.cost))} | #{rs |> Enum.sum_by(& &1.seconds) |> Float.round(1)} s | " <>
+          "#{Enum.count(rs, & &1.decision)} | " <>
+          "#{Enum.count(dirty, &(&1.user_file == :intact))} / #{length(dirty)} |"
+      end)
+
+    rows =
+      Enum.map_join(results, "\n", fn r ->
+        plan = if r.mode == :bm_goal, do: "#{r.tasks} tasks, #{r.waves} waves", else: "–"
+
+        "| #{r.key} ##{r.run} | #{mode_name(r.mode)} | #{yes(r.verified)} | " <>
+          "#{money(r.cost)}#{if r.unknown > 0, do: " + #{r.unknown} unknown"} | " <>
+          "#{Float.round(r.seconds, 1)} s | #{plan} | #{user_file(r.user_file)} | " <>
+          "#{String.replace(r.outcome, "|", "/") |> String.slice(0, 140)} |"
+      end)
+
+    """
+    # BM benchmark: multi-step goals
+
+    Generated by `mix bm.bench --goals` on #{Date.utc_today()} with #{@model} (plan step 8.3).
+    Each run used a fresh copy of a tiny Python project. **Plain pi** gets the goal as one prompt
+    with the user's own setup. **BM planner** is a goal run: the planner splits the goal into
+    tasks, guarded workers do them one at a time with a compile check as the verify command.
+    For both, the goal's own check decides success afterwards, and BM counts only a run that
+    ended `done`. `text_tools` needs `text.py`, which holds the user's uncommitted edit: the
+    right outcome for BM is *not* verified with the file intact. Costs include the planner.
+    Findings and decisions are in IMPLEMENTATION_PLAN.md (Phase 8 status). Single-task results
+    are in [BENCHMARK.md](BENCHMARK.md).
+
+    ## Totals
+
+    | Mode | Verified | Cost | Wall time | Decisions | User file intact |
+    |---|---|---|---|---|---|
+    #{totals}
+
+    ## Runs
+
+    | Run | Mode | Verified | Cost | Time | Plan | User file | Outcome |
+    |---|---|---|---|---|---|---|---|
+    #{rows}
+    """
+  end
+
+  defp mode_name(:bm_goal), do: "BM planner"
   defp mode_name(:plain_pi), do: "plain pi"
   defp mode_name(:bm), do: "BM"
 

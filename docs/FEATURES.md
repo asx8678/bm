@@ -101,6 +101,11 @@ exactly in 11/11 runs; plain pi overwrote the user's dirty file 3/3, BM 0/3.
 | C8 | **Run page with plan**: goal form, planner transcript, task list with dependencies and states | M | 8 |
 | C9 | **Benchmark**: plain pi vs BM planner on multi-step goals touching user-owned files | S | 8 |
 
+**Status: done (2026-09-30).** Gate passed live (plan 8.2); goals benchmark in
+[BENCHMARK_GOALS.md](BENCHMARK_GOALS.md). Decision: parallel read-only workers are not next;
+cutting per-goal overhead is (warm worker reuse; no final planner turn when the plan is closed
+and every task was accepted).
+
 **Exit gate:** cancelled or invalid planner output never causes writes; a planner that writes
 holds the run; duplicate deliveries have one effect; a run finishes only when the plan is closed
 and all tasks are terminal; a BEAM restart during planning leaves the run paused, not retried;

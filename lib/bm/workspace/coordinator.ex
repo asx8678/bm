@@ -254,6 +254,11 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:run_task, %{task_id: _}}, _from, %{run: nil} = state),
     do: {:reply, {:error, :run_not_active}, state}
 
+  # A goal run's tasks come from its planner only.
+  def handle_call({:run_task, attrs}, _from, %{run: %{planner: %{}}} = state)
+      when not is_map_key(attrs, :task_id),
+      do: {:reply, {:error, :goal_run_active}, state}
+
   def handle_call({:start_goal, _attrs, _opts}, _from, %{lane: lane} = state) when lane != :free,
     do: {:reply, {:error, :lane_busy}, state}
 

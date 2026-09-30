@@ -170,6 +170,9 @@ defmodule BmWeb.HomeLive do
   # Turns a start error into a message for one form field.
   def explain(:no_goal, _path), do: {:goal, "Describe the task."}
 
+  def explain(:goal_run_active, _path),
+    do: {:path, "A planner run is active in this workspace; its planner chooses the tasks."}
+
   def explain(:workspace_busy, _path),
     do: {:path, "This workspace has an unfinished run; finish it (or let it finish) first."}
 

@@ -360,7 +360,10 @@ may have changed files is never retried automatically.
   (planner session, scheduling, deliveries, limits, completion), goal runs through
   `Coordinator.start_goal/3`, task checks, dependency context for workers, planner recovery.
 
-**Not implemented yet:** the plan UI and the milestone C gate (Phase 8).
+- Plan UI (Phase 8): goal form, planner panel, task list; milestone C gate passed live;
+  `mix bm.bench --goals` (docs/BENCHMARK_GOALS.md).
+
+Core (milestones A–C) is complete. Everything else is optional (FEATURES.md).
 A7 (replay fixtures) is optional (D17).
 
 ---
