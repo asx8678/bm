@@ -89,6 +89,13 @@ defmodule BmWeb.Api.RunController do
         conn,
         Map.merge(run_summary(conn, run), %{
           plan_open: run.plan_open,
+          # An attempt left changes that wait for the user's Keep or Revert (plan 16.2).
+          waiting_for_you:
+            run.status in [:active, :paused] and
+              Enum.any?(
+                tasks,
+                &(&1.attempt && &1.attempt.status in [:held, :needs_reconciliation])
+              ),
           summary: run.planner && run.planner["summary"],
           tasks: tasks
         })

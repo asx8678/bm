@@ -911,6 +911,13 @@ defmodule Bm.Workspace.Planner do
 
     if delta > 0 or unknown_delta > 0 do
       run = Runs.add_spend(Runs.get_run!(state.run_id), max(delta, 0.0), max(unknown_delta, 0))
+
+      # The planner's own share of the run's spend, across sessions (plan 16.1).
+      {:ok, run} =
+        Runs.update_run(run, %{
+          planner: Map.update(run.planner, "spend", max(delta, 0.0), &(&1 + max(delta, 0.0)))
+        })
+
       broadcast_run(state, run)
       state = %{state | spend_seen: %{confirmed: confirmed, unknown: unknown}}
 

@@ -71,6 +71,34 @@ defmodule BmWeb.RunLive do
 
   defp pruned?(_run, _root, _attempts), do: false
 
+  ## Notifications (plan 16.2)
+
+  # The page asks the browser to notify (and marks the tab title) when a run needs the user.
+  defp notify_if_ended(socket, %{status: :active}, %{status: status} = run)
+       when status in [:done, :failed, :cancelled, :paused] do
+    verb = if status == :paused, do: "paused", else: to_string(status)
+
+    push_event(socket, "bm:notify", %{
+      title: "#{label(run)} #{verb}",
+      body: run.status_reason || String.slice(run.goal, 0, 120)
+    })
+  end
+
+  defp notify_if_ended(socket, _before, _after), do: socket
+
+  defp notify_if_held(socket, {:held, _} = lane, attempt) do
+    if socket.assigns.lane != lane do
+      push_event(socket, "bm:notify", %{
+        title: "#{label(socket.assigns.run)} needs your decision",
+        body: attempt.error || "An attempt left changes BM could not accept: Keep or Revert."
+      })
+    else
+      socket
+    end
+  end
+
+  defp notify_if_held(socket, _lane, _attempt), do: socket
+
   ## Live activity (canvas and action bar)
 
   # Watches the planner's pi session and the running worker's, if any.
@@ -208,6 +236,8 @@ defmodule BmWeb.RunLive do
     if task.run_id == socket.assigns.run.id do
       attempt = %{attempt | task: task}
 
+      socket = notify_if_held(socket, lane, attempt)
+
       {:noreply,
        socket
        |> assign(lane: lane, latest: attempt, run: reload(socket.assigns.run))
@@ -259,6 +289,7 @@ defmodule BmWeb.RunLive do
       ) do
     run = %{run | workspace: socket.assigns.run.workspace}
     lane = if run.status in [:active, :paused], do: socket.assigns.lane, else: :finished
+    socket = notify_if_ended(socket, socket.assigns.run, run)
 
     socket =
       if run.planner != nil and run.status != :active,
@@ -510,12 +541,56 @@ defmodule BmWeb.RunLive do
               {String.capitalize(@run.status_reason)}.
             </p>
           </div>
+          <div
+            id="run-notify"
+            phx-hook=".Notify"
+            phx-update="ignore"
+            class="flex flex-none items-center"
+          >
+            <button
+              type="button"
+              data-role="enable"
+              hidden
+              class="rounded-md border border-bm-line px-2 py-1 text-[11px] text-bm-muted transition-colors hover:bg-bm-raised hover:text-bm-text"
+            >
+              Notify me
+            </button>
+          </div>
+          <script :type={Phoenix.LiveView.ColocatedHook} name=".Notify">
+            export default {
+              mounted() {
+                const button = this.el.querySelector("[data-role=enable]")
+                const supported = "Notification" in window
+                const show = () => { button.hidden = !supported || Notification.permission !== "default" }
+                show()
+                button.addEventListener("click", () => Notification.requestPermission().then(show))
+                this.baseTitle = document.title
+                const clear = () => { if (document.title.startsWith("● ")) document.title = document.title.slice(2) }
+                window.addEventListener("focus", clear)
+                document.addEventListener("visibilitychange", () => { if (!document.hidden) clear() })
+                this.handleEvent("bm:notify", ({title, body}) => {
+                  if (document.hasFocus()) return
+                  if (!document.title.startsWith("● ")) document.title = "● " + document.title
+                  if (supported && Notification.permission === "granted") new Notification(title, {body})
+                })
+              }
+            }
+          </script>
           <dl id="run-spend" class="text-right">
             <dt class="text-[11px] text-bm-muted">Spent</dt>
             <dd class="font-mono text-sm tabular-nums">
               {money(@run.spent_usd)}<span :if={@run.budget_usd} class="text-bm-muted"> / {money(
                 @run.budget_usd
               )}</span>
+            </dd>
+            <dd
+              :if={@goal_run? and is_number(@run.planner["spend"])}
+              id="spend-split"
+              class="text-[11px] text-bm-muted"
+            >
+              planner {money(@run.planner["spend"])} · work and review {money(
+                max(@run.spent_usd - @run.planner["spend"], 0.0)
+              )}
             </dd>
             <dd :if={@run.spent_unknown > 0} class="text-[11px] text-bm-run">
               + {@run.spent_unknown} without a cost

@@ -110,15 +110,18 @@ defmodule Bm.Prompts do
     #{goal}
     #{files_section(context[:files])}
     How BM works:
-    - Look around first (read, grep, find, ls, and read-only bash such as tests or git log).
-      You cannot change files yourself; BM refuses writes and pauses the run if files change.
+    - Look around only as much as the plan needs (read, grep, find, ls, read-only bash such as
+      git log). You cannot change files yourself; BM refuses writes and pauses the run if files
+      change. Reading costs time and money: don't survey the whole repository.
     - Propose the whole plan in ONE propose_plan call, tasks in dependency order, and pass
       close_summary if the plan is complete: that also closes it. BM validates every task and
       answers per task; fix a rejected task with propose_task, then call close_plan.
     - Each task is done by a separate worker that sees only that task and short summaries of
       the tasks it depends on, never this conversation. Make every goal self-contained.
-    - Tasks run one at a time, in order of `depends_on`. Keep tasks small; one to four tasks
-      are enough for most goals.
+    - Use as few tasks as the goal needs (often one); split only where one part must exist
+      before another is written. Tasks run one at a time, in order of `depends_on`.
+    - Every task must change files. Don't plan tasks that only run a build or tests: put that
+      command in the `check` of the task that changes the code instead.
     - `writes` must list every file the task creates or changes (required when mutates is
       true). Never plan changes to these files with the user's uncommitted work:
     #{user_owned(context.user_owned)}
@@ -129,13 +132,13 @@ defmodule Bm.Prompts do
       as plain shell, prefer running a test the task itself adds, and never hard-code an
       expected value you have not worked out exactly. (A failing verify command, by contrast,
       stops the run until the user decides.)
-    - Once the plan is closed (close_summary or close_plan), BM runs the tasks. A worker may
-      ask you one question about an unclear task; then just answer it briefly.
+    - Once the plan is closed (close_summary or close_plan), BM runs the tasks. It comes back to
+      you only if a task fails, is blocked, or changes something unexpected; if every task
+      succeeds, the run finishes. So close the plan only when it is complete.
+    - A worker may ask you one question about an unclear task; then just answer it briefly.
     - If the goal can't be reached at all (for example it needs a file with the user's
       uncommitted work), propose nothing and call close_plan with blocked: true and the reason.
-      Use blocked: false with no tasks only when the goal is already met. It comes back to you only if a task fails, is blocked, or changes
-      something unexpected; if every task succeeds, the run finishes. So close the plan only
-      when it is complete.
+      Use blocked: false with no tasks only when the goal is already met.
     """
   end
 
