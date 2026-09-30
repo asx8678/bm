@@ -92,8 +92,14 @@ defmodule Bm.Prompts do
     - Reject only for concrete problems: the change does not do the task or does only part of
       it, it is clearly broken, or it changes files the task has no reason to touch. Not for
       style, naming or taste.
-    - You may read files for context. Do not run the project's test suite or the verify command;
-      they already ran.
+    - Probe the edge cases (plan 18.1). Work out the contract the task states or implies (limits,
+      ranges, formats, "at most", "never", error cases), then try the changed code on its
+      boundary inputs with short one-off commands that only print, for example
+      `node -e`, `python3 -c` or `mix run -e`: empty input, zero, negative numbers, the exact
+      limit and one past it, very large values, unusual characters. If one breaks the contract,
+      reject and give the exact input, what it returned and what the contract requires.
+    - Don't change, create or delete files (BM holds the attempt if you do), and don't run the
+      project's test suite or the verify command; they already ran.
     - Finish by calling submit_result exactly once: status "done" to approve, "failed" to reject.
       In the summary give the reason in one to three sentences (for a rejection: what is wrong
       and where).
@@ -125,6 +131,9 @@ defmodule Bm.Prompts do
       before another is written. Tasks run one at a time, in order of `depends_on`.
     - Every task must change files. Don't plan tasks that only run a build or tests: put that
       command in the `check` of the task that changes the code instead.
+    - When a task adds or changes code with a contract (limits, ranges, formats, error cases),
+      name its boundary cases in done_when (empty, zero, negative, the exact limit, one past it)
+      and ask for tests that cover them.
     - `writes` must list every file the task creates or changes (required when mutates is
       true). Never plan changes to these files with the user's uncommitted work:
     #{user_owned(context.user_owned)}

@@ -1297,10 +1297,14 @@ defmodule BmWeb.RunLive do
 
   defp review_label(%{"verdict" => "approve"}), do: "review approved"
   defp review_label(%{"verdict" => "reject"}), do: "review rejected"
+  defp review_label(%{"verdict" => "invalid"}), do: "reviewer changed files"
   defp review_label(_review), do: "not reviewed"
 
   defp review_tone(%{"verdict" => "approve"}), do: "text-bm-idle"
-  defp review_tone(%{"verdict" => "reject"}), do: "text-bm-error"
+
+  defp review_tone(%{"verdict" => verdict}) when verdict in ["reject", "invalid"],
+    do: "text-bm-error"
+
   defp review_tone(_review), do: "text-bm-muted"
 
   defp terminal?(status),
@@ -1350,6 +1354,9 @@ defmodule BmWeb.RunLive do
   defp flag_help("leftover_processes"), do: "Left processes running; BM ended them"
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
+
+  defp flag_help("reviewer_wrote"),
+    do: "The reviewer changed files while probing; BM held the attempt for your decision"
 
   defp flag_help("not_reviewed"),
     do: "The reviewer could not run; verification passed, so the change was accepted unreviewed"

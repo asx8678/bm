@@ -1741,6 +1741,50 @@ defmodule Bm.Workspace.Coordinator do
     {verify, changes, _agent_id} = state.pending_review
     state = %{state | pending_review: nil}
 
+    # The reviewer runs commands to probe edge cases (18.1); it must not change files.
+    case reviewer_writes(state, changes) do
+      [] ->
+        review_outcome(state, verify, changes, result)
+
+      paths ->
+        state = add_review_spend(state, review_cost(result))
+
+        review = %{
+          "verdict" => "invalid",
+          "reason" => "the reviewer changed files: #{Enum.join(paths, ", ")}"
+        }
+
+        flags = Map.get(changes, :flags, Runs.get_attempt!(state.attempt.id).flags)
+
+        finish(
+          state,
+          :held,
+          Map.merge(changes, %{
+            verify: Map.put(verify, "review", review),
+            flags: flags ++ ["reviewer_wrote"],
+            error: "the reviewer changed files it must not: #{Enum.join(paths, ", ")}"
+          })
+        )
+    end
+  end
+
+  defp review_cost({:ok, %{cost: cost}}), do: cost
+  defp review_cost(_result), do: 0.0
+
+  # Paths that differ between the tree the reviewer was shown and the workspace now.
+  defp reviewer_writes(state, changes) do
+    reviewed = Map.get(changes, :tree_after) || Runs.get_attempt!(state.attempt.id).tree_after
+
+    with true <- is_binary(reviewed),
+         {:ok, tree} <- Git.snapshot(state.root),
+         {:ok, entries} <- Git.diff(state.root, reviewed, tree) do
+      Enum.map(entries, & &1.path)
+    else
+      _ -> []
+    end
+  end
+
+  defp review_outcome(state, verify, changes, result) do
     case result do
       {:ok, %{verdict: verdict, reason: reason, cost: cost}} ->
         state = add_review_spend(state, cost)
