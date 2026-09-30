@@ -334,7 +334,8 @@ may have changed files is never retried automatically.
 (not failed). A goal run that was active resumes planning by itself after the restart when its lane
 is free, its budget is not spent, it resumed this way fewer than 3 times and `auto_resume` is on;
 otherwise it stays paused with the reason. `mix bm.goal` waits up to 2 minutes for a restarting
-server instead of giving up.
+server instead of giving up. A run resumed with its plan closed takes no planner turn; the goal,
+repository and tasks so far go ahead of the new session's first turn instead (plan 22.1).
 
 **Optional.** Resume attempts in place, and reconcile against the last checkpoint automatically.
 

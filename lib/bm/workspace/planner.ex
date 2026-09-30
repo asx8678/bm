@@ -155,6 +155,9 @@ defmodule Bm.Workspace.Planner do
       rejections: 0,
       counted: MapSet.new(),
       reminded?: false,
+      # Resumed with the plan closed, without a turn (plan 22.1): the first turn carries the
+      # run's context.
+      context_pending?: false,
       plan_timer: nil,
       aborting?: false,
       # Set when a limit is hit during a turn: the run fails once the planner is idle.
@@ -327,12 +330,26 @@ defmodule Bm.Workspace.Planner do
     state = %{state | assignment: %{session_epoch: summary.session_epoch}}
     context = prompt_context(run, state.root)
 
-    text =
-      if state.resume?,
-        do: Bm.Prompts.planner_resume(run.goal, context, Runs.latest_tasks(run)),
-        else: state.config.prompt.(run.goal, context)
+    cond do
+      # A closed plan needs no turn to resume: the queued tasks run now (plan 22.1).
+      state.resume? and not run.plan_open ->
+        log(
+          state,
+          "note",
+          "Resumed without a planner turn: the plan is closed, so the queued tasks run now. " <>
+            "The planner is asked only if a result or a question needs it."
+        )
 
-    begin_turn(state, :prompt, text)
+        send(self(), :advance)
+        {:noreply, broadcast(%{state | phase: :idle, context_pending?: true})}
+
+      state.resume? ->
+        text = Bm.Prompts.planner_resume(run.goal, context, Runs.latest_tasks(run))
+        begin_turn(state, :prompt, text)
+
+      true ->
+        begin_turn(state, :prompt, state.config.prompt.(run.goal, context))
+    end
   end
 
   defp job_done(state, :start, error) do
@@ -378,13 +395,27 @@ defmodule Bm.Workspace.Planner do
 
   ## Turns
 
-  defp begin_turn(state, kind, text) do
+  # The first turn of a session resumed without one (plan 22.1) starts with the run's context.
+  # The log keeps the turn's own text; the context would fill its entry.
+  defp begin_turn(%{context_pending?: true} = state, kind, text) do
+    run = Runs.get_run!(state.run_id)
+    context = prompt_context(run, state.root)
+    resumed = Bm.Prompts.planner_resumed(run.goal, context, Runs.latest_tasks(run))
+    state = %{state | context_pending?: false}
+    log(state, "note", "The run's goal, repository and tasks so far go ahead of this turn.")
+    start_turn(state, kind, resumed <> "\n" <> text, text)
+  end
+
+  defp begin_turn(state, kind, text), do: start_turn(state, kind, text, text)
+
+  # `logged`: what the planner log keeps of `text`.
+  defp start_turn(state, kind, text, logged) do
     case Git.snapshot(state.root) do
       {:ok, tree} ->
         turn = state.turn + 1
         state = %{state | turn: turn, turn_tree: tree, phase: :busy, seen_running?: false}
         state = cancel_plan_timer(state)
-        log(state, kind_label(kind), text)
+        log(state, kind_label(kind), logged)
         Process.send_after(self(), {:turn_timeout, turn}, state.config.turn_timeout)
 
         case Bm.Pi.prompt(state.agent_id, text) do

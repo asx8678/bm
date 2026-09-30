@@ -122,6 +122,7 @@ attempt was running, then started again.
 |---|---|---|---|---|
 | 104 | `capitalize(text)` | ≈2 s | attempt 142 interrupted with no changes → task queued; planning resumed by itself (1 of 3); attempt 143 accepted, review approved; done | $0.073 |
 | 105 | `reverseWords(text)` | 7 s | same; `mix bm.goal` waited ("BM does not answer…", "BM answers again.") and followed the run to done | $0.040 |
+| 108 | `countVowels(text)` (plan 22.1) | ≈4 s | same, and no planner turn after the resume (planner $0.013 instead of ≈$0.028) | $0.052 |
 
-Both changes checked by hand (tests 50 and 56, own probes); run 104 committed in the clone.
+All three changes checked by hand (tests 50, 56 and 63, own probes); runs 104 and 105 committed in the clone.
 

@@ -1299,3 +1299,38 @@ runs are unchanged: an interrupted task fails and the user runs it again.
 
 **Status: Phase 21 done (2026-09-30).** Not done: a resumed run whose plan was already closed still
 spends one planner turn before its queued task runs (≈$0.014 in each of runs 104 and 105).
+
+---
+
+## Phase 22: a cheaper resume
+
+Chosen by the user 2026-09-30 after Phase 21. No tests (user's instruction).
+
+**22.1 No planner turn to resume a closed plan.** A run that resumes (by itself or by the user)
+with its plan already closed starts its new planner session without a turn: the scheduler runs
+the queued task straight away (runs 104 and 105 each spent ≈$0.014 on a turn that only restated
+the closed plan). If a later result or a worker's question needs the planner, that first turn
+carries the goal, the repository context and the tasks so far ahead of its own text, so the new
+session knows the run. A plan that was still open resumes with its turn as before.
+
+**22.2 Scratch runs finished.** Runs 80, 83 and 100–103 (BM's own checks in temporary
+repositories, left paused) were finished as cancelled, with a reason saying so.
+
+**Status 22.1 (2026-09-30).** `Bm.Prompts.planner_resume/3` (still used for an open plan) splits
+into `planner_resumed/3` (goal, repository, tasks so far) plus the instruction to continue; a planner started with `resume: true`
+on a closed plan logs a note, goes idle and schedules at once, and its first later turn sends
+`planner_resumed/3` ahead of its own text (the log keeps the turn's text and a note, since
+entries are cut at 2,000 characters). Checked with the fake pi across two BEAMs (run 107): no turn
+after the resume, the queued task ran again, its failure reached the planner with the context
+first (the fake planner's echo starts with "You are the BM planner"), the reminder after it
+without. Live (run 108, sandbox clone, dev server restarted while the worker ran): no planner turn
+after the resume, the task was accepted, review approved, run done by D22; planner spend $0.013
+(runs 104 and 105, before: $0.028 with the extra turn); total $0.052.
+Also affected: the run page's Resume planning on a closed plan now takes no turn either. Not
+seen with the real model: a later turn carrying the context (run 108 needed none; only the fake
+pi, which echoes, went through it).
+
+**Status 22.2 (2026-09-30).** Done (`Runs.finish_run/3`, reason "scratch run from BM's own checks
+(temporary repository); finished"); no unfinished runs are left.
+
+**Status: Phase 22 done (2026-09-30).**

@@ -229,6 +229,19 @@ defmodule Bm.Prompts do
 
   @doc "The prompt of a new planner session that resumes a paused goal run."
   def planner_resume(goal, context, tasks) do
+    planner_resumed(goal, context, tasks) <>
+      """
+      Continue from here: propose what is still missing (or re-propose a task that did not
+      succeed, once), then call close_plan.
+      """
+  end
+
+  @doc """
+  What a resumed planner session needs to know: the planner prompt and the tasks so far. A run
+  resumed with its plan closed takes no turn (plan 22.1); this goes ahead of the session's first
+  results or question instead.
+  """
+  def planner_resumed(goal, context, tasks) do
     done =
       case tasks do
         [] ->
@@ -245,8 +258,6 @@ defmodule Bm.Prompts do
 
       This run was interrupted and is resumed in a new session. Tasks so far:
       #{done}
-      Continue from here: propose what is still missing (or re-propose a task that did not
-      succeed, once), then call close_plan.
       """
   end
 
