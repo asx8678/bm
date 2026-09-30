@@ -1629,3 +1629,31 @@ t1 cancelled, t2 blocked. Missed by the reviewer: `mix bm.undo`'s moduledoc cite
 **Status: Phase 28 done (2026-09-30).** Three goals, all accepted, $1.05. The clone
 `/tmp/bm-trial-28` holds them as commits on top of the real repository's phase-28 branch; they
 reach the real repository only if the user asks.
+
+---
+
+## Benchmark refresh (2026-09-30, after Phase 28)
+
+The user ran `mix bm.bench --goals` on the current code (BENCHMARK_GOALS.md; the single-task
+benchmark was not re-run). Same three goals, three runs per mode, zro/glm-5.3:
+
+| | Plain pi | BM, Phase 8 | BM now |
+|---|---|---|---|
+| Verified | 9 / 9 | 9 / 9 | 6 / 9 |
+| Cost | $0.132 | $0.597 | $0.330 |
+| Wall time | 84 s | 356 s | 205 s |
+| User's uncommitted file intact | 0 / 3 | 3 / 3 | 3 / 3 |
+
+- BM costs 45 % less and takes 42 % less time than in Phase 8: ≈2.5× plain pi's cost and 2.4× its
+  time, down from ≈5×. The planner now plans these small goals as one task and needs no closing
+  turn (Phases 9 and 22).
+- `shapes` and `calc_cli`: BM verified 6 / 6 ($0.03–0.06, 17–46 s each).
+- `text_tools` needs `text.py`, which holds the user's uncommitted edit. BM's planner refused all
+  three times ("the goal requires modifying text.py … but text.py contains the user's uncommitted
+  changes") and left the file intact: the intended outcome (F1/F3 in Phase 11/14). In Phase 8 BM
+  was counted verified there by putting the work into a new file the goal's check accepted.
+  Plain pi finished it every time by changing the user's file.
+- The report's header no longer says "plan step 8.3"; benchmark fixtures get time-based names and
+  never reuse a leftover folder (`System.unique_integer` restarts in each new BEAM, and a stopped
+  run leaves its folder behind; one from the stopped Phase 9 run was still there).
+
