@@ -5,7 +5,8 @@ defmodule BmWeb.Api.RunController do
   shows them live.
 
     * `POST /api/goals` — `repo`, `goal`, optional `verify_command`, `budget_usd` → the run
-    * `GET /api/runs` — recent runs (`limit`, default 20)
+    * `GET /api/runs` — recent runs (`limit`, default 20), optionally filtered by status via
+      `status` (`active`, `paused`, `done`, `failed` or `cancelled`)
     * `GET /api/runs/:id` — one run with its tasks and their latest attempts
     * `POST /api/runs/:id/commit` — commit the run's accepted changes (plan 15.1, D26)
     * `POST /api/runs/:id/keep`, `/revert`, `/cancel` — the run page's Keep, Revert and Stop,
@@ -61,8 +62,28 @@ defmodule BmWeb.Api.RunController do
         _ -> 20
       end
 
-    {runs, _more?} = Runs.search_runs(params["q"] || "", nil, limit)
-    json(conn, %{runs: Enum.map(runs, &run_summary(conn, &1))})
+    with {:ok, status} <- parse_status(params["status"]) do
+      {runs, _more?} = Runs.search_runs(params["q"] || "", status, limit)
+      json(conn, %{runs: Enum.map(runs, &run_summary(conn, &1))})
+    else
+      {:error, message} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: message})
+    end
+  end
+
+  defp parse_status(status) do
+    case blank_to_nil(status) do
+      nil ->
+        {:ok, nil}
+
+      status when status in ~w(active paused done failed cancelled) ->
+        {:ok, String.to_existing_atom(status)}
+
+      _ ->
+        {:error, "Unknown status. Allowed: active, paused, done, failed, cancelled."}
+    end
   end
 
   def show(conn, %{"id" => id}) do
