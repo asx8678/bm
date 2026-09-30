@@ -484,7 +484,12 @@ defmodule BmWeb.RunLive do
   def handle_event("pause", _params, socket) do
     case Coordinator.pause_by_user(socket.assigns.root, socket.assigns.run.id) do
       {:ok, _run} ->
-        {:noreply, put_flash(socket, :info, "Paused. The planner stopped; nothing new starts.")}
+        {:noreply,
+         put_flash(
+           socket,
+           :info,
+           "Paused. The planner stopped; a running attempt finishes, nothing new starts."
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Not paused: #{explain_action(reason)}")}
@@ -967,6 +972,17 @@ defmodule BmWeb.RunLive do
                 {activity_text(@worker_tool)}
               </span>
             </p>
+            <%!-- Pause a goal run while its attempt runs (plan 26.4): the planner stops now and
+                 the attempt finishes first; nothing new starts. --%>
+            <.action
+              :if={@goal_run? and @run.status == :active}
+              id="pause-run-btn"
+              event="pause"
+              style={:secondary}
+              disable_with="Pausing…"
+            >
+              Pause
+            </.action>
             <.action id="stop-btn" event="stop" style={:secondary} disable_with="Stopping…">
               Stop
             </.action>

@@ -126,3 +126,16 @@ attempt was running, then started again.
 
 All three changes checked by hand (tests 50, 56 and 63, own probes); runs 104 and 105 committed in the clone.
 
+## Live checks of Phases 23–25 (plan 26, 2026-09-30)
+
+Throwaway clones of the sandbox (`/tmp/bm-sandbox-26a` … `26d`), real planner, workers and reviewer.
+
+| Run | What | Outcome | Cost |
+|---|---|---|---|
+| 132 | Normal goal (`pad` function, `pad` CLI), default settings | 2 tasks accepted, no steer, no supervisor pause, no silence stop | $0.150 |
+| 133 | Pause while task 1 runs, Undo it, Resume (clicked in Chrome) | planner re-proposed the undone task ("the goal still needs it"); run done | $0.143 |
+| 134 | Refactor needing reading, no-progress limit 15 s | wrote at ≈10 s; no steer (not provoked) | $0.032 |
+| 135 | Same, limit 4 s | steered after 4 tool calls; next actions were the write and edits; accepted | $0.023 |
+
+Found and fixed: Pause was offered only while no attempt ran (plan 26.4).
+

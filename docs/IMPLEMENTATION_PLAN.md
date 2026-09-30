@@ -1477,3 +1477,59 @@ through the real page in headless Chrome and the real API). Worth watching in re
 real worker heeds a steer, and a real extension's dialog (no BM profile loads one that asks yet).
 
 **Status: Phase 25 done (2026-09-30). Phases 23–25 done.**
+
+---
+
+## Phase 26: live checks of Phases 23–25
+
+Started 2026-09-30 on the user's "start working on next" without a named repository (the trial on
+a project of the user's still waits for one). Phases 23–25 were checked with the fake pi only (see
+the Phase 25 notes); this phase runs them with the real model on throwaway clones of the sandbox
+in /tmp (the sandbox itself is not touched). No tests (user's instruction).
+
+**26.1 Nothing misfires on a normal run.** A goal with two or three tasks, default settings, through
+the dev server and `mix bm.goal`. Passes if the outcome is as before Phases 23–25: no steer, no
+supervisor pause, no planner or review turn stopped for silence.
+
+**26.2 Undo during a run with the real planner.** Pause after the first task is accepted, undo it,
+Resume. Recorded: what the real planner does with "undone by the user; propose it again only if
+the goal still needs it".
+
+**26.3 A real worker gets a steer.** A scratch BEAM with the real pi and low no-progress thresholds
+(≈20 s, 3 tool calls) on a task that needs some reading first. Passes if, after the steer, the
+worker changes a file or submits blocked; if it changes a file before the threshold, the steer was
+not provoked and the thresholds are noted as sane.
+
+Left out: the approval inbox (no BM profile loads an extension that asks the user anything).
+Anything to fix goes into 26.4.
+
+**26.4 Pause while an attempt runs.** Found while planning 26.2: the Pause button (23.1) showed only
+when no attempt ran, which in a goal run is rarely: the next task starts as soon as one ends. The
+coordinator already allowed it (the planner stops, the attempt finishes). The run page now offers
+Pause next to Stop while a goal run's attempt runs.
+
+**Status 26.1 (2026-09-30).** Run 132 on `/tmp/bm-sandbox-26a` (`mix bm.goal`, dev server, default
+settings): `pad(text, width, align)` then a `pad` CLI command, 2 tasks, both reviews approved, no
+steer, no supervisor pause, no silence stop, ended without a closing planner turn; $0.150. Checked
+by hand: 59 tests pass, left/right/center padding right, the CLI's bad widths refused. Noted: the
+worker defaults `align` to left only when it is left out; an explicit `undefined` throws (allowed
+by "otherwise throw a RangeError", unusual for JavaScript).
+
+**Status 26.2 (2026-09-30).** Run 133 on `/tmp/bm-sandbox-26b`, real planner and worker, the site
+served on port 4011 from a scratch BEAM and clicked in headless Chrome: Pause while task 1's worker
+ran (26.4) → paused, task 2 not started; task 1 accepted after; Undo this task (confirmation
+accepted) → undone; Resume planning → no planner turn, then the task's results with the run's
+context first. The real planner re-proposed the task: "it was previously cancelled and reverted,
+so the goal still needs it" (the goal does ask for it); revision 2 and then the CLI task were
+accepted, run done; $0.143; 55 tests pass.
+
+**Status 26.3 (2026-09-30).** Single-task runs on fresh clones, a refactor that needs reading first
+(shared integer validation for `truncate.js`, `wrap.js` and the CLI). Run 134 (thresholds 15 s / 3
+calls): the worker read three files, wrote at ≈10 s, accepted in 17 s; no steer (not provoked:
+real work is far below the 6-minute default). Run 135 (4 s / 2 calls): after 4 tool calls the
+transcript shows "BM told the worker: After 4 seconds and 4 tool calls this attempt has changed no
+file…"; the worker's next actions were the write and the three edits; accepted in 11 s, not
+cancelled. $0.032 and $0.023.
+
+**Status: Phase 26 done (2026-09-30).** Total live cost $0.35. The approval inbox is still seen with
+the fake pi only (no real extension asks).
