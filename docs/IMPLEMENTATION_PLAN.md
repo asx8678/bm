@@ -1050,17 +1050,17 @@ checked by scratch scripts and live runs only.
 **Status: Phase 15 done except 15.3** (a trial on a project of the user's, waiting for the
 repository and its verify command).
 
-**Status 15.3 (2026-09-30); Phase 15 done.** Trial on the user's `kiro-fabric` (docs/TRIALS.md):
-two goals done ($0.055 from the terminal, $0.43 via the web page with Review goal), both correct
-and verified by hand in the clone. Found and fixed F4: a task that changed nothing but has a check
-now runs that check (and fails if it fails) instead of being accepted unchecked.
+**Status 15.3 (2026-09-30); Phase 15 done.** A trial on a second repository was run and later
+removed at the user's request (the repository was not one the user had chosen). It led to fix F4:
+a task that changed nothing but has a check now runs that check (and fails if it fails) instead
+of being accepted unchecked; checked with the fake pi (`true` → accepted, `exit 3` → failed).
 
 ---
 
 ## Phase 16: planner quality and notifications
 
-Scoped 2026-09-30 from the kiro-fabric trial (a build-only task; the planner's share of cost).
-No tests (user's instruction); checked with a live goal on the kiro-fabric clone.
+Scoped 2026-09-30 from trial findings (a build-only task; the planner's share of cost).
+No tests (user's instruction); checked with a live goal on a trial clone (since removed).
 
 **16.1 Planner quality.** The planner's rule list was rewritten: an earlier edit had spliced the
 "BM comes back only if a task fails…" sentences onto the end of the blocked-goal rule and cut the
@@ -1068,19 +1068,16 @@ start of the "once the plan is closed" rule, so the planner had been reading a g
 rules: read only what the plan needs; as few tasks as the goal needs (often one); every task
 changes files — put build/test commands in the `check` of the task that changes the code. The
 planner's own spend is kept in `run.planner["spend"]`; the run page shows "planner $x · work and
-review $y" under the total. Checked live (run 75, "…with tests, and make sure the project still
-builds"): one task, the build folded into its check (`pnpm run build && pnpm vitest run
-tests/bounded-search.test.ts`), review approved; $0.058 = planner $0.0285, review $0.0099, worker
-≈$0.02.
+review $y" under the total. Checked live: one task, the build folded into its check, review approved; $0.058 = planner
+$0.0285, review $0.0099, worker ≈$0.02.
 
 **16.2 Notifications.** Run page: a colocated `.Notify` hook with a "Notify me" button (asks the
 browser's permission); when the run ends, pauses, or an attempt waits for the user's decision
 while the page is not focused, the tab title gets "● " (removed on focus) and, with permission, a
 browser notification is shown. API: `waiting_for_you` on a run. `mix bm.goal`: terminal bell and a
-line when the run ends, pauses, or waits for a decision. Checked: during run 75 the open page's
-title became "● BM-75 · …" at the end and the button was there (permission undecided in the
-headless browser, so no notification was shown); the terminal printed the bell before "BM-75
-done". Before the run, runs 71 and 72 were committed in the clone with `mix bm.commit`.
+line when the run ends, pauses, or waits for a decision. Checked: during a live run the open page's title gained "● " at the end and the button was
+there (permission undecided in the headless browser, so no notification was shown); the
+terminal printed the bell before the "done" line.
 
 **Status: Phase 16 done (2026-09-30).**
 
@@ -1088,10 +1085,16 @@ done". Before the run, runs 71 and 72 were committed in the clone with `mix bm.c
 
 ## Phase 17: first real use
 
-Started 2026-09-30 (branch `phase-17`) on the user's real `~/projects/kiro-fabric` (the default
-proposed; `factory` is being worked on, `triagee` has uncommitted work).
+Started 2026-09-30 (branch `phase-17`). The first goal ran on a repository the user had **not**
+chosen; at the user's request everything BM did there was undone (the file restored, BM's
+checkpoint ref and private index removed) and BM's records of it deleted. Rule since then: BM
+works only on a repository the user names.
 
-**17.1 First real goal** (run 76, docs/TRIALS.md): documentation-only, done and approved, left
-uncommitted for the user. Found F5: a worker reinstalled `node_modules` to get a failing build
-check going — outside BM's record. Fixed: dependency-changing commands are refused by the policy
-in every mode; the worker prompt says to report environment problems instead of repairing them.
+**17.1 Finding F5 (fixed):** a worker whose build check failed because `node_modules` was out of
+step with the lockfile ran `pnpm install --frozen-lockfile` to get it going. BM allowed it and
+recorded nothing: git ignores `node_modules`, outside BM's snapshots. Now the policy refuses
+dependency-changing commands in every mode (npm/pnpm/yarn/bun install·add·remove·update,
+pip/uv/poetry/pipenv, bundle/gem, cargo add·install, mix deps.*, go get/install, brew, apt), with
+a reason telling the model to report the task blocked and name the command; builds and tests stay
+allowed. The worker prompt says to report environment problems instead of repairing them.
+Checked by calling the policy on sample commands.
