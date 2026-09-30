@@ -403,6 +403,21 @@ repository and tasks so far go ahead of the new session's first turn instead (pl
 Core (milestones A–C) is complete. Everything else is optional (FEATURES.md).
 A7 (replay fixtures) is optional (D17).
 
+**Since the core (phases 9–26, 2026-09-30; details in IMPLEMENTATION_PLAN.md).** Cheaper goal runs
+(no closing planner turn, `propose_plan`, file list in the first prompt; D22); live canvas, run
+history, per-attempt transcripts, checkpoint pruning; failed task checks revert and re-plan (D23);
+a revert of a whole finished run or one task, and of a task during a paused run (D28); limits
+(repeat-call guard, tool timeout, soft budget; a silent model stops any turn); `ask_planner` (D24);
+goal review in the form; protection of files changed during a run and a freshness check on writes;
+a reviewer before acceptance that probes edge cases and whose commands are shown (D25); a local
+JSON API and the `mix bm.*` terminal commands, including `mix bm.attach`; committing a run on
+request (D26); refusing dependency changes; browser and terminal notifications; resuming after a
+restart (D27); an approval inbox for other extensions' dialogs (D29); a rule-based supervisor
+that steers or stops a worker making no progress and pauses a goal run after repeated failures.
+Real use: the sandbox repository (TRIALS.md). Testing: features after Phase 15 were checked with
+the fake pi, in the browser and in live runs at the user's instruction, not with new tests; the
+test suite last ran in Phase 15.2.
+
 ---
 
 ## 13. Verified facts
