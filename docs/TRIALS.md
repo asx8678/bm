@@ -75,3 +75,27 @@ Verify command: `npx tsc --noEmit && npx tsc --project tsconfig.scripts.json` (�
   command still skipped); a failing check fails it (checked with the fake pi: `true` → accepted,
   `exit 3` → failed with the check's reason).
 - The user's README edit was untouched in both runs; the original repository was never changed.
+
+## First real use: ~/projects/kiro-fabric itself (plan 17, 2026-09-30)
+
+Not a clone: BM worked in the user's real checkout (working tree clean before; `knip` reported
+nothing unused, no TODOs, so the first goal was documentation-only). Verify command: the
+project's typecheck.
+
+| Run | Goal | Tasks | Outcome | Time | Cost |
+|---|---|---|---|---|---|
+| 76 | TSDoc comments on the three exports of `src/async-settlement.ts`, no code changes | 1 | done; check `pnpm run build` passed; review approved | 1 min 23 s | $0.112 (planner $0.026, review $0.013) |
+
+- The change: 15 comment lines added, 0 removed, in the file's `/** … */` style. HEAD untouched,
+  nothing staged; checkpoint `refs/bm/runs/76/1` in the repository. Left uncommitted for the user
+  (Commit / `mix bm.commit BM-76`, or Revert).
+- **F5 (fixed): the worker repaired the environment.** The planner's check `pnpm run build` first
+  failed because pnpm found `node_modules` out of step with the lockfile; the worker then spent a
+  minute on environment commands and ran `CI=true pnpm install --frozen-lockfile`, which reinstalled
+  the user's `node_modules` (lockfile unchanged, so the same locked versions). BM allowed it and
+  recorded nothing: `node_modules` is ignored by git, outside BM's snapshots. `dist/` was rebuilt by
+  the check (expected for a build check). Fixed: the policy refuses dependency-changing commands in
+  every mode (npm/pnpm/yarn/bun install·add·remove·update, pip/uv/poetry/pipenv, bundle/gem,
+  cargo add·install, mix deps.*, go get/install, brew, apt) with a reason telling the model to report
+  the task blocked and name the command; builds and tests stay allowed. The worker prompt says not
+  to repair the environment but to report it. Checked by calling the policy on sample commands.

@@ -35,6 +35,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 14 | Quality gate and terminal use | 14.1–14.3 | reviewer before accepting (D25), local JSON API, `mix bm.*` client |
 | 15 | Daily use | 15.1–15.3 | commit a run's changes on request (D26), one suite run, trial on the user's project |
 | 16 | Planner quality and notifications | 16.1–16.2 | clean planner rules (no build-only tasks, fewer tasks, less reading), planner spend, notifications |
+| 17 | First real use | 17.1– | goals on the user's real repositories, fixes from what they show |
 
 ---
 
@@ -1082,3 +1083,15 @@ headless browser, so no notification was shown); the terminal printed the bell b
 done". Before the run, runs 71 and 72 were committed in the clone with `mix bm.commit`.
 
 **Status: Phase 16 done (2026-09-30).**
+
+---
+
+## Phase 17: first real use
+
+Started 2026-09-30 (branch `phase-17`) on the user's real `~/projects/kiro-fabric` (the default
+proposed; `factory` is being worked on, `triagee` has uncommitted work).
+
+**17.1 First real goal** (run 76, docs/TRIALS.md): documentation-only, done and approved, left
+uncommitted for the user. Found F5: a worker reinstalled `node_modules` to get a failing build
+check going — outside BM's record. Fixed: dependency-changing commands are refused by the policy
+in every mode; the worker prompt says to report environment problems instead of repairing them.

@@ -18,6 +18,9 @@ defmodule Bm.Policy do
   `rm`, `mkdir`, `touch`, `chmod` …) and every git write. The snapshot after the session still
   decides: a read-only session that changed files fails.
 
+  **Dependencies:** commands that install, add, remove or update dependencies are refused in
+  every mode (plan 17.1): they change files git ignores, which BM can neither record nor undo.
+
   **This is a safety net, not a sandbox.** Shell parsing here is approximate: variables, `eval`,
   scripts and interpreters can do anything a permitted command can. Snapshots attribute every
   change afterwards (decision D11), whatever made it.
@@ -35,6 +38,28 @@ defmodule Bm.Policy do
                  rebase reset restore revert rm switch update-index update-ref worktree)
   # Global git options that take a separate value (`git -C dir status`).
   @git_options_with_value ~w(-C -c --git-dir --work-tree --namespace --exec-path)
+
+  # Package managers and the subcommands that install, add, remove or update dependencies.
+  @dependency_tools ~w(npm pnpm yarn bun pip pip3 uv poetry pipenv bundle gem cargo mix go brew apt apt-get)
+  @dependency_subcommands %{
+    "npm" => ~w(install i ci add remove rm uninstall update up upgrade link),
+    "pnpm" => ~w(install i add remove rm uninstall update up upgrade link import),
+    "yarn" => ~w(install add remove upgrade up link),
+    "bun" => ~w(install i add remove rm update link),
+    "pip" => ~w(install uninstall),
+    "pip3" => ~w(install uninstall),
+    "uv" => ~w(add remove sync pip),
+    "poetry" => ~w(install add remove update lock),
+    "pipenv" => ~w(install uninstall update lock sync),
+    "bundle" => ~w(install add remove update),
+    "gem" => ~w(install uninstall update),
+    "cargo" => ~w(add remove install uninstall update),
+    "mix" => ~w(deps.get deps.update deps.unlock deps.clean archive.install),
+    "go" => ~w(get install),
+    "brew" => ~w(install uninstall upgrade update),
+    "apt" => ~w(install remove upgrade update),
+    "apt-get" => ~w(install remove upgrade update)
+  }
 
   @publishing [
     ~w(npm publish),
@@ -188,6 +213,20 @@ defmodule Bm.Policy do
     {:deny, "#{cmd} is not allowed. Work without elevated privileges."}
   end
 
+  # Installing or changing dependencies changes the environment outside what BM records or can
+  # undo (node_modules, deps/, site-packages are ignored by git). Seen in the first real run
+  # (plan 17): a worker ran `pnpm install` to get a failing build going.
+  defp check_command(cmd, args, _ctx) when cmd in @dependency_tools do
+    if dependency_change?(cmd, args) do
+      {:deny,
+       "#{Enum.join([cmd | Enum.take(args, 1)], " ")} changes the project's dependencies or " <>
+         "environment, which BM does not do. If the task needs it, report the task as blocked " <>
+         "and name the command the user should run."}
+    else
+      :allow
+    end
+  end
+
   # Deleting is fine inside the workspace and in temp directories, nowhere else.
   # Deleting is fine inside the workspace (except the user's files) and in temp directories.
   defp check_command("rm", args, ctx), do: check_write_targets(operands(args), ctx)
@@ -231,6 +270,21 @@ defmodule Bm.Policy do
       args,
       &(&1 in ["-i", "--in-place"] or String.starts_with?(&1, ["-i", "--in-place="]))
     )
+  end
+
+  # `yarn` alone installs; otherwise the first non-option argument is the subcommand.
+  defp dependency_change?("yarn", args) do
+    case Enum.reject(args, &String.starts_with?(&1, "-")) do
+      [] -> true
+      [sub | _] -> sub in @dependency_subcommands["yarn"]
+    end
+  end
+
+  defp dependency_change?(cmd, args) do
+    case Enum.reject(args, &String.starts_with?(&1, "-")) do
+      [sub | _] -> sub in Map.get(@dependency_subcommands, cmd, [])
+      [] -> false
+    end
   end
 
   defp check_git(args) do
