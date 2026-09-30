@@ -46,7 +46,7 @@ defmodule Bm.Workspace.Coordinator do
     repeat_refuse: 4,
     repeat_cancel: 6,
     # The review prompt (plan 14.1); tests or scripts can replace it.
-    review_prompt: &Bm.Prompts.reviewer/3,
+    review_prompt: &Bm.Prompts.reviewer/4,
     prompt: &Bm.Prompts.worker/2
   ]
 
@@ -1698,7 +1698,13 @@ defmodule Bm.Workspace.Coordinator do
     if state.run.planner != nil and writes != [] and state.workspace.settings["review"] != false do
       tree_after = Map.get(changes, :tree_after, attempt.tree_after)
       diff = review_diff(state.root, attempt.tree_before, tree_after, writes)
-      prompt = state.config.review_prompt.(state.task, Runs.dependency_context(state.task), diff)
+      deps = Runs.dependency_context(state.task)
+
+      prompt =
+        if is_function(state.config.review_prompt, 4),
+          do: state.config.review_prompt.(state.task, deps, diff, state.run.goal),
+          else: state.config.review_prompt.(state.task, deps, diff)
+
       agent_id = "review-#{attempt.id}"
       root = state.root
       owned = user_owned(state)
@@ -1741,6 +1747,69 @@ defmodule Bm.Workspace.Coordinator do
     {verify, changes, _agent_id} = state.pending_review
     state = %{state | pending_review: nil}
 
+    # The reviewer runs commands to probe edge cases (18.1); it must not change files.
+    case changed_during_review(state, changes) do
+      :unchanged ->
+        review_outcome(state, verify, changes, result)
+
+      {:changed, paths, changes} ->
+        state = add_review_spend(state, review_cost(result))
+        list = Enum.join(paths, ", ")
+        review = %{"verdict" => "invalid", "reason" => "files changed during the review: #{list}"}
+
+        finish(
+          state,
+          :held,
+          Map.merge(changes, %{
+            verify: Map.put(verify, "review", review),
+            error: "files changed during the review (the reviewer must not change files): #{list}"
+          })
+        )
+
+      {:error, reason} ->
+        state = add_review_spend(state, review_cost(result))
+        error = "snapshot after the review failed: #{inspect(reason)}"
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: error}))
+    end
+  end
+
+  defp review_cost({:ok, %{cost: cost}}), do: cost
+  defp review_cost(_result), do: 0.0
+
+  # Compares the workspace with the tree the reviewer was shown. Like the verify command's
+  # changes (reattribute_after_verify), whatever changed becomes part of the attempt, so Keep
+  # checkpoints what is on disk and Revert also undoes the review's changes.
+  defp changed_during_review(state, changes) do
+    attempt = Runs.get_attempt!(state.attempt.id)
+    reviewed = Map.get(changes, :tree_after, attempt.tree_after)
+
+    with true <- is_binary(reviewed) || {:error, :no_reviewed_tree},
+         {:ok, tree} <- Git.snapshot(state.root),
+         {:ok, by_review} <- Git.diff(state.root, reviewed, tree),
+         {:ok, entries} <- Git.diff(state.root, attempt.tree_before, tree) do
+      paths = Enum.map(by_review, & &1.path)
+      owned? = Enum.any?(paths, &(&1 in user_owned(state)))
+
+      flags =
+        Map.get(changes, :flags, attempt.flags)
+        |> Kernel.++(["reviewer_wrote"])
+        |> Kernel.++(if owned?, do: ["user_owned_writes"], else: [])
+
+      if paths == [] do
+        :unchanged
+      else
+        attrs = %{
+          tree_after: tree,
+          actual_writes: Enum.map(entries, &write_entry/1),
+          flags: flags
+        }
+
+        {:changed, paths, Map.merge(changes, attrs)}
+      end
+    end
+  end
+
+  defp review_outcome(state, verify, changes, result) do
     case result do
       {:ok, %{verdict: verdict, reason: reason, cost: cost}} ->
         state = add_review_spend(state, cost)

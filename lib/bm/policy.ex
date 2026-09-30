@@ -22,7 +22,9 @@ defmodule Bm.Policy do
   every mode (plan 17.1): they change files git ignores, which BM can neither record nor undo.
 
   **This is a safety net, not a sandbox.** Shell parsing here is approximate: variables, `eval`,
-  scripts and interpreters can do anything a permitted command can. Snapshots attribute every
+  scripts and interpreters can do anything a permitted command can. Quoted text is an argument
+  (`node -e 'x => x > 0'` writes nothing), except a `sh -c` or `eval` string, which is checked
+  as a command, and double quotes holding `$(` or a backtick. Snapshots attribute every
   change afterwards (decision D11), whatever made it.
   """
 
@@ -165,10 +167,34 @@ defmodule Bm.Policy do
   # Splits a command into simple commands at ; & && || | and newlines, then into words. Quotes
   # are removed; this is deliberately rough (see the moduledoc).
   defp segments(command) do
-    command
-    |> String.split(~r/;|&&|\|\||\||&|\n|\$\(|`|\(|\)/)
+    masked = mask_quotes(command)
+
+    {parts, from} =
+      ~r/;|&&|\|\||\||&|\n|\$\(|`|\(|\)/
+      |> Regex.scan(masked, return: :index)
+      |> Enum.reduce({[], 0}, fn [{at, len}], {parts, from} ->
+        {[binary_part(command, from, at - from) | parts], at + len}
+      end)
+
+    [binary_part(command, from, byte_size(command) - from) | parts]
+    |> Enum.reverse()
     |> Enum.map(&words/1)
     |> Enum.reject(&(&1 == []))
+  end
+
+  # Text in quotes is one word to the shell, not redirections or command separators, so
+  # `node -e 'xs.map(x => x > 0)'` is one command (the reviewer's probes, plan 18, were refused
+  # as writes to `x`). Quoted text is blanked byte for byte, so positions found in the mask cut
+  # the original. Double quotes holding `$(` or a backtick stay visible: the shell runs those.
+  defp mask_quotes(command) do
+    Regex.replace(~r/(?<!\\)"(?:[^"\\]|\\.)*"|(?<!\\)'[^']*'/s, command, fn quoted ->
+      if String.starts_with?(quoted, "\"") and String.contains?(quoted, ["$(", "`"]) do
+        quoted
+      else
+        quote_char = binary_part(quoted, 0, 1)
+        quote_char <> String.duplicate("_", byte_size(quoted) - 2) <> quote_char
+      end
+    end)
   end
 
   defp words(segment) do
@@ -189,6 +215,18 @@ defmodule Bm.Policy do
     do: word in ~w(env command exec time nice nohup builtin) or word =~ ~r/^[A-Za-z_]\w*=/
 
   defp check_command("git", args, _ctx), do: check_git(args)
+
+  # `sh -c "…"` and `eval "…"`: the string is a command of its own (quoted text is otherwise not
+  # looked into, see mask_quotes/1).
+  defp check_command(shell, args, ctx) when shell in ~w(sh bash zsh dash ksh) do
+    case Enum.drop_while(args, &(not (&1 =~ ~r/^-[a-zA-Z]*c[a-zA-Z]*$/))) do
+      [_flag, inner | _] -> authorize("bash", %{"command" => inner}, ctx)
+      _ -> :allow
+    end
+  end
+
+  defp check_command("eval", args, ctx),
+    do: authorize("bash", %{"command" => Enum.join(args, " ")}, ctx)
 
   @write_commands ~w(tee mv cp install ln rm rmdir mkdir touch chmod chown chgrp truncate dd
                      patch rsync unzip tar)
@@ -354,8 +392,10 @@ defmodule Bm.Policy do
   # `>| f`. Duplications like `2>&1` are not files.
   defp redirect_targets(command) do
     ~r/(?:^|[^<>&\d])(?:\d|&)?>>?\|?\s*("[^"]+"|'[^']+'|[^\s;&|<>()]+)/
-    |> Regex.scan(command, capture: :all_but_first)
-    |> Enum.map(fn [target] -> String.trim(target, "\"") |> String.trim("'") end)
+    |> Regex.scan(mask_quotes(command), capture: :all_but_first, return: :index)
+    |> Enum.map(fn [{at, len}] ->
+      command |> binary_part(at, len) |> String.trim("\"") |> String.trim("'")
+    end)
     |> Enum.reject(&String.starts_with?(&1, "&"))
   end
 

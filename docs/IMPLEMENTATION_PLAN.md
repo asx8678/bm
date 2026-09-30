@@ -36,6 +36,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 15 | Daily use | 15.1–15.3 | commit a run's changes on request (D26), one suite run, trial on the user's project |
 | 16 | Planner quality and notifications | 16.1–16.2 | clean planner rules (no build-only tasks, fewer tasks, less reading), planner spend, notifications |
 | 17 | First real use | 17.1– | goals on the user's real repositories, fixes from what they show |
+| 18 | Catch edge-case bugs | 18.1–18.3 | reviewer probes boundary inputs, planner names boundary cases, the user's goal wins in review |
 
 ---
 
@@ -1098,3 +1099,58 @@ pip/uv/poetry/pipenv, bundle/gem, cargo add·install, mix deps.*, go get/install
 a reason telling the model to report the task blocked and name the command; builds and tests stay
 allowed. The worker prompt says to report environment problems instead of repairing them.
 Checked by calling the policy on sample commands.
+
+---
+
+## Phase 18: catch edge-case bugs
+
+Scoped 2026-09-30 from the sandbox trial: run 78's `truncate` passed its tests, the verify command
+and the reviewer, yet `truncate("abcdef", 0)` returned 6 characters. No tests (user's instruction).
+
+**18.1 Reviewer probes edge cases.** The reviewer works out the contract the task states or
+implies and tries the changed code on boundary inputs (empty, zero, negative, the exact limit and
+one past it, very large, unusual characters) with print-only one-off commands (`node -e`,
+`python3 -c`, `mix run -e`), rejecting with the exact input and result. Because it now runs
+commands, the coordinator snapshots after the review: if the reviewer changed any file, the
+attempt is held (flag `reviewer_wrote`, verdict "invalid") for the user. Checked with the fake pi:
+a reviewer writing `probe.txt` → attempt held, reason names the file.
+
+**18.2 Planner names boundary cases.** For code with a contract, done_when names the boundary
+cases and asks for tests covering them.
+
+**18.3 The user's goal wins in review.** Proof run 1 (run 81, the run-78 goal re-run on a throwaway
+sandbox clone reset to before run 78): the planner now named max 0 and the tests covered it, but
+the planner's done_when said "max 0 or negative returns '…'" (1 character, still over max 0) and
+the reviewer accepted it because the task allowed it. Fixed: the reviewer also gets the run's
+original goal and is told the user's goal wins where the task restates the contract differently.
+Proof run 2 (run 82, fresh clone, same goal): `truncate("abcdef", 0)` → `""`, results never over
+max for max 0/1/2, tests include `truncate("", 0)`, the review reports probing max 0/1/2/3; 21 tests
+pass; $0.13. One sample per run: the model can vary, so this lowers the risk rather than removing
+it. The real sandbox was not touched (clones in /tmp).
+
+**18.4 Review (2026-09-30), two bugs fixed.**
+- *The policy refused the reviewer's probes.* Read-only mode (reviewer, planner, readers) read
+  `>` and `=>` inside quoted code as redirections and code like `truncate(` as the `truncate`
+  command, so `node -e "[0,1].forEach(m => …)"` and even `node -e "console.log(truncate('abcdef',
+  0))"` were refused. Now quoted text is an argument: it is masked when finding redirections and
+  command separators (double quotes holding `$(` or a backtick stay visible), and `sh -c` /
+  `bash -lc` / `eval` strings are checked as commands of their own, which closes gaps workers
+  had (`sh -c "cd x && git push"`, `bash -c 'npm install …'` and `eval "git push"` were allowed).
+  Checked by comparing old and new decisions on 34 commands in both modes: only the reviewer's
+  probes and harmless quoted `>` (`grep "a > b"`) became allowed; every command that was refused
+  still is. Still refused: a heredoc body is read as shell (`cat <<'EOF' … x => x … EOF`).
+- *Files the reviewer changed were left out of the held attempt.* The attempt kept the tree the
+  reviewer was shown, so Revert left the reviewer's new files behind and was refused if it had
+  edited one of the attempt's own files, and Keep checkpointed a tree that no longer matched the
+  disk. Now whatever changed during the review becomes part of the attempt (like the verify
+  command's changes): `tree_after` and `actual_writes` are taken after the review, flag
+  `reviewer_wrote` (plus `user_owned_writes` if one of the user's files changed); a failed
+  snapshot after the review holds the attempt instead of accepting it. The message says "files
+  changed during the review", since the user's own edits in that window land there too. Checked
+  with the fake pi: a probe with `=>` and `>` through the reviewer's policy → ran, approved; reviewer writes
+  `probe.txt` and edits `out.txt` → held with both, Revert → clean `git status`; reviewer
+  writes `probe.txt` → held, Keep → checkpoint tree equals the workspace.
+- Known, not fixed: `python3 -c "import …"` writes `__pycache__/` in repositories that don't
+  ignore it, which holds the attempt as a reviewer write.
+
+**Status: Phase 18 done and reviewed (2026-09-30).**

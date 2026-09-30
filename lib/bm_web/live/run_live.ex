@@ -1276,7 +1276,7 @@ defmodule BmWeb.RunLive do
        do:
          verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0) or
            (is_map(verify["check"]) and verify["check"]["exit"] != 0) or
-           match?(%{"verdict" => "reject"}, verify["review"])
+           match?(%{"verdict" => v} when v in ["reject", "invalid"], verify["review"])
 
   defp verify_needs_reading?(_attempt), do: false
 
@@ -1297,10 +1297,14 @@ defmodule BmWeb.RunLive do
 
   defp review_label(%{"verdict" => "approve"}), do: "review approved"
   defp review_label(%{"verdict" => "reject"}), do: "review rejected"
+  defp review_label(%{"verdict" => "invalid"}), do: "files changed during review"
   defp review_label(_review), do: "not reviewed"
 
   defp review_tone(%{"verdict" => "approve"}), do: "text-bm-idle"
-  defp review_tone(%{"verdict" => "reject"}), do: "text-bm-error"
+
+  defp review_tone(%{"verdict" => verdict}) when verdict in ["reject", "invalid"],
+    do: "text-bm-error"
+
   defp review_tone(_review), do: "text-bm-muted"
 
   defp terminal?(status),
@@ -1350,6 +1354,10 @@ defmodule BmWeb.RunLive do
   defp flag_help("leftover_processes"), do: "Left processes running; BM ended them"
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
+
+  defp flag_help("reviewer_wrote"),
+    do:
+      "Files changed while the reviewer ran; they are part of this attempt, so Revert undoes them too"
 
   defp flag_help("not_reviewed"),
     do: "The reviewer could not run; verification passed, so the change was accepted unreviewed"
