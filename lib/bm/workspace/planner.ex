@@ -423,13 +423,20 @@ defmodule Bm.Workspace.Planner do
       end
 
     state =
-      if rejected > 0 and not MapSet.member?(state.counted, request.request_id),
-        do: %{
+      if rejected > 0 and not MapSet.member?(state.counted, request.request_id) do
+        # Kept on the run too: a plan that ends without tasks after rejections failed (11.3).
+        run = Runs.get_run!(state.run_id)
+        total = (run.planner["rejected"] || 0) + rejected
+        Runs.update_run(run, %{planner: Map.put(run.planner, "rejected", total)})
+
+        %{
           state
           | rejections: state.rejections + rejected,
             counted: MapSet.put(state.counted, request.request_id)
-        },
-        else: state
+        }
+      else
+        state
+      end
 
     {outcome, state}
   end
@@ -742,8 +749,17 @@ defmodule Bm.Workspace.Planner do
     failed = Enum.reject(tasks, &(&1.status == :accepted))
 
     cond do
+      # Found in the Phase 11 trial: a goal BM refused (every proposal rejected, e.g. it needed
+      # the user's uncommitted file) used to end "done". Without tasks the run is done only if
+      # the planner proposed nothing, i.e. judged that nothing needs doing.
       tasks == [] ->
-        end_run(state, :done, "the planner closed the plan without tasks")
+        run = Runs.get_run!(state.run_id)
+        summary = run.planner["summary"]
+
+        if (run.planner["rejected"] || 0) > 0,
+          do:
+            end_run(state, :failed, with_summary("the planner could not plan the goal", summary)),
+          else: end_run(state, :done, with_summary("the planner found nothing to do", summary))
 
       failed == [] ->
         end_run(state, :done, accepted_reason(length(tasks)))
@@ -753,6 +769,11 @@ defmodule Bm.Workspace.Planner do
         end_run(state, :failed, "not every task succeeded: #{keys}")
     end
   end
+
+  defp with_summary(reason, summary) when is_binary(summary) and summary != "",
+    do: reason <> ": " <> String.trim_trailing(summary, ".")
+
+  defp with_summary(reason, _summary), do: reason
 
   defp accepted_reason(1), do: "the task was accepted"
   defp accepted_reason(count), do: "all #{count} tasks accepted"

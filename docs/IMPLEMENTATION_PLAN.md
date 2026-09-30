@@ -842,3 +842,10 @@ for workers; a question-sharpening step before planning built on the chat page.
 
 **Open before 11.2:** the user may name the repository, goals and verify command; otherwise the
 defaults above are used.
+
+**Status 11.1–11.3 (2026-09-30).** Trial clone set up; three goals run through the UI (runs 54–57,
+docs/TRIALS.md): two real features built and accepted ($0.09 and $0.16, 19 s and 69 s), the
+user's dirty README never touched. One real problem found and fixed: a goal BM had to refuse ended
+"done"; a task-less plan after rejected proposals now ends failed with the planner's summary
+(checked live, run 57). Noted: planner checks ran the clone's own tests, which share the test
+database with this checkout.
