@@ -29,6 +29,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
 | 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
+| 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
 
 ---
 
@@ -791,3 +792,83 @@ Before merging `core-milestone-b` (phases 0–10, D1–D23) into `main`, at the 
 - Still not seen live: D23 with the real model (only the scripted planner), the planner prompt's
   new check guidance in effect, and `mix bm.bench --goals` stopping on a held attempt (read
   through; no more benchmarks were to be run).
+
+---
+
+## Phase 11: real repositories
+
+Scoped 2026-09-30 after merging phases 0–10 into `main` (branch `phase-11`). Every run so far
+used tiny scratch Python projects; this phase uses BM on real code and adds the two safety
+features real multi-task runs need. Per the user's standing instruction, no tests are written or
+run; each step is checked by compiling, in the browser, and with small live runs. Trial runs cost
+model money: an estimated $0.10–0.50 per goal on this repository.
+
+**11.1 Trial setup.** The target is a **clone** of a real repository in a scratch directory,
+never the checkout the dev server runs from (BM changing its own running code would be reloaded
+mid-run). Default target: this repository (124 files, under the planner's 150-path list; a
+snapshot takes 30–70 ms), verify command `mix compile --warnings-as-errors`, a budget per goal,
+with a dirty file left in the clone to exercise user-owned files. A project of the user's can
+replace it.
+
+**11.2 Supervised trial goals.** Two or three goals of real size, started from the Tasks page and
+watched on the run page, e.g. "add a `mix bm.runs` task that lists recent runs with status and
+spend" (3 files, one new module) and "show the run's short label BM-<id> in the run header and the
+runs list" (touches LiveViews and a component). Record in `docs/TRIALS.md` per goal: tasks
+proposed, waves, attempts accepted/held/failed, time, cost, checks written, flags, and every
+problem seen (wrong plan, wrong write set, stuck worker, confusing UI, anything unsafe).
+
+**11.3 Fix what the trial shows.** Scope decided by 11.2. Each finding is fixed or recorded as a
+decision; safety problems first.
+
+**11.4 Revert a whole run.** Today only the latest attempt can be reverted; undoing a four-task
+goal means reverting by hand. Design: one conditional restore over the union of the write sets
+of the run's accepted (non-reverted) attempts, from the earliest such attempt's `tree_before` to
+the latest one's `tree_after`, with `Git.restore/5` (all or nothing; refused with the changed
+paths if any file changed since). Allowed only while the workspace's lane is free and no newer
+run touched those files (the condition covers it). The run keeps its status and records
+`reverted_at` (migration); its attempts become `reverted`; checkpoints stay as the record. Run
+page: "Revert this run" on finished runs, with the refusal listing changed files.
+
+**11.5 Refined limits.** (a) **Repeat-call guard:** the coordinator counts identical guarded tool
+calls (tool + input) per attempt; the 4th identical call is refused with a reason and the 6th
+cancels the attempt ("repeating itself"). (b) **Tool timeout:** a single tool call running longer
+than `tool_timeout` (default 10 min) cancels the attempt; today the stall limit applies only
+between tools and `max_duration` (20 min) is the only bound on a hung command. (c) **Soft budget:**
+at 80 % of a run's budget the run page shows a warning, and the planner is told in its next turn
+to finish with the smallest plan.
+
+**Optional, if time allows:** short labels (`BM-<id>`) everywhere a run is named; `ask_planner`
+for workers; a question-sharpening step before planning built on the chat page.
+
+**Open before 11.2:** the user may name the repository, goals and verify command; otherwise the
+defaults above are used.
+
+**Status 11.1–11.3 (2026-09-30).** Trial clone set up; three goals run through the UI (runs 54–57,
+docs/TRIALS.md): two real features built and accepted ($0.09 and $0.16, 19 s and 69 s), the
+user's dirty README never touched. One real problem found and fixed: a goal BM had to refuse ended
+"done"; a task-less plan after rejected proposals now ends failed with the planner's summary
+(checked live, run 57). Noted: planner checks ran the clone's own tests, which share the test
+database with this checkout.
+
+**Status 11.4 (2026-09-30).** `Coordinator.revert_run/2`: one `Git.restore` over the union of
+the write sets of the run's attempts whose changes stayed (accepted, or kept by the user), from
+the earliest one's `tree_before` to the latest one's `tree_after`; refused while the workspace has
+an unfinished run or an attempt runs, for unfinished or already reverted runs, and with
+`changed_since` (nothing touched) when a file changed after the run. Those attempts become
+`reverted`, the run records `reverted_at`, checkpoints stay. Run page: "Revert this run" (with a
+confirmation) on finished runs; the finished note says when it was reverted. Checked on the trial
+clone through the UI: reverting run 55 put its 4 files back (run 54's file and the user's README
+untouched); run 54 with a hand edit in its file was refused ("lib/mix/tasks/bm.runs.ex changed
+since the run. Nothing was touched.") and the edit survived; after undoing the edit, reverting run
+54 deleted the file it had added; the clone was back to the user's README change only.
+
+**Status 11.5 (2026-09-30); Phase 11 done.** Coordinator limits: identical guarded tool calls
+(same tool and input) are counted per attempt; the 4th is refused with a reason the model can act
+on ("You have made this exact bash call 4 times; repeating it will not help…"), the 6th cancels
+the attempt ("repeating the same call"); one tool call running longer than `tool_timeout`
+(10 min) cancels it ("tool_timeout"; before, only `max_duration` bounded a hung command). All
+three are coordinator options. Soft budget: an unfinished run past 80 % of its budget shows
+"N % of the budget used" in the run header, and the planner's next delivery asks it to finish
+with the smallest plan. Checked with a scratch script on the fake pi: 4th identical call refused;
+with `repeat_cancel: 3` the attempt was cancelled; with `tool_timeout: 1_000` a `sleep 5` was
+cancelled. The soft-budget warning and note were read through, not seen live.

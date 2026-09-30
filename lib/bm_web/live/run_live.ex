@@ -324,6 +324,30 @@ defmodule BmWeb.RunLive do
   # The canvas reports drags; positions are not stored.
   def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
 
+  def handle_event("revert_run", _params, socket) do
+    case Coordinator.revert_run(socket.assigns.root, socket.assigns.run.id) do
+      {:ok, run} ->
+        attempts = Runs.list_run_attempts_with_tasks(run)
+
+        {:noreply,
+         socket
+         |> assign(run: %{run | workspace: socket.assigns.run.workspace})
+         |> stream(:attempts, Enum.map(attempts, &decorate(&1, socket.assigns.root)), reset: true)
+         |> put_flash(:info, "Reverted: every change this run left is back as it was before.")}
+
+      {:error, {:changed_since, paths}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Not reverted: #{Enum.join(paths, ", ")} changed since the run. Nothing was touched."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not reverted: #{explain_action(reason)}")}
+    end
+  end
+
   def handle_event("resume_planning", _params, socket) do
     case Coordinator.resume_planning(socket.assigns.root, socket.assigns.run.id) do
       {:ok, run} ->
@@ -368,6 +392,12 @@ defmodule BmWeb.RunLive do
     do: "the latest attempt is #{status |> to_string() |> String.replace("_", " ")}."
 
   def explain_action(:not_resumable), do: "only a paused goal run can resume planning."
+  def explain_action(:already_reverted), do: "this run was already reverted."
+  def explain_action(:run_not_finished), do: "finish the run first."
+
+  def explain_action(:workspace_busy),
+    do: "the workspace has an unfinished run; finish it first."
+
   def explain_action(:run_not_active), do: "this run is no longer the workspace's active run."
 
   def explain_action(:not_started),
@@ -429,6 +459,13 @@ defmodule BmWeb.RunLive do
             </dd>
             <dd :if={@run.spent_unknown > 0} class="text-[11px] text-bm-run">
               + {@run.spent_unknown} without a cost
+            </dd>
+            <dd
+              :if={budget_low?(@run)}
+              id="budget-warning"
+              class="text-[11px] font-medium text-bm-run"
+            >
+              {round(@run.spent_usd / @run.budget_usd * 100)} % of the budget used
             </dd>
           </dl>
         </header>
@@ -719,14 +756,29 @@ defmodule BmWeb.RunLive do
         <% :finished -> %>
           <div class="flex flex-wrap items-center gap-3">
             <p class="min-w-0 flex-1 text-xs text-bm-muted">
-              <%= if @checkpoints_pruned? do %>
-                This run is finished. Its checkpoints were pruned after newer runs; accepted
-                changes stay in your working tree, and old diffs may be gone.
+              <%= if @run.reverted_at do %>
+                This run is finished and was reverted <.ago at={@run.reverted_at} />: every file
+                it changed is back as it was before the run. Its checkpoints stay as the record.
               <% else %>
-                This run is finished. Accepted changes are in your working tree and checkpointed
-                under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+                <%= if @checkpoints_pruned? do %>
+                  This run is finished. Its checkpoints were pruned after newer runs; accepted
+                  changes stay in your working tree, and old diffs may be gone.
+                <% else %>
+                  This run is finished. Accepted changes are in your working tree and checkpointed
+                  under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+                <% end %>
               <% end %>
             </p>
+            <.action
+              :if={@run.reverted_at == nil and run_revertable?(@run)}
+              id="revert-run-btn"
+              event="revert_run"
+              style={:secondary}
+              disable_with="Reverting…"
+              confirm="Put back every file this run changed, as it was before the run?"
+            >
+              Revert this run
+            </.action>
             <.link
               id="new-task-link"
               navigate={~p"/?#{%{path: @root, mode: if(@goal_run?, do: "goal", else: "task")}}"}
@@ -824,6 +876,13 @@ defmodule BmWeb.RunLive do
     """
   end
 
+  # Soft budget warning (plan 11.5): an unfinished run past 80 % of its budget.
+  defp budget_low?(%{status: status, budget_usd: budget, spent_usd: spent})
+       when status in [:active, :paused] and is_number(budget) and budget > 0,
+       do: spent >= 0.8 * budget
+
+  defp budget_low?(_run), do: false
+
   defp activity_text(%{now: now, calls: calls}) when is_binary(now),
     do: "Now: #{now} · #{calls} tool #{if calls == 1, do: "call", else: "calls"}"
 
@@ -831,6 +890,9 @@ defmodule BmWeb.RunLive do
     do: "Thinking · last: #{last} · #{calls} tool #{if calls == 1, do: "call", else: "calls"}"
 
   defp activity_text(_activity), do: "Thinking…"
+
+  # A finished run with at least one checkpoint left something to revert.
+  defp run_revertable?(run), do: Enum.any?(Runs.list_run_attempts(run), & &1.checkpoint_ref)
 
   defp revertable?(%{status: :accepted, actual_writes: [_ | _]}), do: true
   defp revertable?(_attempt), do: false
@@ -851,6 +913,7 @@ defmodule BmWeb.RunLive do
   attr :event, :string, required: true
   attr :style, :atom, default: :secondary
   attr :disable_with, :string, default: nil
+  attr :confirm, :string, default: nil
   slot :inner_block, required: true
 
   defp action(assigns) do
@@ -860,6 +923,7 @@ defmodule BmWeb.RunLive do
       type="button"
       phx-click={@event}
       phx-disable-with={@disable_with}
+      data-confirm={@confirm}
       class={[
         "rounded-md px-3 py-1.5 text-xs font-semibold transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text disabled:opacity-60",
         if(@style == :primary,

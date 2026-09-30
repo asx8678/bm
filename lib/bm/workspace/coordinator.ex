@@ -40,6 +40,11 @@ defmodule Bm.Workspace.Coordinator do
     # tool runs.
     max_duration: 20 * 60_000,
     stall_timeout: 3 * 60_000,
+    # Refined limits (plan 11.5): one tool call running this long cancels the attempt; the Nth
+    # identical guarded call is refused, the Mth cancels the attempt.
+    tool_timeout: 10 * 60_000,
+    repeat_refuse: 4,
+    repeat_cancel: 6,
     prompt: &Bm.Prompts.worker/2
   ]
 
@@ -97,6 +102,15 @@ defmodule Bm.Workspace.Coordinator do
   @doc "Resumes planning of the paused goal run `run_id` in a new planner session."
   def resume_planning(path, run_id, planner_opts \\ []),
     do: call(path, {:resume_planning, run_id, planner_opts})
+
+  @doc """
+  Reverts every change a finished run left in the workspace (plan 11.4): one all-or-nothing
+  conditional restore over the union of the write sets of its attempts whose changes stayed
+  (accepted, or kept by the user), from the earliest one's `tree_before` to the latest one's
+  `tree_after`. `{:error, {:changed_since, paths}}` changes nothing. Refused while the workspace
+  has an unfinished run, and for a run already reverted.
+  """
+  def revert_run(path, run_id), do: call(path, {:revert_run, run_id})
 
   @doc "Lane, phase, run and current attempt."
   def state(path), do: call(path, :state)
@@ -192,6 +206,9 @@ defmodule Bm.Workspace.Coordinator do
       tool: nil,
       running_since: nil,
       last_event_at: nil,
+      # When the running tool call started, and identical guarded calls seen (plan 11.5).
+      tool_since: nil,
+      repeats: %{},
       # Monitor of the goal run's planner process.
       planner_ref: nil
     }
@@ -354,6 +371,28 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:resume_planning, _run_id, _opts}, _from, state),
     do: {:reply, {:error, :not_resumable}, state}
 
+  def handle_call({:revert_run, _run_id}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:revert_run, _run_id}, _from, %{phase: phase} = state) when phase != nil,
+    do: {:reply, {:error, :attempt_running}, state}
+
+  def handle_call({:revert_run, run_id}, _from, state) do
+    case Runs.get_run!(run_id) do
+      %{workspace_id: workspace_id} when workspace_id != state.workspace.id ->
+        {:reply, {:error, :run_not_in_workspace}, state}
+
+      %{reverted_at: %DateTime{}} ->
+        {:reply, {:error, :already_reverted}, state}
+
+      %{status: status} when status in [:active, :paused] ->
+        {:reply, {:error, :run_not_finished}, state}
+
+      run ->
+        {:reply, do_revert_run(state, run), state}
+    end
+  end
+
   def handle_call({:run_task, attrs}, _from, state) do
     case Bm.Repo.transaction(fn -> admit_records(state, attrs) end) do
       {:ok, records} ->
@@ -456,7 +495,9 @@ defmodule Bm.Workspace.Coordinator do
         spend_seen: %{confirmed: 0.0, unknown: 0},
         tool: nil,
         running_since: nil,
-        last_event_at: nil
+        last_event_at: nil,
+        tool_since: nil,
+        repeats: %{}
     }
   end
 
@@ -545,6 +586,45 @@ defmodule Bm.Workspace.Coordinator do
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+  end
+
+  ## Reverting a whole run (11.4)
+
+  defp do_revert_run(state, run) do
+    # Attempts in order; their changes stayed if accepted, or kept by the user.
+    stayed =
+      run
+      |> Runs.list_run_attempts()
+      |> Enum.sort_by(& &1.id)
+      |> Enum.filter(fn attempt ->
+        attempt.actual_writes != [] and is_binary(attempt.tree_before) and
+          is_binary(attempt.tree_after) and
+          (attempt.status == :accepted or
+             (attempt.status != :reverted and "kept" in attempt.flags))
+      end)
+
+    case stayed do
+      [] ->
+        {:error, :nothing_to_revert}
+
+      [first | _] ->
+        last = List.last(stayed)
+        entries = Enum.flat_map(stayed, & &1.actual_writes)
+
+        with :ok <- Git.restore(state.root, entries, first.tree_before, last.tree_after) do
+          for attempt <- stayed do
+            case Runs.transition_attempt(attempt, :reverted) do
+              {:ok, _} -> :ok
+              # A kept failed/cancelled attempt that can't move: the files are back anyway.
+              {:error, _} -> Runs.add_attempt_flag(attempt, "run_reverted")
+            end
+          end
+
+          {:ok, run} = Runs.update_run(run, %{reverted_at: DateTime.utc_now()})
+          broadcast_run(state, run)
+          {:ok, run}
+        end
+    end
   end
 
   ## Pruning checkpoints
@@ -660,7 +740,9 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_info({:pi, id, event, summary}, %{agent_id: id} = state) do
     state =
-      %{state | tool: summary[:tool], last_event_at: now()}
+      state
+      |> track_tool(summary[:tool])
+      |> Map.put(:last_event_at, now())
       |> track_spend(summary)
       |> enforce_budget()
 
@@ -726,7 +808,11 @@ defmodule Bm.Workspace.Coordinator do
 
   defp worker_event(state, _event, _summary), do: state
 
-  ## Limits (5.1, 5.2)
+  ## Limits (5.1, 5.2, 11.5)
+
+  defp track_tool(%{tool: tool} = state, tool), do: state
+  defp track_tool(state, nil), do: %{state | tool: nil, tool_since: nil}
+  defp track_tool(state, tool), do: %{state | tool: tool, tool_since: now()}
 
   defp now, do: System.monotonic_time(:millisecond)
 
@@ -775,12 +861,41 @@ defmodule Bm.Workspace.Coordinator do
       state.tool == nil and now() - state.last_event_at >= state.config.stall_timeout ->
         request_cancel(state, "stall")
 
+      state.tool != nil and state.tool_since != nil and
+          now() - state.tool_since >= state.config.tool_timeout ->
+        request_cancel(state, "tool_timeout")
+
       true ->
         schedule_limits_check(state)
     end
   end
 
   defp handle_request(state, request) do
+    state = count_repeat(state, request)
+
+    {outcome, state} = handle_request_once(state, request)
+
+    if repeats(state, request) >= state.config.repeat_cancel,
+      do: {outcome, request_cancel(state, "repeating the same call")},
+      else: {outcome, state}
+  end
+
+  # Identical guarded tool calls (same tool, same input) in this attempt.
+  defp count_repeat(state, %{op: "authorize", payload: payload}) do
+    key = repeat_key(payload)
+    %{state | repeats: Map.update(state.repeats, key, 1, &(&1 + 1))}
+  end
+
+  defp count_repeat(state, _request), do: state
+
+  defp repeats(state, %{op: "authorize", payload: payload}),
+    do: Map.get(state.repeats, repeat_key(payload), 0)
+
+  defp repeats(_state, _request), do: 0
+
+  defp repeat_key(payload), do: :erlang.phash2({payload["tool"], payload["input"]})
+
+  defp handle_request_once(state, request) do
     Bm.Bridge.handle(:worker, state.agent_id, request, state.assignment, fn request ->
       case request.op do
         "authorize" -> authorize(state, request.payload)
@@ -797,6 +912,24 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp authorize(state, %{"tool" => tool} = payload) do
+    count = Map.get(state.repeats, repeat_key(payload), 0)
+
+    if count >= state.config.repeat_refuse do
+      %{
+        "ok" => true,
+        "allow" => false,
+        "reason" =>
+          "You have made this exact #{tool} call #{count} times; repeating it will not help. " <>
+            "Try a different approach, or submit_result with status blocked and say why."
+      }
+    else
+      authorize_policy(state, tool, payload)
+    end
+  end
+
+  defp authorize(_state, _payload), do: %{"ok" => false, "error" => "malformed_authorize"}
+
+  defp authorize_policy(state, tool, payload) do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
     ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
 
@@ -805,8 +938,6 @@ defmodule Bm.Workspace.Coordinator do
       {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
     end
   end
-
-  defp authorize(_state, _payload), do: %{"ok" => false, "error" => "malformed_authorize"}
 
   defp submit_result(state, payload) do
     attempt = Runs.get_attempt!(state.attempt.id)
