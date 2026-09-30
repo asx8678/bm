@@ -16,8 +16,17 @@ defmodule Bm.CLI do
     :ok
   end
 
-  def get(path), do: request(:get, path, nil)
-  def post(path, body), do: request(:post, path, body)
+  def get(path), do: path |> fetch() |> plain()
+
+  @doc """
+  Like `get/1`, but a server that does not answer gives `{:unreachable, message}` instead of
+  `{:error, message}`: `mix bm.goal` waits out a restart (plan 21.3).
+  """
+  def fetch(path), do: request(:get, path, nil)
+  def post(path, body), do: :post |> request(path, body) |> plain()
+
+  defp plain({:unreachable, message}), do: {:error, message}
+  defp plain(result), do: result
 
   defp request(method, path, body) do
     opts = [method: method, url: base_url() <> path, retry: false, receive_timeout: 30_000]
@@ -34,7 +43,10 @@ defmodule Bm.CLI do
         {:error, "the server answered #{status}"}
 
       {:error, %{reason: :econnrefused}} ->
-        {:error, "BM is not running at #{base_url()} (start it with `mix phx.server`)"}
+        {:unreachable, "BM is not running at #{base_url()} (start it with `mix phx.server`)"}
+
+      {:error, %Req.TransportError{} = error} ->
+        {:unreachable, Exception.message(error)}
 
       {:error, error} ->
         {:error, Exception.message(error)}

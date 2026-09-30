@@ -52,10 +52,15 @@ defmodule Mix.Tasks.Bm.Goal do
   # The terminal bell (plan 16.2): the run ended, paused, or waits for a decision.
   @bell "\a"
 
-  # Prints what changed since the last poll; returns when the run ends or pauses.
-  defp follow(id, seen) do
-    case CLI.get("/api/runs/#{id}") do
+  # A server restart is waited out (plan 21.3): after it, BM resumes the run by itself when it can.
+  @restart_wait 120_000
+
+  # Prints what changed since the last poll; returns when the run ends or pauses. `down_since`:
+  # when the server stopped answering, nil while it answers.
+  defp follow(id, seen, down_since \\ nil) do
+    case CLI.fetch("/api/runs/#{id}") do
       {:ok, run} ->
+        if down_since, do: Mix.shell().info("BM answers again.")
         lines = Enum.map(run["tasks"] || [], &CLI.task_line/1)
         for line <- lines, not Map.has_key?(seen, line), do: Mix.shell().info(line)
         waiting? = run["waiting_for_you"] == true
@@ -69,6 +74,23 @@ defmodule Mix.Tasks.Bm.Goal do
         seen = Map.new(lines, &{&1, true})
         seen = if waiting?, do: Map.put(seen, :waiting, true), else: seen
         report(id, run, seen)
+
+      {:unreachable, message} ->
+        now = System.monotonic_time(:millisecond)
+
+        cond do
+          down_since == nil ->
+            Mix.shell().info("BM does not answer (restarting?); waiting up to 2 minutes…")
+            Process.sleep(@poll)
+            follow(id, seen, now)
+
+          now - down_since < @restart_wait ->
+            Process.sleep(@poll)
+            follow(id, seen, down_since)
+
+          true ->
+            Mix.raise("Lost the run: #{message}")
+        end
 
       {:error, message} ->
         Mix.raise("Lost the run: #{message}")
