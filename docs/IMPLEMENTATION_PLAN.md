@@ -1465,4 +1465,15 @@ restart, undos, stops by the user; nothing before `planner["progress_mark"]`, se
 so a resume starts a new count). Checked with the fake pi: four tasks whose checks fail → paused
 "no progress: the last 3 attempts ended without an accepted task" with t4 still queued.
 
-**Status: Phase 25 done (2026-09-30).**
+Notes: of the 36 attempts BM made in real repositories so far (trial clone, sandbox), none wrote
+outside its declared files, so the drift steer would not have fired in them; its text leaves the
+worker free to go on when the task needs the file. Once past its thresholds, the no-progress
+check takes a snapshot on each limits check (every 45 s by default) until a file changes or the
+attempt is cancelled, at most about 8 per attempt. Attempts BM cancelled (silence, time,
+no progress) count toward the run-level streak on purpose.
+
+Not seen with the real model in Phases 23–25: every check used the fake pi (the approval inbox also
+through the real page in headless Chrome and the real API). Worth watching in real use: whether a
+real worker heeds a steer, and a real extension's dialog (no BM profile loads one that asks yet).
+
+**Status: Phase 25 done (2026-09-30). Phases 23–25 done.**
