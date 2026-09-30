@@ -1128,4 +1128,29 @@ max for max 0/1/2, tests include `truncate("", 0)`, the review reports probing m
 pass; $0.13. One sample per run: the model can vary, so this lowers the risk rather than removing
 it. The real sandbox was not touched (clones in /tmp).
 
-**Status: Phase 18 done (2026-09-30).**
+**18.4 Review (2026-09-30), two bugs fixed.**
+- *The policy refused the reviewer's probes.* Read-only mode (reviewer, planner, readers) read
+  `>` and `=>` inside quoted code as redirections and code like `truncate(` as the `truncate`
+  command, so `node -e "[0,1].forEach(m => …)"` and even `node -e "console.log(truncate('abcdef',
+  0))"` were refused. Now quoted text is an argument: it is masked when finding redirections and
+  command separators (double quotes holding `$(` or a backtick stay visible), and `sh -c` /
+  `bash -lc` / `eval` strings are checked as commands of their own, which closes gaps workers
+  had (`sh -c "cd x && git push"`, `bash -c 'npm install …'` and `eval "git push"` were allowed).
+  Checked by comparing old and new decisions on 34 commands in both modes: only the reviewer's
+  probes and harmless quoted `>` (`grep "a > b"`) became allowed; every command that was refused
+  still is. Still refused: a heredoc body is read as shell (`cat <<'EOF' … x => x … EOF`).
+- *Files the reviewer changed were left out of the held attempt.* The attempt kept the tree the
+  reviewer was shown, so Revert left the reviewer's new files behind and was refused if it had
+  edited one of the attempt's own files, and Keep checkpointed a tree that no longer matched the
+  disk. Now whatever changed during the review becomes part of the attempt (like the verify
+  command's changes): `tree_after` and `actual_writes` are taken after the review, flag
+  `reviewer_wrote` (plus `user_owned_writes` if one of the user's files changed); a failed
+  snapshot after the review holds the attempt instead of accepting it. The message says "files
+  changed during the review", since the user's own edits in that window land there too. Checked
+  with the fake pi: a probe with `=>` and `>` through the reviewer's policy → ran, approved; reviewer writes
+  `probe.txt` and edits `out.txt` → held with both, Revert → clean `git status`; reviewer
+  writes `probe.txt` → held, Keep → checkpoint tree equals the workspace.
+- Known, not fixed: `python3 -c "import …"` writes `__pycache__/` in repositories that don't
+  ignore it, which holds the attempt as a reviewer write.
+
+**Status: Phase 18 done and reviewed (2026-09-30).**
