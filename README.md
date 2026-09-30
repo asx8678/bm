@@ -62,6 +62,9 @@ mix bm.attach BM-12        # follow a run; answer Keep/Revert and approvals here
 mix bm.runs                # recent runs (mix bm.runs calc, --limit 50)
 mix bm.status BM-12        # one run with its tasks
 mix bm.commit BM-12        # commit a finished run's changes on your current branch
+mix bm.pause BM-12         # pause an active goal run
+mix bm.resume BM-12        # resume a paused goal run's planning
+mix bm.undo BM-12 api_key  # put one task's files back (paused or finished run)
 ```
 
 `mix help bm.<command>` has the details.

@@ -11,6 +11,10 @@ defmodule BmWeb.Api.RunController do
     * `POST /api/runs/:id/commit` — commit the run's accepted changes (plan 15.1, D26)
     * `POST /api/runs/:id/keep`, `/revert`, `/cancel` — the run page's Keep, Revert and Stop,
       for the workspace's current run (plan 24.2)
+    * `POST /api/runs/:id/pause`, `/resume` — the run page's Pause and Resume planning, for
+      the workspace's current run
+    * `POST /api/runs/:id/tasks/:key/undo` — the run page's task Undo: put the files of the
+      task `key` (its latest revision) back as they were before it, finished run included
     * `POST /api/runs/:id/approvals/:dialog_id` — answer a worker's pending approval with
       `confirmed`, `value` or `cancelled` (plan 24.1)
   """
@@ -168,6 +172,87 @@ defmodule BmWeb.Api.RunController do
 
   def decide(conn, _params),
     do: conn |> put_status(:not_found) |> json(%{error: "Unknown action."})
+
+  @doc """
+  The run page's Pause: stop the workspace's current run `id` from planning, keeping its
+  changes (plan 23.1). `Coordinator.pause_by_user/2` replies `{:ok, run}`, but
+  `with_current_run/3` expects bare `:ok`, so the reply is mapped and errors pass through
+  untouched for the 422 branch.
+  """
+  def pause(conn, %{"id" => id}) do
+    with_current_run(conn, id, fn path ->
+      {run_id, ""} = Integer.parse(String.replace_prefix(id, "BM-", ""))
+
+      case Coordinator.pause_by_user(path, run_id) do
+        {:ok, _run} -> :ok
+        {:error, _} = error -> error
+      end
+    end)
+  end
+
+  @doc "The run page's Resume planning: continue the paused current run `id` in a new planner."
+  def resume(conn, %{"id" => id}) do
+    with_current_run(conn, id, fn path ->
+      {run_id, ""} = Integer.parse(String.replace_prefix(id, "BM-", ""))
+
+      case Coordinator.resume_planning(path, run_id) do
+        {:ok, _run} -> :ok
+        {:error, _} = error -> error
+      end
+    end)
+  end
+
+  @doc """
+  The run page's task Undo: put the files task `key` of run `id` changed back as they were
+  before it. Unlike the other actions this also works on a finished run (whose id the
+  coordinator's state no longer reports), so it can't ride `with_current_run/3`.
+  """
+  def undo(conn, %{"id" => id, "key" => key}) do
+    case Integer.parse(String.replace_prefix(id, "BM-", "")) do
+      {run_id, ""} ->
+        case Runs.get_run_with_workspace(run_id) do
+          %{} = run -> undo_task(conn, run, run_id, key)
+          _ -> conn |> put_status(:not_found) |> json(%{error: "No such run."})
+        end
+
+      _ ->
+        conn |> put_status(:not_found) |> json(%{error: "No such run."})
+    end
+  end
+
+  defp undo_task(conn, run, run_id, key) do
+    with {:ok, _pid} <- Coordinator.ensure_started(run.workspace.path),
+         # The key's latest revision, as the run page's Undo button shows it.
+         %{} = task <- run |> Runs.latest_tasks() |> Enum.find(&(&1.key == key)) do
+      case Coordinator.revert_task(run.workspace.path, task.id) do
+        {:ok, _task} ->
+          show(conn, %{"id" => to_string(run_id)})
+
+        {:error, {:changed_since, paths}} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{
+            error: "#{Enum.join(paths, ", ")} changed since the task. Nothing was touched."
+          })
+
+        {:error, {:dependents, keys}} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{
+            error:
+              "#{Enum.join(keys, ", ")} #{if length(keys) == 1, do: "depends", else: "depend"} on this task. Undo " <>
+                "#{if length(keys) == 1, do: "it", else: "them"} first."
+          })
+
+        {:error, reason} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: BmWeb.RunLive.explain_action(reason)})
+      end
+    else
+      _ -> conn |> put_status(:not_found) |> json(%{error: "No such task in this run."})
+    end
+  end
 
   def answer(conn, %{"id" => id, "dialog_id" => dialog_id} = params) do
     reply = Map.take(params, ["confirmed", "value", "cancelled"])

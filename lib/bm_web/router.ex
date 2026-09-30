@@ -37,6 +37,9 @@ defmodule BmWeb.Router do
     get "/runs/:id", RunController, :show
     post "/runs/:id/commit", RunController, :commit
     post "/runs/:id/approvals/:dialog_id", RunController, :answer
+    post "/runs/:id/pause", RunController, :pause
+    post "/runs/:id/resume", RunController, :resume
+    post "/runs/:id/tasks/:key/undo", RunController, :undo
     post "/runs/:id/:action", RunController, :decide
   end
 
