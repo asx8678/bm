@@ -139,7 +139,7 @@ Each has a precondition; don't start one before it holds.
 | **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); provider/approval timeouts and in-flight estimates not | S–M |
 | **Approval inbox** in the browser for non-`bm:` dialogs | M |
 | **Reviewer role** (read-only; silent / message / stop) | M |
-| **`ask_planner`** tool for workers | S |
+| **`ask_planner`** tool for workers — **done** (plan 12.2, D24); seen with the fake pi, no real worker has asked yet | S |
 | **Supervisor** (progress and drift checks) | M |
 | **Sanitized replay fixtures** (A7) with an allowlist sanitizer | S |
 | Evaluate **Fabric managed-host mode** | M |
@@ -150,11 +150,11 @@ Each has a precondition; don't start one before it holds.
 |---|---|
 | Live **canvas** of planner, workers and tasks — **done 2026-09-30** (plan 10.1) | M |
 | Run history and search — **done 2026-09-30** (plan 10.5): text and status filter, paging | M |
-| Short labels for runs and agents (`BM-12`) | S |
+| Short labels for runs and agents (`BM-12`) — runs **done** (plan 12.1) | S |
 | Transcript per attempt — **done 2026-09-30** as a stored compact transcript and an Activity fold (plan 10.4), not pi `export_html` | S |
 | Pruning old `refs/bm/…` checkpoints — **done 2026-09-30** (plan 10.3) | S |
 | CLI client attached to runs | M |
-| Front "questioning" agent that sharpens vague requests | M |
+| Front "questioning" agent that sharpens vague requests — **done** as goal review in the Goal form (plan 12.3) | M |
 
 ### Experimental
 

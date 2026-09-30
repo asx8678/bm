@@ -923,3 +923,14 @@ fixed it, and the restart exercised recovery on a real run: the attempt became "
 changes; safe to run again)", run 62 paused "planner lost"; Resume planning started session 2,
 which re-proposed the interrupted task, and the run ended done (2 tasks, $0.27). Rule: restart
 the dev server after changing the coordinator's or planner's state.
+
+**Status 12.3 (2026-09-30); Phase 12 done.** `Bm.GoalReview.review/2`: a planner-profile pi
+session owned by the caller (the LiveView's async task), its read-only bash answered by the policy,
+proposals refused; it returns up to 4 questions and a goal rewritten in at most 6 sentences
+(files and checks, no line numbers), parsed from a JSON reply. Tasks page: "Review goal" beside
+Start planning; the panel shows the suggested goal and the questions with answer fields; "Use
+suggested goal" puts it in the goal field with the answered questions under "Clarifications:";
+"Keep my goal" closes it. Checked in the browser on the trial clone ("make the runs list nicer",
+$0.04 per review; `docs/screenshots/goal-review.png`): four relevant questions, a concrete goal,
+and the applied goal ended with the answered question. Not done in this phase: a trial on a
+project of the user's (needs the repository and verify command).
