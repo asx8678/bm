@@ -1299,3 +1299,19 @@ runs are unchanged: an interrupted task fails and the user runs it again.
 
 **Status: Phase 21 done (2026-09-30).** Not done: a resumed run whose plan was already closed still
 spends one planner turn before its queued task runs (≈$0.014 in each of runs 104 and 105).
+
+---
+
+## Phase 22: a cheaper resume
+
+Chosen by the user 2026-09-30 after Phase 21. No tests (user's instruction).
+
+**22.1 No planner turn to resume a closed plan.** A run that resumes (by itself or by the user)
+with its plan already closed starts its new planner session without a turn: the scheduler runs
+the queued task straight away (runs 104 and 105 each spent ≈$0.014 on a turn that only restated
+the closed plan). If a later result or a worker's question needs the planner, that first turn
+carries the goal, the repository context and the tasks so far ahead of its own text, so the new
+session knows the run. A plan that was still open resumes with its turn as before.
+
+**22.2 Scratch runs finished.** Runs 80, 83 and 100–103 (BM's own checks in temporary
+repositories, left paused) were finished as cancelled, with a reason saying so.
