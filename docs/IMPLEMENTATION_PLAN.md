@@ -1238,3 +1238,26 @@ needs a repository the user names, so it moves out of this phase and waits as it
 **Waiting for the user: a trial on one of their projects.** Starts when the user names the
 repository and its verify command (and says whether BM may commit accepted changes there with
 `mix bm.commit`). BM never picks a repository itself.
+
+---
+
+## Phase 21: resume after a restart
+
+Chosen by the user 2026-09-30. Evidence: trial runs 62 and 68 were interrupted by BM restarts and
+needed a manual Resume planning; after every restart a goal run pauses ("planner lost") even when
+nothing waits for the user. No tests (user's instruction).
+
+**21.1 An interruption is not a failure.** In a goal run, an attempt that recovery finds
+interrupted with no changes (`failed`, "interrupted (no changes; safe to run again)") no longer
+fails its task: the task goes back to `queued`, so the scheduler runs it again. Until now it
+counted as the task's one re-plan, and if the interrupted attempt was already the re-planned one,
+the resumed run ended "failed again after its re-plan". Single-task runs keep the task failed
+(nothing would run it again; the user re-runs it).
+
+**21.2 Resume by itself after a restart.** At application start only (not when a coordinator
+alone restarts), a goal run whose planner was lost resumes planning in a new session instead of
+waiting, when all hold: automatic resume is on (`config :bm, auto_resume:`, default true), the
+lane is free (no interrupted or held changes wait for the user), the budget is not spent, and the
+run was resumed this way fewer than 3 times (a crash loop stops there). Otherwise it pauses as
+before, and the reason says why it did not resume. Attempts that changed files are never retried
+or reverted by themselves: the recovery snapshot cannot tell the worker's writes from the user's.
