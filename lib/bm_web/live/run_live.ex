@@ -324,6 +324,19 @@ defmodule BmWeb.RunLive do
   # The canvas reports drags; positions are not stored.
   def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
 
+  def handle_event("commit_run", _params, socket) do
+    case Coordinator.commit_run(socket.assigns.root, socket.assigns.run.id) do
+      {:ok, run} ->
+        {:noreply,
+         socket
+         |> assign(run: %{run | workspace: socket.assigns.run.workspace})
+         |> put_flash(:info, "Committed as #{String.slice(run.commit_sha, 0, 8)} on your branch.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not committed: #{explain_commit(reason)}")}
+    end
+  end
+
   def handle_event("revert_task", %{"task" => task_id}, socket) do
     case Coordinator.revert_task(socket.assigns.root, String.to_integer(task_id)) do
       {:ok, task} ->
@@ -432,6 +445,25 @@ defmodule BmWeb.RunLive do
     do: "BM is not managing this workspace right now; reload the page."
 
   def explain_action(other), do: "unexpected error (#{inspect(other)})."
+
+  @doc false
+  def explain_commit({:changed_since, paths}),
+    do: "#{Enum.join(paths, ", ")} changed since the run; commit them yourself if you want them."
+
+  def explain_commit({:staged, paths}),
+    do: "you have staged changes in #{Enum.join(paths, ", ")}; unstage or commit them first."
+
+  def explain_commit(:detached_head), do: "HEAD is not on a branch; check out a branch first."
+  def explain_commit(:no_commits), do: "the repository has no commit yet."
+  def explain_commit(:nothing_to_commit), do: "the run's changes are already in HEAD."
+
+  def explain_commit({:already_committed, sha}),
+    do: "this run was already committed (#{String.slice(sha, 0, 8)})."
+
+  def explain_commit({:git, _cmd, _status, output}),
+    do: "git refused: #{output |> String.trim() |> String.slice(0, 200)}"
+
+  def explain_commit(other), do: explain_action(other)
 
   defp act(socket, fun) do
     case fun.(socket.assigns.root) do
@@ -556,7 +588,10 @@ defmodule BmWeb.RunLive do
           <li :for={{dom_id, item} <- @streams.attempts} id={dom_id}>
             <.attempt_card
               item={item}
-              undo?={@run.status in [:done, :failed, :cancelled] and @run.reverted_at == nil}
+              undo?={
+                @run.status in [:done, :failed, :cancelled] and @run.reverted_at == nil and
+                  @run.commit_sha == nil
+              }
             />
           </li>
         </ol>
@@ -790,21 +825,37 @@ defmodule BmWeb.RunLive do
         <% :finished -> %>
           <div class="flex flex-wrap items-center gap-3">
             <p class="min-w-0 flex-1 text-xs text-bm-muted">
-              <%= if @run.reverted_at do %>
-                This run is finished and was reverted <.ago at={@run.reverted_at} />: every file
-                it changed is back as it was before the run. Its checkpoints stay as the record.
+              <%= if @run.commit_sha do %>
+                This run is finished and its changes were committed as
+                <code class="font-mono">{String.slice(@run.commit_sha, 0, 8)}</code>
+                on your branch.
               <% else %>
-                <%= if @checkpoints_pruned? do %>
-                  This run is finished. Its checkpoints were pruned after newer runs; accepted
-                  changes stay in your working tree, and old diffs may be gone.
+                <%= if @run.reverted_at do %>
+                  This run is finished and was reverted <.ago at={@run.reverted_at} />: every file
+                  it changed is back as it was before the run. Its checkpoints stay as the record.
                 <% else %>
-                  This run is finished. Accepted changes are in your working tree and checkpointed
-                  under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+                  <%= if @checkpoints_pruned? do %>
+                    This run is finished. Its checkpoints were pruned after newer runs; accepted
+                    changes stay in your working tree, and old diffs may be gone.
+                  <% else %>
+                    This run is finished. Accepted changes are in your working tree and checkpointed
+                    under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+                  <% end %>
                 <% end %>
               <% end %>
             </p>
             <.action
-              :if={@run.reverted_at == nil and run_revertable?(@run)}
+              :if={@run.reverted_at == nil and @run.commit_sha == nil and run_revertable?(@run)}
+              id="commit-run-btn"
+              event="commit_run"
+              style={:secondary}
+              disable_with="Committing…"
+              confirm="Commit this run's changes on your current branch? Only the run's files are committed; your other changes stay as they are."
+            >
+              Commit these changes
+            </.action>
+            <.action
+              :if={@run.reverted_at == nil and @run.commit_sha == nil and run_revertable?(@run)}
               id="revert-run-btn"
               event="revert_run"
               style={:secondary}

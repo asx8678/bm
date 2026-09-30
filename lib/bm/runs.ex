@@ -159,7 +159,14 @@ defmodule Bm.Runs do
   def update_run(%Run{} = run, attrs) do
     run
     |> Ecto.Changeset.change(
-      Map.take(Map.new(attrs), [:plan_open, :planner, :status_reason, :reverted_at, :baseline])
+      Map.take(Map.new(attrs), [
+        :plan_open,
+        :planner,
+        :status_reason,
+        :reverted_at,
+        :baseline,
+        :commit_sha
+      ])
     )
     |> Repo.update()
   end

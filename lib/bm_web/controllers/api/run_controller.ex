@@ -7,6 +7,7 @@ defmodule BmWeb.Api.RunController do
     * `POST /api/goals` — `repo`, `goal`, optional `verify_command`, `budget_usd` → the run
     * `GET /api/runs` — recent runs (`limit`, default 20)
     * `GET /api/runs/:id` — one run with its tasks and their latest attempts
+    * `POST /api/runs/:id/commit` — commit the run's accepted changes (plan 15.1, D26)
   """
 
   use BmWeb, :controller
@@ -94,6 +95,29 @@ defmodule BmWeb.Api.RunController do
       )
     else
       _ -> conn |> put_status(:not_found) |> json(%{error: "No such run."})
+    end
+  end
+
+  def commit(conn, %{"id" => id}) do
+    with {id, ""} <- Integer.parse(String.replace_prefix(id, "BM-", "")),
+         %{} = run <- Runs.get_run_with_workspace(id),
+         {:ok, _pid} <- Coordinator.ensure_started(run.workspace.path) do
+      case Coordinator.commit_run(run.workspace.path, run.id) do
+        {:ok, run} ->
+          summary = run_summary(conn, Runs.get_run_with_workspace(run.id))
+          json(conn, Map.put(summary, :commit_sha, run.commit_sha))
+
+        {:error, reason} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: BmWeb.RunLive.explain_commit(reason)})
+      end
+    else
+      {:error, reason} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+
+      _ ->
+        conn |> put_status(:not_found) |> json(%{error: "No such run."})
     end
   end
 

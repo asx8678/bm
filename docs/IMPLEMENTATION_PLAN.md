@@ -33,6 +33,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 12 | Better plans, fewer failures | 12.1–12.3 | run labels, `ask_planner` for workers, goal review before planning |
 | 13 | Safety during long runs | 13.1–13.3 | protect files edited during a run, freshness check on write, undo one task |
 | 14 | Quality gate and terminal use | 14.1–14.3 | reviewer before accepting (D25), local JSON API, `mix bm.*` client |
+| 15 | Daily use | 15.1–15.3 | commit a run's changes on request (D26), one suite run, trial on the user's project |
 
 ---
 
@@ -1015,3 +1016,34 @@ found nothing to do". Fixed: `close_plan` has an optional `blocked` flag (the pl
 when to use it); a task-less plan ends failed if the planner marked it blocked or had proposals
 rejected. Checked: the same goal again (BM-70) ended "failed: the planner could not plan the goal:
 Blocked: … lib/bm/runs.ex … contains the user's uncommitted work".
+
+---
+
+## Phase 15: daily use
+
+Scoped 2026-09-30 (branch `phase-15`) from the trial finding that BM never commits, so accepted
+changes block the next goal that touches the same files.
+
+**15.1 Commit a run's changes on request (D26).** `Git.commit_paths/3`, `Coordinator.commit_run/2`,
+`runs.commit_sha`; run page "Commit these changes" (confirmed) on finished runs, then a note with
+the short sha (Commit/Revert/Undo hidden once committed); `POST /api/runs/:id/commit`;
+`mix bm.commit BM-<id>`. Subject = the goal's first line cut at a word boundary (72 characters).
+Checked on the trial clone with run 68 via `mix bm.commit`: a hand edit in one of the run's files
+→ refused ("lib/bm/runs.ex changed since the run…"); a run file staged by hand → refused ("you
+have staged changes in test/bm/runs_test.exs…"); then with an unrelated file staged and the
+user's README edit in place → committed c06358e7 with exactly the run's two files, authored by the
+user, the unrelated file still staged and not in the commit, README still modified; the run page
+showed "committed as c06358e7 on your branch".
+
+**15.2 One run of the existing test suite** (the user approved the phase that listed it).
+
+**15.3 A trial on a project of the user's** — waits for the repository and its verify command.
+
+**Status 15.2 (2026-09-30).** `mix test`: 199 passed, 6 excluded; `mix test --only live`: 5 passed
+(qualification with the current planner/reader/writer profiles, milestone B gate). Nothing broke
+in phases 12–15; no fixes were needed. Still: the planner, scheduler, reviewer, ask_planner,
+freshness, protection and commit paths have no tests of their own (user's instruction); they were
+checked by scratch scripts and live runs only.
+
+**Status: Phase 15 done except 15.3** (a trial on a project of the user's, waiting for the
+repository and its verify command).
