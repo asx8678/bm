@@ -30,8 +30,25 @@ const submitResult = defineTool({
 	},
 });
 
+const askPlanner = defineTool({
+	name: "ask_planner",
+	label: "Ask planner",
+	description:
+		"Ask the planner ONE specific question when your task is genuinely ambiguous (e.g. two reasonable " +
+		"readings that lead to different code). Read the repository first; don't ask what you can find out. " +
+		"You wait for the answer.",
+	parameters: Type.Object({
+		question: Type.String({ description: "The specific question, with the options you see." }),
+	}),
+	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		const reply = await bmRequest(ctx, "ask_planner", params);
+		return { content: [{ type: "text", text: String(reply.answer ?? "No answer.") }], details: {} };
+	},
+});
+
 export default function (pi: ExtensionAPI) {
 	registerShutdown(pi);
 	pi.registerTool(submitResult);
+	pi.registerTool(askPlanner);
 	pi.on("session_start", (_event, ctx) => report(ctx, "profile", { role: "worker", tools: pi.getActiveTools() }));
 }

@@ -39,15 +39,15 @@ defmodule Bm.Pi.Profile do
     reader: %{
       fabric?: false,
       extensions: ~w(bm_worker bm_guard),
-      tools: @read_tools ++ ~w(bash submit_result),
-      required: ~w(bash submit_result),
+      tools: @read_tools ++ ~w(bash submit_result ask_planner),
+      required: ~w(bash submit_result ask_planner),
       reports: ~w(profile guard)
     },
     writer: %{
       fabric?: false,
       extensions: ~w(bm_worker bm_guard),
-      tools: @read_tools ++ @mutating_tools ++ ~w(submit_result),
-      required: ~w(submit_result edit write bash),
+      tools: @read_tools ++ @mutating_tools ++ ~w(submit_result ask_planner),
+      required: ~w(submit_result ask_planner edit write bash),
       reports: ~w(profile guard)
     }
   }

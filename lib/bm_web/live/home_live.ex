@@ -34,7 +34,10 @@ defmodule BmWeb.HomeLive do
        workspaces: workspaces,
        mode: if(params["mode"] == "task", do: :task, else: :goal),
        form: default_form(workspaces, params["path"]),
-       goal_form: default_form(workspaces, params["path"]) |> then(&to_form(&1.params, as: :goal))
+       goal_form:
+         default_form(workspaces, params["path"]) |> then(&to_form(&1.params, as: :goal)),
+       # Goal review (plan 12.3): nil, :running, or %{questions, goal, cost}.
+       review: nil
      )
      |> stream(:runs, runs)}
   end
@@ -72,6 +75,53 @@ defmodule BmWeb.HomeLive do
   def handle_event("mode", %{"mode" => mode}, socket) do
     {:noreply, assign(socket, mode: if(mode == "task", do: :task, else: :goal))}
   end
+
+  def handle_event("review_goal", _params, socket) do
+    params = socket.assigns.goal_form.params
+    goal = String.trim(params["goal"] || "")
+    path = String.trim(params["path"] || "")
+
+    if goal == "" do
+      form =
+        to_form(params,
+          as: :goal,
+          errors: [goal: {"Describe the goal first.", []}],
+          action: :validate
+        )
+
+      {:noreply, assign(socket, goal_form: form)}
+    else
+      {:noreply,
+       socket
+       |> assign(review: :running)
+       |> start_async(:review, fn -> Bm.GoalReview.review(path, goal) end)}
+    end
+  end
+
+  def handle_event("use_reviewed_goal", params, socket) do
+    %{goal: suggested, questions: questions} = socket.assigns.review
+    answers = params["answers"] || %{}
+
+    clarifications =
+      questions
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {question, i} ->
+        case String.trim(answers[to_string(i)] || "") do
+          "" -> []
+          answer -> ["- #{question} #{answer}"]
+        end
+      end)
+
+    goal =
+      if clarifications == [],
+        do: suggested,
+        else: suggested <> "\n\nClarifications:\n" <> Enum.join(clarifications, "\n")
+
+    params = Map.put(socket.assigns.goal_form.params, "goal", goal)
+    {:noreply, assign(socket, goal_form: to_form(params, as: :goal), review: nil)}
+  end
+
+  def handle_event("dismiss_review", _params, socket), do: {:noreply, assign(socket, review: nil)}
 
   def handle_event("validate_goal", %{"goal" => params}, socket) do
     {:noreply, assign(socket, goal_form: to_form(params, as: :goal))}
@@ -111,6 +161,30 @@ defmodule BmWeb.HomeLive do
         {:noreply, assign(socket, form: form)}
     end
   end
+
+  @impl true
+  def handle_async(:review, {:ok, {:ok, review}}, socket),
+    do: {:noreply, assign(socket, review: review)}
+
+  def handle_async(:review, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> assign(review: nil)
+     |> put_flash(:error, "The goal review did not work: #{review_error(reason)}")}
+  end
+
+  def handle_async(:review, {:exit, reason}, socket) do
+    {:noreply,
+     socket
+     |> assign(review: nil)
+     |> put_flash(:error, "The goal review stopped: #{inspect(reason)}")}
+  end
+
+  defp review_error(:timeout), do: "no answer in time."
+  defp review_error(:unreadable_review), do: "the reviewer's reply could not be read; try again."
+  defp review_error({:not_a_directory, _}), do: "no such directory."
+  defp review_error({:not_repository_root, top}), do: "not the top of a git repository (#{top})."
+  defp review_error(other), do: inspect(other)
 
   # Refills the runs list from the search form and the current page size.
   defp load_runs(socket) do
@@ -337,7 +411,16 @@ defmodule BmWeb.HomeLive do
                 <.hint>Planner and workers.</.hint>
               </div>
             </div>
-            <div class="flex justify-end">
+            <div class="flex items-center justify-end gap-2">
+              <button
+                id="review-goal-btn"
+                type="button"
+                phx-click="review_goal"
+                disabled={@review == :running}
+                class="rounded-md border border-bm-line bg-bm-surface px-3 py-1.5 text-sm font-medium transition-colors hover:bg-bm-raised disabled:opacity-60"
+              >
+                {if @review == :running, do: "Reviewing…", else: "Review goal"}
+              </button>
               <button
                 id="start-goal-btn"
                 type="submit"
@@ -345,6 +428,65 @@ defmodule BmWeb.HomeLive do
                 class="rounded-md bg-bm-text px-3.5 py-1.5 text-sm font-semibold text-bm-surface transition-opacity hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text disabled:opacity-60"
               >
                 Start planning
+              </button>
+            </div>
+          </.form>
+
+          <section
+            :if={@mode == :goal and @review == :running}
+            id="goal-review-running"
+            class="mt-3 flex items-center gap-2 rounded-xl border border-bm-line bg-bm-surface px-4 py-3 text-xs text-bm-muted"
+          >
+            <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
+            A read-only reviewer is looking at the repository and the goal…
+          </section>
+
+          <.form
+            :if={@mode == :goal and is_map(@review)}
+            for={%{}}
+            as={:review}
+            id="goal-review"
+            phx-submit="use_reviewed_goal"
+            class="mt-3 space-y-3 rounded-xl border border-bm-line bg-bm-surface p-4"
+          >
+            <div class="flex items-baseline justify-between gap-3">
+              <h2 class="text-sm font-semibold">Goal review</h2>
+              <span class="font-mono text-[11px] text-bm-muted">{money(@review.cost)}</span>
+            </div>
+            <div>
+              <p class="text-[11px] text-bm-muted">Suggested goal</p>
+              <pre
+                id="reviewed-goal"
+                class="mt-1 whitespace-pre-wrap rounded-md bg-bm-bg px-3 py-2 font-sans text-xs leading-relaxed"
+                phx-no-format
+              >{@review.goal}</pre>
+            </div>
+            <div :if={@review.questions != []} class="space-y-2">
+              <p class="text-[11px] text-bm-muted">Questions (answers are added to the goal)</p>
+              <label :for={{question, i} <- Enum.with_index(@review.questions)} class="block text-xs">
+                <span class="block">{question}</span>
+                <input
+                  type="text"
+                  name={"answers[#{i}]"}
+                  id={"review-answer-#{i}"}
+                  class="mt-1 block w-full rounded-md border border-bm-line bg-bm-bg px-2.5 py-1.5 text-xs outline-none focus:border-bm-muted"
+                />
+              </label>
+            </div>
+            <div class="flex justify-end gap-2">
+              <button
+                type="button"
+                phx-click="dismiss_review"
+                class="rounded-md border border-bm-line px-3 py-1.5 text-xs font-medium transition-colors hover:bg-bm-raised"
+              >
+                Keep my goal
+              </button>
+              <button
+                id="use-reviewed-goal-btn"
+                type="submit"
+                class="rounded-md bg-bm-text px-3 py-1.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
+              >
+                Use suggested goal
               </button>
             </div>
           </.form>
@@ -480,6 +622,7 @@ defmodule BmWeb.HomeLive do
                   <span class="min-w-0 flex-1 truncate text-[13px] font-medium">{run.goal}</span>
                 </div>
                 <div class="mt-1 flex items-center gap-2 text-[11px] text-bm-muted">
+                  <span class="flex-none font-mono">{label(run)}</span>
                   <span class="min-w-0 truncate font-mono" title={run.workspace.path}>
                     {Path.basename(run.workspace.path)}
                   </span>

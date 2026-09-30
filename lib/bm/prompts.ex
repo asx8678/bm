@@ -37,6 +37,9 @@ defmodule Bm.Prompts do
     - Do not start background processes that keep running after you finish.
     - Some files contain the user's uncommitted work and are protected. If a change is refused,
       don't work around it: report the task as blocked and say why.
+    - If the task is genuinely ambiguous (two reasonable readings that lead to different code),
+      call ask_planner once with a specific question. Read the repository first; don't ask
+      what you can find out yourself.
     - Finish by calling submit_result exactly once: status "done" when the task is complete,
       "blocked" if you cannot complete it without something outside your reach, "failed" if you
       tried and could not. Summarize what you changed in at most five sentences.
@@ -93,7 +96,8 @@ defmodule Bm.Prompts do
       as plain shell, prefer running a test the task itself adds, and never hard-code an
       expected value you have not worked out exactly. (A failing verify command, by contrast,
       stops the run until the user decides.)
-    - Once the plan is closed (close_summary or close_plan), BM runs the tasks. It comes back to you only if a task fails, is blocked, or changes
+    - Once the plan is closed (close_summary or close_plan), BM runs the tasks. A worker may
+      ask you one question about an unclear task; then just answer it briefly. It comes back to you only if a task fails, is blocked, or changes
       something unexpected; if every task succeeds, the run finishes. So close the plan only
       when it is complete.
     """

@@ -80,7 +80,8 @@ function runShell(command) {
   return new Promise(resolve => spawn("sh", ["-c", script], {detached: true, stdio: "ignore"}).on("exit", resolve))
 }
 
-// Steps: {"authorize": {tool, input}} stops the work when denied; {"bash": cmd} authorizes, then
+// Steps: {"ask": question} asks the planner (bm:ask_planner) and continues;
+// {"authorize": {tool, input}} stops the work when denied; {"bash": cmd} authorizes, then
 // runs cmd (stops when denied); {"write": [path, text]} writes directly, as a tool would;
 // {"spawn": cmd} starts cmd in the background like a bash tool call; {"submit": {status, summary},
 // "request_id"?: id}; {"hang": true} waits until aborted; {"message": text, "cost"?: false} sends
@@ -105,6 +106,10 @@ async function runWork(steps) {
     } else if (step.spawn) {
       runShell(`${step.spawn} >/dev/null 2>&1 &`)
       await new Promise(resolve => setTimeout(resolve, 100))
+    } else if (step.ask) {
+      const reply = await bmRequest("ask_planner", {question: step.ask})
+      send({type: "tool_execution_start", toolCallId: "ask-1", toolName: "ask_planner", args: {question: step.ask}})
+      send({type: "tool_execution_end", toolCallId: "ask-1", toolName: "ask_planner", result: {content: [{type: "text", text: reply.answer ?? ""}]}, isError: false})
     } else if (step.submit) {
       await bmRequest("submit_result", step.submit, step.request_id)
     } else if (step.message !== undefined) {
@@ -133,6 +138,8 @@ async function runWork(steps) {
 // Answers with one line per proposal: "key: accepted" or "key: rejected (reason)".
 async function runPlanWave(wave) {
   workAborted = false
+  // A scripted answer to a worker's question (the planner's answer turn).
+  if (wave.answer !== undefined) return answer(wave.answer)
   const lines = []
   if (wave.write) {
     const [path, text] = wave.write

@@ -48,6 +48,14 @@ defmodule Bm.Workspace.Coordinator do
     prompt: &Bm.Prompts.worker/2
   ]
 
+  @no_planner_answer %{
+    "ok" => true,
+    "answer" =>
+      "The planner is not available. Decide yourself from the task and the repository, or " <>
+        "submit_result with status blocked and say what is unclear."
+  }
+  @ask_timeout 180_000
+
   ## API
 
   @doc """
@@ -209,6 +217,8 @@ defmodule Bm.Workspace.Coordinator do
       # When the running tool call started, and identical guarded calls seen (plan 11.5).
       tool_since: nil,
       repeats: %{},
+      # Workers' questions waiting for the planner (plan 12.2): task ref => {agent_id, request}.
+      asks: %{},
       # Monitor of the goal run's planner process.
       planner_ref: nil
     }
@@ -751,11 +761,24 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_info({:pi, _id, _event, _summary}, state), do: {:noreply, state}
 
+  # A worker's question for the planner is answered later (a planner turn); see ask_planner/2.
+  def handle_info({:pi_request, id, %{op: "ask_planner"} = request}, %{agent_id: id} = state),
+    do: {:noreply, ask_planner(state, request)}
+
   def handle_info({:pi_request, id, request}, %{agent_id: id} = state) do
     {outcome, state} = handle_request(state, request)
     Bm.Pi.respond(id, request.dialog_id, outcome)
     {:noreply, state}
   end
+
+  def handle_info({ref, answer}, %{asks: asks} = state) when is_map_key(asks, ref) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, answer_ask(state, ref, answer)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{asks: asks} = state)
+      when is_map_key(asks, ref),
+      do: {:noreply, answer_ask(state, ref, @no_planner_answer)}
 
   # A request from an agent that is no longer this coordinator's worker.
   def handle_info({:pi_request, id, request}, state) do
@@ -807,6 +830,54 @@ defmodule Bm.Workspace.Coordinator do
     do: begin_settling(%{state | flags: ["pi_exited" | state.flags]})
 
   defp worker_event(state, _event, _summary), do: state
+
+  ## Questions for the planner (12.2, D24)
+
+  # Checked like any bridge request; answered by the planner's answer turn in a task, so this
+  # process keeps answering the worker's other requests and can cancel.
+  defp ask_planner(state, request) do
+    agent_id = state.agent_id
+
+    case Bm.Bridge.check(:worker, agent_id, request, state.assignment) do
+      {:error, outcome} ->
+        Bm.Pi.respond(agent_id, request.dialog_id, outcome)
+        state
+
+      {:duplicate, outcome} ->
+        Bm.Pi.respond(agent_id, request.dialog_id, outcome)
+        state
+
+      :ok when state.run.planner == nil ->
+        outcome =
+          Bm.Bridge.record(:worker, agent_id, request, state.assignment, @no_planner_answer)
+
+        Bm.Pi.respond(agent_id, request.dialog_id, outcome)
+        state
+
+      :ok ->
+        %{run: %{id: run_id}, task: task} = state
+        question = to_string(request.payload["question"] || "")
+
+        %Task{ref: ref} =
+          Task.Supervisor.async_nolink(Bm.TaskSupervisor, fn ->
+            Bm.Workspace.Planner.answer(run_id, task, question, @ask_timeout)
+          end)
+
+        %{state | asks: Map.put(state.asks, ref, {agent_id, request, state.assignment})}
+    end
+  end
+
+  defp answer_ask(state, ref, answer) do
+    {{agent_id, request, assignment}, asks} = Map.pop(state.asks, ref)
+
+    answer =
+      if match?(%{"ok" => true, "answer" => _}, answer), do: answer, else: @no_planner_answer
+
+    outcome = Bm.Bridge.record(:worker, agent_id, request, assignment, answer)
+    # Answered even if the attempt ended meanwhile: an unknown dialog is ignored by the adapter.
+    Bm.Pi.respond(agent_id, request.dialog_id, outcome)
+    %{state | asks: asks}
+  end
 
   ## Limits (5.1, 5.2, 11.5)
 

@@ -38,7 +38,7 @@ defmodule BmWeb.RunLive do
     {:ok,
      socket
      |> assign(
-       page_title: run.goal,
+       page_title: "#{label(run)} · #{run.goal}",
        run: run,
        root: root,
        lane: lane(run),
@@ -427,7 +427,7 @@ defmodule BmWeb.RunLive do
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-bm-muted">
               <.run_status id="run-status" status={@run.status} />
               <div class="bm-meta flex flex-wrap items-center gap-y-1">
-                <span class="font-mono">run #{@run.id}</span>
+                <span id="run-label" class="font-mono">{label(@run)}</span>
                 <span>started <.ago at={@run.inserted_at} /></span>
                 <span :if={@run.finished_at}>
                   took {duration(@run.inserted_at, @run.finished_at)}
@@ -626,7 +626,7 @@ defmodule BmWeb.RunLive do
       <ol class="max-h-96 space-y-2 overflow-y-auto px-3 py-2">
         <li :if={@log == []} class="text-xs text-bm-muted">Nothing yet.</li>
         <li :for={entry <- @log} class="text-xs">
-          <details class="group" open={entry["kind"] in ["reply", "end", "paused"]}>
+          <details class="group" open={entry["kind"] in ["reply", "end", "paused", "answer"]}>
             <summary class="flex cursor-pointer list-none items-center gap-2">
               <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
               <span class={["flex-none whitespace-nowrap font-medium", log_tone(entry["kind"])]}>
@@ -655,6 +655,7 @@ defmodule BmWeb.RunLive do
   defp phase_label(:starting, _run), do: "starting"
   defp phase_label(:busy, _run), do: "thinking"
   defp phase_label(:idle, _run), do: "waiting while tasks run"
+  defp phase_label(:answering, _run), do: "answering a worker"
   defp phase_label(_phase, %{status: :active}), do: "not running"
   defp phase_label(_phase, _run), do: "finished"
 
@@ -665,6 +666,8 @@ defmodule BmWeb.RunLive do
   defp log_label("end"), do: "Run ended"
   defp log_label("paused"), do: "Run paused"
   defp log_label("note"), do: "Note"
+  defp log_label("question"), do: "Worker asked"
+  defp log_label("answer"), do: "Planner answered"
   defp log_label(kind), do: kind
 
   defp log_tone(kind) when kind in ["paused"], do: "text-bm-run"

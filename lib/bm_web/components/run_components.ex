@@ -44,6 +44,9 @@ defmodule BmWeb.RunComponents do
 
   def duration(_from, _to), do: nil
 
+  @doc "The short label of a run, e.g. `BM-54`."
+  def label(%{id: id}), do: "BM-#{id}"
+
   @doc "Money in USD with four decimals, the precision of model pricing."
   def money(nil), do: "–"
   def money(amount), do: "$" <> :erlang.float_to_binary(amount * 1.0, decimals: 4)

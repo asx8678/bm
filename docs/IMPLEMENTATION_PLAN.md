@@ -30,6 +30,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
 | 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
 | 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
+| 12 | Better plans, fewer failures | 12.1–12.3 | run labels, `ask_planner` for workers, goal review before planning |
 
 ---
 
@@ -872,3 +873,64 @@ three are coordinator options. Soft budget: an unfinished run past 80 % of its b
 with the smallest plan. Checked with a scratch script on the fake pi: 4th identical call refused;
 with `repeat_cancel: 3` the attempt was cancelled; with `tool_timeout: 1_000` a `sleep 5` was
 cancelled. The soft-budget warning and note were read through, not seen live.
+
+---
+
+## Phase 12: better plans, fewer failures
+
+Scoped 2026-09-30 after merging Phase 11 (branch `phase-12`). The trial showed safety holding;
+the weak spots are how well a goal is understood and what a worker does with an unclear task.
+No tests written or run (user's instruction); checked by compiling, the browser, scratch
+scripts on the fake pi and small live runs.
+
+**12.1 Run labels.** `BmWeb.RunComponents.label/1` → `BM-<id>`; used in the run header, the run
+page title and the Tasks page runs list.
+
+**12.2 `ask_planner` for workers (D24).** A worker whose task is genuinely ambiguous asks the
+planner one specific question and waits for the answer. The worker is blocked inside that tool
+call, so the planner may take a short **answer turn** while the attempt runs: an exception to D21.
+No snapshot check on answer turns (anything written in that window is attributed to the attempt,
+whose own snapshots and verification cover it; the planner still can't write, read-only policy);
+the planner may not propose tasks or close the plan in an answer turn. Bridge split into
+`check/3` (role, fencing, duplicates) and `record/5` (persist) so a model turn never holds a
+transaction; the coordinator asks asynchronously (`state.asks`), answers with a fallback if the
+planner is unavailable, times out (3 min) below the tool timeout, and still answers the dialog if
+the attempt ends meanwhile. Single-task runs answer "no planner; decide yourself or report
+blocked". Planner log kinds `question`/`answer`; run page phase "answering a worker".
+
+**12.3 Goal review.** In the Goal form, "Review goal" asks a read-only planner-profile session
+(read-only bash answered by the policy) for clarifying questions and a sharper goal; the user
+answers inline and applies the suggested goal before starting. Not on the chat page (that runs
+the user's own unguarded pi).
+
+**Not in this phase:** a trial on a project of the user's (needs the repository and its verify
+command from the user).
+
+**Status 12.1–12.2 (2026-09-30).** Labels in place (run header, title, runs list). `ask_planner`
+built as scoped (D24): `Bridge.check/4` + `record/5`; the coordinator asks asynchronously
+(`state.asks`, fallback "planner not available…", 3 min) and answers the dialog even if the
+attempt ended; the planner's `:answering` phase replies from its turn without a snapshot check or
+scheduling and refuses proposals meanwhile; worker prompt says when to ask; profiles require the
+tool (existing tool-list expectations kept in sync). Checked with a scratch script on the fake pi:
+the worker's question was recorded with the planner's answer, the log shows "Worker asked" /
+"Planner answered", the run ended done. Live on the trial clone (run 62, an ambiguous goal): real
+workers started with the new tool (profile check passed), but **no worker asked**; the planner had
+resolved the ambiguity in its plan. The question path is so far seen only with the fake pi.
+Found on the way (dev only): the dev server's long-lived coordinator for the clone had been
+started before the coordinator's state gained new keys; hot code reloading kept its old state and
+the next attempt crashed (`KeyError :repeats`), taking the planner with it. Restarting the server
+fixed it, and the restart exercised recovery on a real run: the attempt became "interrupted (no
+changes; safe to run again)", run 62 paused "planner lost"; Resume planning started session 2,
+which re-proposed the interrupted task, and the run ended done (2 tasks, $0.27). Rule: restart
+the dev server after changing the coordinator's or planner's state.
+
+**Status 12.3 (2026-09-30); Phase 12 done.** `Bm.GoalReview.review/2`: a planner-profile pi
+session owned by the caller (the LiveView's async task), its read-only bash answered by the policy,
+proposals refused; it returns up to 4 questions and a goal rewritten in at most 6 sentences
+(files and checks, no line numbers), parsed from a JSON reply. Tasks page: "Review goal" beside
+Start planning; the panel shows the suggested goal and the questions with answer fields; "Use
+suggested goal" puts it in the goal field with the answered questions under "Clarifications:";
+"Keep my goal" closes it. Checked in the browser on the trial clone ("make the runs list nicer",
+$0.04 per review; `docs/screenshots/goal-review.png`): four relevant questions, a concrete goal,
+and the applied goal ended with the answered question. Not done in this phase: a trial on a
+project of the user's (needs the repository and verify command).
