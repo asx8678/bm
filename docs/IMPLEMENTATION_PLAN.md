@@ -1630,6 +1630,15 @@ t1 cancelled, t2 blocked. Missed by the reviewer: `mix bm.undo`'s moduledoc cite
 `/tmp/bm-trial-28` holds them as commits on top of the real repository's phase-28 branch; they
 reach the real repository only if the user asks.
 
+**28.5 Brought into the real repository (2026-09-30, at the user's request).** The three commits
+BM made in the clone (runs 136, 137, 139) were cherry-picked onto `main` (the clone's copy of the
+28.4 fix was skipped: `main` has it). Fixed by hand: all three new mix tasks (`bm.pause`,
+`bm.resume`, `bm.undo`) had copied `mix bm.commit`'s reference "plan 15.1, decision D26" into
+their moduledocs; they now name their own plans (23.1/26.4, 7.9/22.1, 13.3/23.1 and D28) and say
+when each works. Checked against the dev server: `mix bm.runs --status done` and `--status bogus`,
+pause and resume refused for a finished run, `mix bm.undo` with an unknown key refused,
+`mix bm.status` unchanged for a run that waits for nothing.
+
 ---
 
 ## Benchmark refresh (2026-09-30, after Phase 28)

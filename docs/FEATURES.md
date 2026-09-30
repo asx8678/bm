@@ -153,7 +153,7 @@ Each has a precondition; don't start one before it holds.
 | Short labels for runs and agents (`BM-12`) — runs **done** (plan 12.1) | S |
 | Transcript per attempt — **done 2026-09-30** as a stored compact transcript and an Activity fold (plan 10.4), not pi `export_html` | S |
 | Pruning old `refs/bm/…` checkpoints — **done 2026-09-30** (plan 10.3) | S |
-| CLI client attached to runs — **done** as `mix bm.attach` (plan 24.2) | M |
+| CLI client attached to runs — **done** as `mix bm.attach` (plan 24.2), with `mix bm.pause`, `bm.resume`, `bm.undo` and a status filter for `mix bm.runs` (plan 28, made by BM itself) | M |
 | Front "questioning" agent that sharpens vague requests — **done** as goal review in the Goal form (plan 12.3) | M |
 
 ### Experimental

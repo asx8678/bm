@@ -154,4 +154,6 @@ Clone `/tmp/bm-trial-28` of this repository; verify `mix compile --warnings-as-e
   not report it as waiting, so the terminal stayed silent.
 - The reviewer caught a real bug in run 139; it missed a wrong reference in a moduledoc.
 - Every change was run from the clone: its own server on port 4012 and its own mix tasks.
+- All three changes were then brought into the real repository at the user's request (plan 28.5);
+  the reviewer had missed that the three new mix tasks cited the wrong plan step (fixed by hand).
 

@@ -7,6 +7,9 @@ defmodule Mix.Tasks.Bm.Runs do
       mix bm.runs            # the 20 most recent
       mix bm.runs calc       # whose goal or repository contains "calc"
       mix bm.runs --limit 50
+      mix bm.runs --status active
+
+  `--status` filters by run status: `active`, `paused`, `done`, `failed` or `cancelled`.
   """
 
   use Mix.Task
@@ -15,9 +18,14 @@ defmodule Mix.Tasks.Bm.Runs do
 
   @impl true
   def run(args) do
-    {opts, words, _} = OptionParser.parse(args, strict: [limit: :integer])
+    {opts, words, _} = OptionParser.parse(args, strict: [limit: :integer, status: :string])
     CLI.start()
-    query = URI.encode_query(%{limit: opts[:limit] || 20, q: Enum.join(words, " ")})
+
+    query =
+      URI.encode_query(
+        %{limit: opts[:limit] || 20, q: Enum.join(words, " ")}
+        |> maybe_put("status", opts[:status])
+      )
 
     case CLI.get("/api/runs?" <> query) do
       {:ok, %{"runs" => []}} ->
@@ -36,4 +44,7 @@ defmodule Mix.Tasks.Bm.Runs do
         Mix.raise(message)
     end
   end
+
+  defp maybe_put(query, _key, nil), do: query
+  defp maybe_put(query, key, value), do: Map.put(query, key, value)
 end
