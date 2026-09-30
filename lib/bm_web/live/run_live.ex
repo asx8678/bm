@@ -38,7 +38,7 @@ defmodule BmWeb.RunLive do
     {:ok,
      socket
      |> assign(
-       page_title: run.goal,
+       page_title: "#{label(run)} · #{run.goal}",
        run: run,
        root: root,
        lane: lane(run),
@@ -427,7 +427,7 @@ defmodule BmWeb.RunLive do
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-bm-muted">
               <.run_status id="run-status" status={@run.status} />
               <div class="bm-meta flex flex-wrap items-center gap-y-1">
-                <span class="font-mono">run #{@run.id}</span>
+                <span id="run-label" class="font-mono">{label(@run)}</span>
                 <span>started <.ago at={@run.inserted_at} /></span>
                 <span :if={@run.finished_at}>
                   took {duration(@run.inserted_at, @run.finished_at)}

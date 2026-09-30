@@ -30,6 +30,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
 | 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
 | 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
+| 12 | Better plans, fewer failures | 12.1–12.3 | run labels, `ask_planner` for workers, goal review before planning |
 
 ---
 
@@ -872,3 +873,35 @@ three are coordinator options. Soft budget: an unfinished run past 80 % of its b
 with the smallest plan. Checked with a scratch script on the fake pi: 4th identical call refused;
 with `repeat_cancel: 3` the attempt was cancelled; with `tool_timeout: 1_000` a `sleep 5` was
 cancelled. The soft-budget warning and note were read through, not seen live.
+
+---
+
+## Phase 12: better plans, fewer failures
+
+Scoped 2026-09-30 after merging Phase 11 (branch `phase-12`). The trial showed safety holding;
+the weak spots are how well a goal is understood and what a worker does with an unclear task.
+No tests written or run (user's instruction); checked by compiling, the browser, scratch
+scripts on the fake pi and small live runs.
+
+**12.1 Run labels.** `BmWeb.RunComponents.label/1` → `BM-<id>`; used in the run header, the run
+page title and the Tasks page runs list.
+
+**12.2 `ask_planner` for workers (D24).** A worker whose task is genuinely ambiguous asks the
+planner one specific question and waits for the answer. The worker is blocked inside that tool
+call, so the planner may take a short **answer turn** while the attempt runs: an exception to D21.
+No snapshot check on answer turns (anything written in that window is attributed to the attempt,
+whose own snapshots and verification cover it; the planner still can't write, read-only policy);
+the planner may not propose tasks or close the plan in an answer turn. Bridge split into
+`check/3` (role, fencing, duplicates) and `record/5` (persist) so a model turn never holds a
+transaction; the coordinator asks asynchronously (`state.asks`), answers with a fallback if the
+planner is unavailable, times out (3 min) below the tool timeout, and still answers the dialog if
+the attempt ends meanwhile. Single-task runs answer "no planner; decide yourself or report
+blocked". Planner log kinds `question`/`answer`; run page phase "answering a worker".
+
+**12.3 Goal review.** In the Goal form, "Review goal" asks a read-only planner-profile session
+(read-only bash answered by the policy) for clarifying questions and a sharper goal; the user
+answers inline and applies the suggested goal before starting. Not on the chat page (that runs
+the user's own unguarded pi).
+
+**Not in this phase:** a trial on a project of the user's (needs the repository and its verify
+command from the user).

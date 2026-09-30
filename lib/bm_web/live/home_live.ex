@@ -480,6 +480,7 @@ defmodule BmWeb.HomeLive do
                   <span class="min-w-0 flex-1 truncate text-[13px] font-medium">{run.goal}</span>
                 </div>
                 <div class="mt-1 flex items-center gap-2 text-[11px] text-bm-muted">
+                  <span class="flex-none font-mono">{label(run)}</span>
                   <span class="min-w-0 truncate font-mono" title={run.workspace.path}>
                     {Path.basename(run.workspace.path)}
                   </span>
