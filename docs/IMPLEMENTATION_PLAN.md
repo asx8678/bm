@@ -1154,3 +1154,50 @@ it. The real sandbox was not touched (clones in /tmp).
   ignore it, which holds the attempt as a reviewer write.
 
 **Status: Phase 18 done and reviewed (2026-09-30).**
+
+---
+
+## Phase 19: real use on the sandbox
+
+Scoped 2026-09-30 by the user's choice (the open optional features have no evidence from real use
+yet): confirm on `~/projects/bm-sandbox` itself, not a throwaway clone, that Phase 18's reviewer
+catches boundary bugs, and fix what turns up. No tests (user's instruction).
+
+**19.1 See what the reviewer ran.** The review records the reviewer's bash commands and the
+policy's answer (allowed, or refused with the reason) with the review; the run page lists them
+under the review's reason. Until now only the reviewer's own summary said whether it probed.
+
+**Status 19.1 (2026-09-30).** `Bm.Review` returns the reviewer's bash commands (at most 40, 2,000
+characters each) with the policy's answer; the coordinator stores them as `review.commands`, also
+when files changed during the review; the run page lists them under the reason (✓ ran, ✕ refused
+with the reason). Checked with the fake pi (run 87): a heredoc probe and a `python3 -c` import
+listed as run, a `touch` after the verdict listed as refused with the policy's reason. Refused
+`edit`/`write` calls are listed too (`write probe.txt`, checked the same way, run 91).
+
+**19.2 Close 18.4's known limits.** A heredoc body (`node <<'EOF' … EOF`) is the command's input,
+not shell, unless a shell reads it (`bash <<EOF` is checked as a command). Read-only sessions
+(planner, reader, reviewer) run with `PYTHONDONTWRITEBYTECODE=1`, so a `python3 -c` probe
+doesn't write `__pycache__/`.
+
+**Status 19.2 (2026-09-30).** `Bm.Policy`: a heredoc body is blanked before the checks unless the
+line holding `<<` runs a shell (then the body is checked as a command); one heredoc per line.
+Compared with the policy before on 46 commands in both modes: only six read-only heredoc probes
+changed (refused → allowed); `bash <<EOF` with `git push`, `sh <<X` with `rm -rf` outside, `cat
+<<EOF | sh` with `npm install`, `git commit -F - <<EOF` and a command after a heredoc are still
+refused. `Bm.Pi.Profile` gives roles without `edit` (planner, reader) `PYTHONDONTWRITEBYTECODE=1`.
+Checked with the fake pi: the reviewer's `python3 -c "import mod"` left no `__pycache__/` (the
+same import without it writes one) and the change was approved.
+
+**19.3 Goals on the sandbox.** Two or three goals with contracts that have edge cases, started
+with `mix bm.goal`, each change checked by hand (code read, own probes of the boundaries) and
+committed with `mix bm.commit`. Findings go to TRIALS.md and are fixed in this phase.
+
+**Status 19.3 (2026-09-30).** Runs 88–90 (TRIALS.md): `wrap`, `slugify` maxLength, the CLI `wrap`
+command; each done in one task with the review approved, checked by hand, committed; $0.16. The
+planner named the boundary cases every time and each reviewer probed them; no command refused,
+no reviewer write. Fixed F6: recorded commands were cut at 500 characters (now 2,000). Not
+exercised: a reviewer *catching* a boundary bug, since every worker got the edges right.
+
+**Status: Phase 19 done (2026-09-30).** Open: a seeded-bug check (a worker made to write a change
+that breaks its contract at one boundary, with tests that miss it, judged by the real reviewer)
+would show whether the reviewer catches it; it needs the user's approval (a clone, ≈$0.05).
