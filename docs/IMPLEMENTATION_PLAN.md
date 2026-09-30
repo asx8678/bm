@@ -1201,3 +1201,22 @@ exercised: a reviewer *catching* a boundary bug, since every worker got the edge
 **Status: Phase 19 done (2026-09-30).** Open: a seeded-bug check (a worker made to write a change
 that breaks its contract at one boundary, with tests that miss it, judged by the real reviewer)
 would show whether the reviewer catches it; it needs the user's approval (a clone, ≈$0.05).
+
+---
+
+## Phase 20: real use beyond the sandbox
+
+Scoped 2026-09-30 after Phase 19: the sandbox's goals now pass cleanly, and the optional
+features still have no evidence from real use. No tests (user's instruction).
+
+**20.1 Does the reviewer catch a boundary bug?** Phase 19's reviewers probed well but never had a
+bug to catch. On throwaway clones of the sandbox (in /tmp; the real sandbox is not touched), a
+goal with a clear contract runs with the real planner and reviewer, but the worker is told to
+write a given implementation with one boundary bug and tests that miss it. Two samples: an
+off-by-one at the exact limit (`<` for `<=`) and `max = 0` not handled. It passes if the reviewer
+rejects and names the failing input. The run is ended after the first review (≈$0.05 each).
+
+**20.2 A trial on a project of the user's.** Waits for the user to name the repository and its
+verify command.
+
+**20.3 Fix what 20.1 and 20.2 find.**
