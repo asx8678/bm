@@ -341,7 +341,9 @@ defmodule Bm.Policy do
          "environment, which BM does not do. If the task needs it, report the task as blocked " <>
          "and name the command the user should run."}
     else
-      :allow
+      # npm, mix, cargo and gem are also publishing tools (found by the test suite after
+      # plan 17.1 had let `npm publish` through here).
+      check_publishing(cmd, args)
     end
   end
 
@@ -377,7 +379,9 @@ defmodule Bm.Policy do
     end
   end
 
-  defp check_command(cmd, args, _ctx) do
+  defp check_command(cmd, args, _ctx), do: check_publishing(cmd, args)
+
+  defp check_publishing(cmd, args) do
     if [cmd | Enum.take(args, 1)] in @publishing,
       do: {:deny, "Publishing (#{Enum.join([cmd | Enum.take(args, 1)], " ")}) is not allowed."},
       else: :allow

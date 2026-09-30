@@ -13,7 +13,9 @@ defmodule Bm.Pi.ProfileTest do
     planner = Profile.build(:planner)
     assert "--no-extensions" in planner.command
     assert tools(planner) == ~w(read grep find ls bash propose_plan propose_task close_plan)
-    assert planner.env == %{}
+    # Read-only roles don't write Python bytecode during probes (plan 19.2).
+    assert planner.env == %{"PYTHONDONTWRITEBYTECODE" => "1"}
+    assert Profile.build(:reader).env == %{"PYTHONDONTWRITEBYTECODE" => "1"}
 
     writer = Profile.build(:writer)
     assert ~w(edit write bash submit_result) -- tools(writer) == []
