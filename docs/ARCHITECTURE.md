@@ -275,7 +275,8 @@ known-dangerous commands (git writes, `setsid`, `sudo`, publishing), and applies
 rules to edit/write and to files a shell command visibly writes (redirects, `tee`, `sed -i`,
 `cp`/`mv`/`install`/`ln` destinations, `rm`): inside the checkout, not `.git`, not user-owned.
 Quoted text is an argument, not shell syntax (`node -e 'x => x > 0'` writes nothing); `sh -c`
-and `eval` strings are checked as commands (plan 18.4). In goal runs the reviewer may run such
+and `eval` strings are checked as commands (plan 18.4); a heredoc body is the command's input
+unless a shell reads it (plan 19.2). In goal runs the reviewer may run such
 print-only commands; anything that changes during the review becomes part of the attempt,
 which is held for the user (flag `reviewer_wrote`). It is a safety net, not a sandbox.
 

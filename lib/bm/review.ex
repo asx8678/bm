@@ -126,5 +126,11 @@ defmodule Bm.Review do
     end
   end
 
+  # The reviewer may not edit or write: record the attempt, so the run page shows it tried.
+  defp record(commands, tool, input, {:deny, reason}) when tool in ["edit", "write"] do
+    command = "#{tool} #{input["path"]}"
+    [%{"command" => command, "allowed" => false, "reason" => reason} | commands]
+  end
+
   defp record(commands, _tool, _input, _decision), do: commands
 end

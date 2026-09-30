@@ -70,3 +70,31 @@ dependency-free Node package (`slugify`, `wordCount`, tests with `node --test`).
   its own contract for `max = 0`. BM's gates only catch what the tests and the reviewer think of;
   edge cases still need a human look or a goal that names them. Run 79 fixed it cleanly.
 - Total: 3 goals, 4 tasks, $0.17, no attempt held or failed; HEAD moved only through `mix bm.commit`.
+
+## Sandbox repository, Phase 19 (2026-09-30)
+
+Same repository and procedure (`mix bm.goal`, verify `node --test`, budget $0.50, each accepted
+change checked by hand and committed with `mix bm.commit`), now with the reviewer's commands
+recorded (plan 19.1). The goals state a contract with edge cases without listing them.
+
+| Run | Goal | Tasks | Outcome | Cost |
+|---|---|---|---|---|
+| 88 | `wrap(text, width)`: lines of at most width, break at spaces, split long words, keep line breaks, RangeError for a width that is not a positive integer | 1 | done, review approved; committed 2d3b294 | $0.056 |
+| 89 | `slugify(text, maxLength)`: at most maxLength, cut at a hyphen, first word cut if too long, never ends with a hyphen, RangeError otherwise | 1 | done, review approved; committed b82bb3b | $0.060 |
+| 90 | `textkit wrap <width> <text>` with the other commands' usage errors, tests, README | 1 | done, review approved; committed a23044c | $0.047 |
+
+- **Phase 18 held on the real repository:** every `done_when` named the boundary cases (width 1,
+  exact fit, one past, 0, -1, 1.5, NaN, Infinity, a cut on a hyphen, a first word that is too
+  long, each bad CLI usage), the tests covered them, and each reviewer ran one probe over those
+  inputs (a `node -e` table, or the CLI with `echo "exit=$?"`). No command was refused, no reviewer
+  changed files.
+- **Not exercised:** catching a boundary bug. Every worker got the edge cases right, so the
+  reviewers had nothing to reject; these runs show probing and no false rejections, not a catch.
+- Checked by hand: code read, own probes of the boundaries, tests 21 → 33 → 40 → 42, all passing.
+- **F6 (fixed):** the first recorded probe (run 88) was cut at 500 characters, hiding part of its
+  input table; commands now keep 2,000.
+- **Observations, not contract breaks by the goals' wording:** `wrap("abc ", 3)` returns
+  `"abc\n"` (a trailing space at a full line adds an empty last line); the CLI reads the width
+  with `Number()` like `truncate` does, so `0x10`, `1e1` and `" 5"` are accepted as 16, 10 and 5.
+- Total: 3 goals, 3 tasks, $0.16; HEAD moved only through `mix bm.commit`.
+
