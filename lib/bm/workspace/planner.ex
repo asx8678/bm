@@ -82,6 +82,19 @@ defmodule Bm.Workspace.Planner do
     end
   end
 
+  @doc """
+  A worker's question (plan 12.2, D24): the planner answers in a short turn while the worker
+  waits. Only when the planner is idle; otherwise, or on timeout, `:unavailable`.
+  """
+  def answer(run_id, task, question, timeout) do
+    case whereis(run_id) do
+      nil -> :unavailable
+      pid -> GenServer.call(pid, {:answer, task, question}, timeout)
+    end
+  catch
+    :exit, _ -> :unavailable
+  end
+
   @doc "Phase and counters, for tests and the run page."
   def state(run_id) do
     case whereis(run_id) do
@@ -145,7 +158,9 @@ defmodule Bm.Workspace.Planner do
       plan_timer: nil,
       aborting?: false,
       # Set when a limit is hit during a turn: the run fails once the planner is idle.
-      fail_reason: nil
+      fail_reason: nil,
+      # The caller waiting for an answer turn (a worker's question, plan 12.2).
+      answering: nil
     }
 
     coordinator = self()
@@ -161,6 +176,26 @@ defmodule Bm.Workspace.Planner do
   end
 
   @impl true
+  def handle_call({:answer, task, question}, from, %{phase: :idle} = state) do
+    text = """
+    A worker doing task #{task.key} (#{task.title}) asks:
+
+    #{question}
+
+    Answer in a few sentences from what you know of the goal, the plan and the repository.
+    Do not propose tasks and do not close the plan now; just answer.
+    """
+
+    state = %{state | answering: from}
+
+    case begin_turn(state, :question, text) do
+      {:noreply, %{phase: :busy} = state} -> {:noreply, %{state | phase: :answering}}
+      other -> other
+    end
+  end
+
+  def handle_call({:answer, _task, _question}, _from, state), do: {:reply, :unavailable, state}
+
   def handle_call(:state, _from, state) do
     {:reply, Map.take(state, [:phase, :turn, :rejections, :agent_id, :reminded?]), state}
   end
@@ -193,6 +228,9 @@ defmodule Bm.Workspace.Planner do
 
       {:status, %{status: :idle}} when state.phase == :busy and state.seen_running? ->
         turn_ended(state)
+
+      {:status, %{status: :idle}} when state.phase == :answering and state.seen_running? ->
+        answer_ended(state)
 
       {_event, %{status: :exited}} when state.phase in [:busy, :idle] ->
         pause(state, "the planner's pi process exited")
@@ -241,6 +279,12 @@ defmodule Bm.Workspace.Planner do
     if run.status == :active and run.plan_open,
       do: end_run(state, :failed, "the planner left the plan open"),
       else: {:noreply, state}
+  end
+
+  # An answer turn that takes too long: stop the model and give the worker the fallback.
+  def handle_info({:turn_timeout, turn}, %{turn: turn, phase: :answering} = state) do
+    GenServer.reply(state.answering, :unavailable)
+    {:noreply, abort(%{state | phase: :idle, answering: nil})}
   end
 
   def handle_info({:turn_timeout, turn}, %{turn: turn, phase: :busy} = state) do
@@ -360,6 +404,16 @@ defmodule Bm.Workspace.Planner do
   defp kind_label(:prompt), do: "prompt"
   defp kind_label(:delivery), do: "results"
   defp kind_label(:reminder), do: "reminder"
+  defp kind_label(:question), do: "question"
+
+  # No snapshot check and no scheduling after an answer turn (D24): the worker's attempt is still
+  # running, its own snapshots cover this window, and the planner can't write (read-only policy).
+  defp answer_ended(state) do
+    text = last_reply(state.agent_id)
+    log(state, "answer", text)
+    GenServer.reply(state.answering, %{"ok" => true, "answer" => text})
+    {:noreply, broadcast(%{state | phase: :idle, answering: nil, seen_running?: false})}
+  end
 
   defp turn_ended(state) do
     state = broadcast(%{state | phase: :idle, seen_running?: false})
@@ -402,10 +456,22 @@ defmodule Bm.Workspace.Planner do
     outcome =
       Bm.Bridge.handle(:planner, state.agent_id, request, state.assignment, fn request ->
         case request.op do
-          "propose_task" -> propose(state, request.payload)
-          "propose_plan" -> propose_plan(state, request.payload)
-          "close_plan" -> close_plan(state, request.payload)
-          "authorize" -> authorize(state, request.payload)
+          op
+          when op in ["propose_task", "propose_plan", "close_plan"] and
+                 state.phase == :answering ->
+            rejected("You are answering a worker's question; just answer it.")
+
+          "propose_task" ->
+            propose(state, request.payload)
+
+          "propose_plan" ->
+            propose_plan(state, request.payload)
+
+          "close_plan" ->
+            close_plan(state, request.payload)
+
+          "authorize" ->
+            authorize(state, request.payload)
         end
       end)
 

@@ -905,3 +905,21 @@ the user's own unguarded pi).
 
 **Not in this phase:** a trial on a project of the user's (needs the repository and its verify
 command from the user).
+
+**Status 12.1–12.2 (2026-09-30).** Labels in place (run header, title, runs list). `ask_planner`
+built as scoped (D24): `Bridge.check/4` + `record/5`; the coordinator asks asynchronously
+(`state.asks`, fallback "planner not available…", 3 min) and answers the dialog even if the
+attempt ended; the planner's `:answering` phase replies from its turn without a snapshot check or
+scheduling and refuses proposals meanwhile; worker prompt says when to ask; profiles require the
+tool (existing tool-list expectations kept in sync). Checked with a scratch script on the fake pi:
+the worker's question was recorded with the planner's answer, the log shows "Worker asked" /
+"Planner answered", the run ended done. Live on the trial clone (run 62, an ambiguous goal): real
+workers started with the new tool (profile check passed), but **no worker asked**; the planner had
+resolved the ambiguity in its plan. The question path is so far seen only with the fake pi.
+Found on the way (dev only): the dev server's long-lived coordinator for the clone had been
+started before the coordinator's state gained new keys; hot code reloading kept its old state and
+the next attempt crashed (`KeyError :repeats`), taking the planner with it. Restarting the server
+fixed it, and the restart exercised recovery on a real run: the attempt became "interrupted (no
+changes; safe to run again)", run 62 paused "planner lost"; Resume planning started session 2,
+which re-proposed the interrupted task, and the run ended done (2 tasks, $0.27). Rule: restart
+the dev server after changing the coordinator's or planner's state.

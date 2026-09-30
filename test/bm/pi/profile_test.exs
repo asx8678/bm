@@ -46,7 +46,7 @@ defmodule Bm.Pi.ProfileTest do
 
   test "a missing required tool fails the check" do
     profile = Profile.build(:reader)
-    reports = %{"profile" => %{"tools" => ~w(read grep bash)}}
+    reports = %{"profile" => %{"tools" => ~w(read grep bash ask_planner)}}
 
     assert {:error, {:missing_tools, ["submit_result"]}} =
              Profile.verify({:ok, %{model: "Fake Model", reports: reports}}, profile)
@@ -54,7 +54,7 @@ defmodule Bm.Pi.ProfileTest do
 
   test "a different model fails the check" do
     profile = Profile.build(:reader)
-    reports = %{"profile" => %{"tools" => ~w(read bash submit_result)}}
+    reports = %{"profile" => %{"tools" => ~w(read bash submit_result ask_planner)}}
 
     assert {:error, {:model_mismatch, "Other"}} =
              Profile.verify({:ok, %{model: "Other", reports: reports}}, profile)

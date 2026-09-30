@@ -106,7 +106,9 @@ defmodule Bm.Live.QualificationTest do
 
   test "reader: submit_result is answered by the BEAM; mutating tools are not available", ctx do
     report = start!(ctx, :reader)
-    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls bash submit_result))
+
+    assert Enum.sort(report.tools) ==
+             Enum.sort(~w(read grep find ls bash submit_result ask_planner))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """
@@ -138,7 +140,7 @@ defmodule Bm.Live.QualificationTest do
     report = start!(ctx, :writer)
 
     assert Enum.sort(report.tools) ==
-             Enum.sort(~w(read grep find ls edit write bash submit_result))
+             Enum.sort(~w(read grep find ls edit write bash submit_result ask_planner))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """

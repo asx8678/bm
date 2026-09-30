@@ -27,7 +27,7 @@ defmodule Bm.Bridge do
 
   @ops %{
     planner: ~w(propose_plan propose_task close_plan authorize),
-    worker: ~w(submit_result authorize)
+    worker: ~w(submit_result authorize ask_planner)
   }
 
   @type role :: :planner | :worker
@@ -61,6 +61,35 @@ defmodule Bm.Bridge do
       true ->
         persist(role, agent_id, request, assignment, fun)
     end
+  end
+
+  @doc """
+  Steps 1–3 of `handle/5` without running anything: for requests answered later (a worker's
+  `ask_planner` waits for a planner turn, which must not hold a transaction). Returns `:ok`,
+  `{:duplicate, outcome}` or `{:error, outcome}`; persist the answer with `record/5`.
+  """
+  def check(role, agent_id, request, assignment) do
+    cond do
+      request.op not in allowed_ops(role) ->
+        {:error, %{"ok" => false, "error" => "operation_not_allowed", "op" => request.op}}
+
+      not assigned?(role, assignment) ->
+        {:error, %{"ok" => false, "error" => "not_assigned"}}
+
+      request.session_epoch != assignment.session_epoch ->
+        {:error, %{"ok" => false, "error" => "stale"}}
+
+      get(request.request_id) ->
+        {:duplicate, stored_outcome(request.request_id, agent_id)}
+
+      true ->
+        :ok
+    end
+  end
+
+  @doc "Persists an outcome computed outside `handle/5` (see `check/4`); returns the outcome kept."
+  def record(role, agent_id, request, assignment, outcome) do
+    persist(role, agent_id, request, assignment, fn _request -> outcome end)
   end
 
   defp assigned?(_role, nil), do: false
