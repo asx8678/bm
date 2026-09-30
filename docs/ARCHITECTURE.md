@@ -209,7 +209,10 @@ every task was accepted); `propose_task` adds or re-proposes one task (plan phas
 **Baseline and dirty policy.** At run start the coordinator records HEAD, a snapshot tree (D19)
 and every modified, staged or untracked (non-ignored) path. Those files are **user-owned** for the
 run: agents may read them; a task that needs to change one is blocked and reported. BM never
-stages, stashes or commits user changes. Before the first attempt the verify command runs once
+stages, stashes or commits user changes. **The set grows during the run (plan 13.1):** before each
+attempt, files that differ from the state BM last left (the previous attempt's `tree_after`, its
+`tree_before` if reverted, or the baseline tree) were changed outside BM and become user-owned
+too (`baseline.changed_during_run`). Before the first attempt the verify command runs once
 on the checkout as the user left it (`runs.baseline_verify`, plan 6.6.3): a checkout that already
 fails is shown as such, and files the command generates are excluded from the first attempt's
 write set.

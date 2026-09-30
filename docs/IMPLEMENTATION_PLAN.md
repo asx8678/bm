@@ -31,6 +31,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
 | 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
 | 12 | Better plans, fewer failures | 12.1–12.3 | run labels, `ask_planner` for workers, goal review before planning |
+| 13 | Safety during long runs | 13.1–13.3 | protect files edited during a run, freshness check on write, undo one task |
 
 ---
 
@@ -934,3 +935,43 @@ suggested goal" puts it in the goal field with the answered questions under "Cla
 $0.04 per review; `docs/screenshots/goal-review.png`): four relevant questions, a concrete goal,
 and the applied goal ended with the answered question. Not done in this phase: a trial on a
 project of the user's (needs the repository and verify command).
+
+---
+
+## Phase 13: safety during long runs
+
+Scoped 2026-09-30 after merging Phase 12 (branch `phase-13`). Found while assessing: the
+user-owned files were only those dirty at run start, so a file the user began editing during a
+run could be overwritten by a later task. No tests (user's instruction); checked with scratch
+scripts on the fake pi and the browser.
+
+**13.1 Protect files edited during a run.** At each admission the coordinator diffs the state BM
+last left against the new `tree_before`; changed paths join `baseline.user_owned` (and
+`baseline.changed_during_run`), so the policy and the planner's validation refuse them. Checked
+(fake pi): task 1 accepted, README.md edited by hand, task 2's write to README.md refused ("has
+uncommitted changes of the user"), the hand edit intact, README.md listed as protected.
+
+**13.2 Freshness check on write.** pi's `edit` re-reads the file and fails if the edited text
+changed, so the clobbering risk is `write` (whole file). A worker's `write` to an existing file
+that differs from the attempt's `tree_before` is refused unless this attempt already edited or
+wrote that path, or ran a bash command (then BM can't tell who changed it; the snapshot still
+attributes it).
+
+**13.3 Undo one task.** On a finished run (or a run without a planner whose lane is free), an
+accepted task's attempt can be reverted alone: conditional `Git.restore` of its write set from its
+`tree_before`, refused if a later task changed those files (they no longer match its
+`tree_after`) or if an accepted task depends on it.
+
+**Status 13.2 (2026-09-30).** `Coordinator.freshness/3` in the authorize path, `Git.changed_since?/3`;
+per attempt `touched` (paths allowed for edit/write) and `bash_ran?`. Checked (fake pi): README.md
+edited while the worker was busy → its `write` refused ("README.md changed since your task
+started, and not by you…"), the concurrent edit intact; a worker writing its own a.txt twice →
+allowed, accepted.
+
+**Status 13.3 (2026-09-30); Phase 13 done.** `Coordinator.revert_task/2` (finished runs only: in
+an active run, BM's own undo would look like an outside change to 13.1 at the next admission).
+Attempt cards of finished, not-reverted runs have "Undo this task" (with a confirmation).
+Checked in the browser on the trial clone, run 62: undoing `shared_money_helper` was refused
+("use_money_everywhere depends on this task. Undo it first."); undoing `use_money_everywhere`
+restored its two files; then undoing `shared_money_helper` restored `lib/bm.ex` and deleted the
+test file it added; the clone was back to the user's README edit only.

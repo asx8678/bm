@@ -120,6 +120,14 @@ defmodule Bm.Workspace.Coordinator do
   """
   def revert_run(path, run_id), do: call(path, {:revert_run, run_id})
 
+  @doc """
+  Undoes one task of a finished run (plan 13.3): a conditional restore of its accepted attempt's
+  write set to `tree_before`. Refused if a later change touched those files
+  (`{:changed_since, paths}`, nothing touched), if an accepted task depends on it
+  (`{:dependents, keys}`), while the workspace has an unfinished run, or for an unfinished run.
+  """
+  def revert_task(path, task_id), do: call(path, {:revert_task, task_id})
+
   @doc "Lane, phase, run and current attempt."
   def state(path), do: call(path, :state)
 
@@ -217,6 +225,9 @@ defmodule Bm.Workspace.Coordinator do
       # When the running tool call started, and identical guarded calls seen (plan 11.5).
       tool_since: nil,
       repeats: %{},
+      # Paths this attempt was allowed to edit/write, and whether it ran bash (plan 13.2).
+      touched: MapSet.new(),
+      bash_ran?: false,
       # Workers' questions waiting for the planner (plan 12.2): task ref => {agent_id, request}.
       asks: %{},
       # Monitor of the goal run's planner process.
@@ -381,6 +392,26 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:resume_planning, _run_id, _opts}, _from, state),
     do: {:reply, {:error, :not_resumable}, state}
 
+  def handle_call({:revert_task, _task_id}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:revert_task, _task_id}, _from, %{phase: phase} = state) when phase != nil,
+    do: {:reply, {:error, :attempt_running}, state}
+
+  def handle_call({:revert_task, task_id}, _from, state) do
+    task = Runs.get_task!(task_id)
+    run = Runs.get_run!(task.run_id)
+
+    reply =
+      cond do
+        run.workspace_id != state.workspace.id -> {:error, :run_not_in_workspace}
+        run.status in [:active, :paused] -> {:error, :run_not_finished}
+        true -> do_revert_task(state, run, task)
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:revert_run, _run_id}, _from, %{run: %{}} = state),
     do: {:reply, {:error, :workspace_busy}, state}
 
@@ -475,6 +506,7 @@ defmodule Bm.Workspace.Coordinator do
          {:ok, task} <- admit_task(run, attrs),
          {:ok, attempt} <- Runs.create_attempt(task, %{role: role(task)}),
          {:ok, tree_before} <- Git.snapshot(state.root),
+         {:ok, run} <- protect_outside_changes(state.root, run, tree_before),
          {:ok, attempt} <-
            Runs.transition_attempt(attempt, :admitted, %{tree_before: tree_before}),
          {:ok, task} <- Runs.update_task_status(task, :running) do
@@ -507,7 +539,9 @@ defmodule Bm.Workspace.Coordinator do
         running_since: nil,
         last_event_at: nil,
         tool_since: nil,
-        repeats: %{}
+        repeats: %{},
+        touched: MapSet.new(),
+        bash_ran?: false
     }
   end
 
@@ -565,6 +599,49 @@ defmodule Bm.Workspace.Coordinator do
     state = %{state | run: run}
 
     if state.cancel?, do: finish(state, :cancelled, %{}), else: start_worker(state)
+  end
+
+  # Files changed since BM last touched the workspace were changed by the user (or something
+  # else outside BM) during the run: they join the run's user-owned files, like the ones dirty at
+  # its start (plan 13.1). BM's last state is the previous attempt's tree_after (tree_before if it
+  # was reverted), or the run's baseline tree before the first attempt.
+  defp protect_outside_changes(root, run, current_tree) do
+    with known when is_binary(known) <- last_known_tree(run),
+         true <- known != current_tree,
+         {:ok, entries} <- Git.diff(root, known, current_tree) do
+      owned = get_in(run.baseline, ["user_owned"]) || []
+
+      case Enum.map(entries, & &1.path) -- owned do
+        [] ->
+          {:ok, run}
+
+        new ->
+          Logger.info(
+            "run #{run.id}: protecting files changed outside BM: #{Enum.join(new, ", ")}"
+          )
+
+          baseline =
+            run.baseline
+            |> Map.put("user_owned", owned ++ new)
+            |> Map.update("changed_during_run", new, &Enum.uniq(&1 ++ new))
+
+          Runs.update_run(run, %{baseline: baseline})
+      end
+    else
+      _nothing_to_compare -> {:ok, run}
+    end
+  end
+
+  defp last_known_tree(run) do
+    run
+    |> Runs.list_run_attempts()
+    |> Enum.find(&is_binary(&1.tree_before))
+    |> case do
+      nil -> get_in(run.baseline || %{}, ["tree"])
+      %{status: :reverted, tree_before: tree} -> tree
+      %{tree_after: tree} when is_binary(tree) -> tree
+      %{tree_before: tree} -> tree
+    end
   end
 
   # A queued task of this run (the planner's), or a new one.
@@ -633,6 +710,55 @@ defmodule Bm.Workspace.Coordinator do
           {:ok, run} = Runs.update_run(run, %{reverted_at: DateTime.utc_now()})
           broadcast_run(state, run)
           {:ok, run}
+        end
+    end
+  end
+
+  ## Undoing one task (13.3)
+
+  defp do_revert_task(state, run, task) do
+    attempt =
+      task
+      |> Runs.latest_attempt()
+      |> case do
+        %{status: :accepted, actual_writes: [_ | _]} = a ->
+          a
+
+        %{status: status, actual_writes: [_ | _], flags: flags} = a when status != :reverted ->
+          if "kept" in flags, do: a
+
+        _ ->
+          nil
+      end
+
+    dependents =
+      for t <- Runs.latest_tasks(run), task.key in t.depends_on, t.status == :accepted, do: t.key
+
+    cond do
+      attempt == nil ->
+        {:error, :nothing_to_revert}
+
+      dependents != [] ->
+        {:error, {:dependents, dependents}}
+
+      true ->
+        with :ok <-
+               Git.restore(
+                 state.root,
+                 attempt.actual_writes,
+                 attempt.tree_before,
+                 attempt.tree_after
+               ),
+             {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted) do
+          {:ok, task} = Runs.update_task_status(task, :cancelled)
+
+          Phoenix.PubSub.broadcast(
+            Bm.PubSub,
+            topic(state.root),
+            {:workspace, state.root, {:attempt, attempt, state.lane}}
+          )
+
+          {:ok, task}
         end
     end
   end
@@ -945,11 +1071,60 @@ defmodule Bm.Workspace.Coordinator do
     state = count_repeat(state, request)
 
     {outcome, state} = handle_request_once(state, request)
+    state = note_allowed(state, request, outcome)
 
     if repeats(state, request) >= state.config.repeat_cancel,
       do: {outcome, request_cancel(state, "repeating the same call")},
       else: {outcome, state}
   end
+
+  # What the worker was allowed to do so far, for the freshness check (13.2).
+  defp note_allowed(state, %{op: "authorize", payload: payload}, %{"allow" => true}) do
+    case payload do
+      %{"tool" => "bash"} ->
+        %{state | bash_ran?: true}
+
+      %{"tool" => tool, "input" => %{"path" => path}} when tool in ["edit", "write"] ->
+        %{state | touched: MapSet.put(state.touched, relative_path(state.root, path))}
+
+      _other ->
+        state
+    end
+  end
+
+  defp note_allowed(state, _request, _outcome), do: state
+
+  defp relative_path(root, path),
+    do: path |> String.replace_prefix("@", "") |> Path.expand(root) |> Path.relative_to(root)
+
+  # A `write` replaces the whole file. If the file changed since the attempt started and not by
+  # this worker (no earlier edit/write of it, no bash that could have), someone else changed it
+  # meanwhile: refuse rather than overwrite (13.2). `edit` needs no check: pi re-reads the file
+  # and fails if the text to replace changed.
+  defp freshness(state, "write", %{"path" => path}) when is_binary(path) do
+    relative = relative_path(state.root, path)
+
+    cond do
+      state.bash_ran? or MapSet.member?(state.touched, relative) ->
+        :ok
+
+      not File.regular?(Path.join(state.root, relative)) ->
+        :ok
+
+      true ->
+        case Git.changed_since?(state.root, state.attempt.tree_before, relative) do
+          {:ok, true} ->
+            {:deny,
+             "#{relative} changed since your task started, and not by you. Read it again and " <>
+               "use edit for your change, or report the task as blocked."}
+
+          _unchanged_or_unknown ->
+            :ok
+        end
+    end
+  end
+
+  defp freshness(_state, _tool, _input), do: :ok
 
   # Identical guarded tool calls (same tool, same input) in this attempt.
   defp count_repeat(state, %{op: "authorize", payload: payload}) do
@@ -1004,8 +1179,12 @@ defmodule Bm.Workspace.Coordinator do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
     ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
 
-    case Bm.Policy.authorize(tool, payload["input"] || %{}, ctx) do
-      :allow -> %{"ok" => true, "allow" => true}
+    input = payload["input"] || %{}
+
+    with :allow <- Bm.Policy.authorize(tool, input, ctx),
+         :ok <- freshness(state, tool, input) do
+      %{"ok" => true, "allow" => true}
+    else
       {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
     end
   end
