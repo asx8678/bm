@@ -113,3 +113,15 @@ implementation with one bug and tests that miss it. Each run was ended after the
 Both rejections came from a recorded `node -e` probe of the failing input; BM reverted the change
 and passed the reason to the planner.
 
+## Restart during a run (plan 21, 2026-09-30)
+
+Sandbox clone `/tmp/bm-sandbox-21`; the dev server was stopped with SIGTERM as soon as the worker's
+attempt was running, then started again.
+
+| Run | Goal | Server down | Outcome | Cost |
+|---|---|---|---|---|
+| 104 | `capitalize(text)` | ≈2 s | attempt 142 interrupted with no changes → task queued; planning resumed by itself (1 of 3); attempt 143 accepted, review approved; done | $0.073 |
+| 105 | `reverseWords(text)` | 7 s | same; `mix bm.goal` waited ("BM does not answer…", "BM answers again.") and followed the run to done | $0.040 |
+
+Both changes checked by hand (tests 50 and 56, own probes); run 104 committed in the clone.
+
