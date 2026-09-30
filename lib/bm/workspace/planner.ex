@@ -746,13 +746,16 @@ defmodule Bm.Workspace.Planner do
         end_run(state, :done, "the planner closed the plan without tasks")
 
       failed == [] ->
-        end_run(state, :done, "all #{length(tasks)} tasks accepted")
+        end_run(state, :done, accepted_reason(length(tasks)))
 
       true ->
         keys = Enum.map_join(failed, ", ", &"#{&1.key} (#{&1.status})")
         end_run(state, :failed, "not every task succeeded: #{keys}")
     end
   end
+
+  defp accepted_reason(1), do: "the task was accepted"
+  defp accepted_reason(count), do: "all #{count} tasks accepted"
 
   ## Ending, pausing, limits
 

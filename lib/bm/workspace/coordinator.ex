@@ -840,6 +840,11 @@ defmodule Bm.Workspace.Coordinator do
       else: finish(state, :failed, %{error: "worker did not start: #{inspect(reason)}"})
   end
 
+  defp job_done(state, :stop, {:transcript, [_ | _] = transcript}) do
+    attempt = Runs.update_attempt_fields(state.attempt, %{transcript: transcript})
+    stopped(%{state | attempt: attempt})
+  end
+
   defp job_done(state, :stop, _result), do: stopped(state)
   defp job_done(state, :verify, result), do: verified(state, result)
   defp job_done(state, :baseline, result), do: baseline_verified(state, result)
@@ -949,11 +954,39 @@ defmodule Bm.Workspace.Coordinator do
 
     start_job(state, :stop, fn ->
       if alive? and cancel?, do: safe_abort(agent_id)
+      # What the worker did, read before its session goes away (plan 10.4).
+      transcript = if alive?, do: safe_transcript(agent_id), else: []
       Bm.Pi.stop(agent_id)
       # Groups of an adapter that died without cleaning up.
       Bm.Proc.terminate_groups(orphans)
+      {:transcript, transcript}
     end)
   end
+
+  @max_transcript 300
+  @max_text 1_500
+
+  defp safe_transcript(agent_id) do
+    agent_id
+    |> Bm.Pi.snapshot()
+    |> Map.fetch!(:transcript)
+    |> Enum.flat_map(&compact_entry/1)
+    |> Enum.take(-@max_transcript)
+  catch
+    :exit, _ -> []
+  end
+
+  # The prompt is the task (already stored); tool calls and the worker's words are kept.
+  defp compact_entry(%{role: :tool, name: name, detail: detail, status: status}),
+    do: [%{"t" => "tool", "name" => name, "detail" => detail, "status" => to_string(status)}]
+
+  defp compact_entry(%{role: :assistant, text: text}) when text != "",
+    do: [%{"t" => "text", "text" => String.slice(text, 0, @max_text)}]
+
+  defp compact_entry(%{role: role, text: text}) when role in [:error, :notice],
+    do: [%{"t" => to_string(role), "text" => String.slice(text, 0, @max_text)}]
+
+  defp compact_entry(_entry), do: []
 
   defp safe_abort(agent_id) do
     Bm.Pi.abort(agent_id)

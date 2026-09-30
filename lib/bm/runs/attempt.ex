@@ -58,6 +58,8 @@ defmodule Bm.Runs.Attempt do
     field :verify, :map
     field :checkpoint_ref, :string
     field :error, :string
+    # The worker's tool calls and messages, compacted when its pi session stopped (plan 10.4).
+    field :transcript, {:array, :map}, default: []
 
     timestamps(type: :utc_datetime_usec)
   end
@@ -74,7 +76,7 @@ defmodule Bm.Runs.Attempt do
 
   # Fields a transition may set along with the new status.
   @transition_fields ~w(agent_id session_epoch pgid pgid_file boot_id tree_before tree_after
-                        actual_writes flags result verify checkpoint_ref error)a
+                        actual_writes flags result verify checkpoint_ref error transcript)a
 
   @doc "Changeset for a new attempt; `task_id` and `number` are set by the caller."
   def create_changeset(attempt, attrs) do

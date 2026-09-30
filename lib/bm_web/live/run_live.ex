@@ -919,6 +919,36 @@ defmodule BmWeb.RunLive do
           <span class="text-bm-muted">Worker:</span> {@result["summary"]}
         </p>
 
+        <details :if={@attempt.transcript != []} id={"activity-#{@attempt.id}"} class="group">
+          <summary class="flex cursor-pointer list-none items-center gap-2 text-xs">
+            <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
+            <span class="font-medium">Activity</span>
+            <span class="text-[11px] text-bm-muted">{activity_summary(@attempt.transcript)}</span>
+          </summary>
+          <ol class="mt-2 max-h-96 space-y-1 overflow-y-auto rounded-md bg-bm-bg px-3 py-2">
+            <li :for={entry <- @attempt.transcript} class="text-xs">
+              <%= case entry["t"] do %>
+                <% "tool" -> %>
+                  <div class="flex min-w-0 items-baseline gap-2 font-mono text-[11px]">
+                    <span class={["flex-none", tool_tone(entry["status"])]}>
+                      {tool_mark(entry["status"])}
+                    </span>
+                    <span class="flex-none font-semibold">{entry["name"]}</span>
+                    <span class="min-w-0 truncate text-bm-muted" title={entry["detail"]}>
+                      {entry["detail"]}
+                    </span>
+                  </div>
+                <% "text" -> %>
+                  <div class="bm-prose border-l-2 border-bm-line py-0.5 pl-2">
+                    {markdown(entry["text"])}
+                  </div>
+                <% _other -> %>
+                  <p class="text-[11px] text-bm-run">{entry["text"]}</p>
+              <% end %>
+            </li>
+          </ol>
+        </details>
+
         <p
           :if={@attempt.error}
           id={"attempt-#{@attempt.id}-error"}
@@ -984,6 +1014,21 @@ defmodule BmWeb.RunLive do
        do: verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0)
 
   defp verify_needs_reading?(_attempt), do: false
+
+  defp activity_summary(transcript) do
+    tools = Enum.count(transcript, &(&1["t"] == "tool"))
+    failed = Enum.count(transcript, &(&1["t"] == "tool" and &1["status"] == "error"))
+    base = "#{tools} tool #{if tools == 1, do: "call", else: "calls"}"
+    if failed > 0, do: base <> ", #{failed} failed", else: base
+  end
+
+  defp tool_mark("ok"), do: "✓"
+  defp tool_mark("error"), do: "✕"
+  defp tool_mark(_running), do: "•"
+
+  defp tool_tone("ok"), do: "text-bm-idle"
+  defp tool_tone("error"), do: "text-bm-error"
+  defp tool_tone(_running), do: "text-bm-muted"
 
   defp terminal?(status),
     do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]
