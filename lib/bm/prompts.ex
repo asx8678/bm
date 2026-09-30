@@ -65,6 +65,39 @@ defmodule Bm.Prompts do
   end
 
   @doc """
+  The prompt of the reviewer of an attempt (plan 14.1, D25): the task, its accepted
+  dependencies, and the diff that would be checkpointed.
+  """
+  def reviewer(%Task{} = task, dependencies, diff) do
+    """
+    You are a BM reviewer. A worker changed this repository for the task below; the workspace
+    verify command #{if task.check, do: "and the task's check ", else: ""}already passed. Decide
+    whether the change does what the task asks.
+
+    Task: #{task.title}
+
+    Goal:
+    #{task.goal}
+
+    Done when:
+    #{task.done_when || "The goal is achieved."}
+    #{check_section(task)}#{dependency_section(dependencies)}
+    The change (unified diff):
+    #{diff}
+
+    Rules:
+    - Reject only for concrete problems: the change does not do the task or does only part of
+      it, it is clearly broken, or it changes files the task has no reason to touch. Not for
+      style, naming or taste.
+    - You may read files for context. Do not run the project's test suite or the verify command;
+      they already ran.
+    - Finish by calling submit_result exactly once: status "done" to approve, "failed" to reject.
+      In the summary give the reason in one to three sentences (for a rejection: what is wrong
+      and where).
+    """
+  end
+
+  @doc """
   The first prompt of a goal run's planner. `context`: `:root`, `:verify_command`,
   `:user_owned` (paths the plan must not change).
   """
@@ -117,7 +150,7 @@ defmodule Bm.Prompts do
         error = if r.error, do: " Problem: #{r.error}.", else: ""
 
         check =
-          if r.task.check && r.status != :accepted,
+          if r.task.check && r.status != :accepted && r.error && r.error =~ "check",
             do: " Its check was: #{r.task.check}",
             else: ""
 
@@ -132,8 +165,9 @@ defmodule Bm.Prompts do
         do:
           "\nA task that did not succeed may be proposed once more with the same key (it " <>
             "replaces the failed one); tasks that depended on it wait for it. When a task's " <>
-            "check failed, BM has already reverted that task's changes, so the files are as " <>
-            "before it: decide whether the work or the check was wrong, and fix that one. If " <>
+            "check failed or the reviewer rejected it, BM has already reverted that task's " <>
+            "changes, so the files are as before it: decide whether the work or the check was " <>
+            "wrong (a rejection says what the reviewer found), and fix that one. If " <>
             "the goal can't be reached, say why in close_plan.",
         else: ""
 

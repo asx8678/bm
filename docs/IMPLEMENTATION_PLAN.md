@@ -32,6 +32,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
 | 12 | Better plans, fewer failures | 12.1–12.3 | run labels, `ask_planner` for workers, goal review before planning |
 | 13 | Safety during long runs | 13.1–13.3 | protect files edited during a run, freshness check on write, undo one task |
+| 14 | Quality gate and terminal use | 14.1–14.3 | reviewer before accepting (D25), local JSON API, `mix bm.*` client |
 
 ---
 
@@ -975,3 +976,25 @@ Checked in the browser on the trial clone, run 62: undoing `shared_money_helper`
 ("use_money_everywhere depends on this task. Undo it first."); undoing `use_money_everywhere`
 restored its two files; then undoing `shared_money_helper` restored `lib/bm.ex` and deleted the
 test file it added; the clone was back to the user's README edit only.
+
+---
+
+## Phase 14: quality gate and terminal use
+
+Scoped 2026-09-30 after merging Phase 13 (branch `phase-14`). No tests (user's instruction).
+
+**14.1 Reviewer (D25).** `Bm.Review.run/4` owns a reader-profile session (read-only bash via
+the policy, its `ask_planner` answered with "decide from the task and the diff"), prompted with
+`Bm.Prompts.reviewer/3` (task, done_when, check, dependency context, the diff capped at 20k
+characters; reject only for concrete problems; don't rerun the tests). Coordinator: a passing
+verification in a goal run goes to phase `:reviewing` (job `:review`); approve → checkpoint;
+reject → D23 path with "the reviewer rejected the change: …"; reviewer failure → accepted with
+flag `not_reviewed`; cancel stops the reviewer's session. The verdict, reason and cost are in
+`attempt.verify["review"]`, the cost is added to the run. Run page: "review approved/rejected"
+next to the verification label, the reviewer's reason in the fold. Checked: fake pi approve →
+accepted with the review recorded; reject → auto-reverted, file gone, planner told, run failed
+when it closed. Live on the trial clone (run 68, "Bm.Runs.count_runs/0"): the reviewer approved
+with a specific reason ($0.027); run done.
+Found again: the dev server's long-lived coordinator crashed on a state key added later
+(`:touched`). Fixed for good: before admitting work the coordinator merges any missing
+late-added state fields.

@@ -138,7 +138,7 @@ Each has a precondition; don't start one before it holds.
 | **Full recovery**: resume attempts that provably changed nothing | M |
 | **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); provider/approval timeouts and in-flight estimates not | S–M |
 | **Approval inbox** in the browser for non-`bm:` dialogs | M |
-| **Reviewer role** (read-only; silent / message / stop) | M |
+| **Reviewer role** (read-only; silent / message / stop) — **done** as a review before accepting each goal-run task (plan 14.1, D25) | M |
 | **`ask_planner`** tool for workers — **done** (plan 12.2, D24); seen with the fake pi, no real worker has asked yet | S |
 | **Supervisor** (progress and drift checks) | M |
 | **Sanitized replay fixtures** (A7) with an allowlist sanitizer | S |
