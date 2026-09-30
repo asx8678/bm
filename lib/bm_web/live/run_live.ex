@@ -984,6 +984,15 @@ defmodule BmWeb.RunLive do
             :if={@attempt.verify["output"] not in [nil, ""]}
             class="mt-2 max-h-72 overflow-auto rounded-md bg-bm-bg px-3 py-2 font-mono text-[11px] leading-relaxed"
           >{@attempt.verify["output"]}</pre>
+          <div :if={is_map(@attempt.verify["check"])} class="mt-2">
+            <p class="text-[11px] text-bm-muted">
+              Task check <code class="font-mono">{@task.check}</code>
+            </p>
+            <pre
+              :if={@attempt.verify["check"]["output"] not in [nil, ""]}
+              class="mt-1 max-h-72 overflow-auto rounded-md bg-bm-bg px-3 py-2 font-mono text-[11px] leading-relaxed"
+            >{@attempt.verify["check"]["output"]}</pre>
+          </div>
         </details>
 
         <div :if={@item.diffs != []} id={"diff-#{@attempt.id}"} class="space-y-1.5">
@@ -1010,8 +1019,10 @@ defmodule BmWeb.RunLive do
 
   # A failed or timed-out verification is why the attempt waits or failed: show it unfolded.
   defp verify_needs_reading?(%{status: status, verify: verify})
-       when status in [:held, :failed] and is_map(verify),
-       do: verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0)
+       when status in [:held, :failed, :reverted] and is_map(verify),
+       do:
+         verify["timeout"] == true or (is_integer(verify["exit"]) and verify["exit"] != 0) or
+           (is_map(verify["check"]) and verify["check"]["exit"] != 0)
 
   defp verify_needs_reading?(_attempt), do: false
 
@@ -1033,12 +1044,21 @@ defmodule BmWeb.RunLive do
   defp terminal?(status),
     do: status in [:accepted, :held, :failed, :cancelled, :needs_reconciliation, :reverted]
 
+  defp verify_label(%{"exit" => 0, "check" => %{"timeout" => true}}),
+    do: "passed; task check timed out"
+
+  defp verify_label(%{"exit" => 0, "check" => %{"exit" => code}}) when code != 0,
+    do: "passed; task check failed (exit #{code})"
+
+  defp verify_label(%{"exit" => 0, "check" => %{"exit" => 0}}), do: "passed; task check passed"
   defp verify_label(%{"skipped" => reason}), do: "skipped (#{reason})"
   defp verify_label(%{"timeout" => true}), do: "timed out"
   defp verify_label(%{"exit" => 0}), do: "passed"
   defp verify_label(%{"exit" => code}) when is_integer(code), do: "failed (exit #{code})"
   defp verify_label(_verify), do: "running"
 
+  defp verify_tone(%{"exit" => 0, "check" => %{"exit" => 0}}), do: "text-bm-idle"
+  defp verify_tone(%{"exit" => 0, "check" => _failed}), do: "text-bm-error"
   defp verify_tone(%{"exit" => 0}), do: "text-bm-idle"
   defp verify_tone(%{"skipped" => _}), do: "text-bm-muted"
   defp verify_tone(%{"exit" => code}) when is_integer(code), do: "text-bm-error"
@@ -1058,5 +1078,9 @@ defmodule BmWeb.RunLive do
   defp flag_help("leftover_processes"), do: "Left processes running; BM ended them"
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
+
+  defp flag_help("auto_reverted"),
+    do: "The planner's check failed; BM reverted the changes and asked the planner to re-plan"
+
   defp flag_help(_flag), do: nil
 end

@@ -1105,6 +1105,11 @@ defmodule Bm.Workspace.Coordinator do
       verify["exit"] == 0 and check_passed?(verify) ->
         checkpoint(state, verify, changes)
 
+      # A goal run's task check is written by BM's own planner, so its failure is a planning
+      # error, not the user's to decide: revert and let the planner re-plan (decision D23).
+      verify["exit"] == 0 and state.run.planner != nil ->
+        revert_for_replan(state, verify, changes)
+
       verify["exit"] == 0 ->
         error = if verify["check"]["timeout"], do: "check_timeout", else: "check_failed"
         finish(state, :held, Map.merge(changes, %{verify: verify, error: error}))
@@ -1114,6 +1119,50 @@ defmodule Bm.Workspace.Coordinator do
 
       true ->
         finish(state, :held, Map.merge(changes, %{verify: verify, error: "verify_failed"}))
+    end
+  end
+
+  # The workspace verify command passed but the planner's check did not. The attempt fails (so
+  # its task is reported to the planner as failed), then its changes are reverted, but only if
+  # the files still hold exactly what the attempt left; otherwise it stays held for the user,
+  # as before.
+  defp revert_for_replan(state, verify, changes) do
+    check = verify["check"] || %{}
+    command = state.task.check
+
+    reason =
+      if check["timeout"],
+        do: "the task's check `#{command}` timed out",
+        else: "the task's check `#{command}` exited #{check["exit"]}"
+
+    state = finish(state, :failed, Map.merge(changes, %{verify: verify, error: reason}))
+    attempt = Runs.get_attempt!(state.attempt.id)
+
+    with [_ | _] <- attempt.actual_writes,
+         :ok <-
+           Git.restore(state.root, attempt.actual_writes, attempt.tree_before, attempt.tree_after),
+         {:ok, attempt} <-
+           Runs.transition_attempt(attempt, :reverted, %{
+             flags: attempt.flags ++ ["auto_reverted"],
+             error: reason <> "; BM reverted its changes for a re-plan"
+           }) do
+      broadcast_attempt(%{state | attempt: attempt, lane: :free})
+    else
+      # Nothing to revert: the lane is already free.
+      [] ->
+        state
+
+      error ->
+        Logger.warning(
+          "attempt #{attempt.id}: not reverted after a failed check: #{inspect(error)}"
+        )
+
+        attempt =
+          Runs.update_attempt_fields(attempt, %{
+            error: reason <> "; files changed since, so BM did not revert them"
+          })
+
+        broadcast_attempt(%{state | attempt: attempt})
     end
   end
 

@@ -28,7 +28,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 7 | Planner | 7.1–7.9 | goal → plan → sequential tasks with the fake pi |
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
-| 10 | Optional: seeing a run | 10.1–10.5 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search |
+| 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
 
 ---
 
@@ -757,3 +757,21 @@ read, edit, bash (the check), submit_result, all ✓.
 goal or the repository path (case-insensitive, `%` and `_` escaped) and by status, 20 at a time
 with Show more (`Runs.search_runs/3`). Checked in the browser: "greet" + Done lists the four
 matching runs.
+
+**10.6 Failed task checks go back to the planner (D23).** Decided 2026-09-30 (the user asked for
+the best decision; a reviewer agreed). `Coordinator.verified_outcome/3`: in a goal run, verify
+passed + check failed/timed out → the attempt finishes `failed` with an actionable error ("the
+task's check `…` exited 1"), then `Git.restore` puts its files back if they still hold what it
+left, and it becomes `reverted` with flag `auto_reverted`, the lane free; otherwise it stays held.
+The task stays `failed`, so the planner is told "failed" (not "cancelled"), with the check command
+and its output, and that the files are back as before. Single-task runs and the user's verify
+command are unchanged. The planner prompt no longer says a failing check stops the run. The run
+page labels "passed; task check failed (exit 1)", shows the check's command and output, and opens
+that fold. Incidental fix: a re-planned task whose check failed again used to hold the lane, so
+the "failed again after its re-plan" rule could never end the run; now it does.
+Checked with a throwaway scratch script on the scripted fake pi (no model, no test file; the fake
+now also runs its next planner wave on a prompt, as the planner sends results as prompts):
+check `exit 1` → attempt reverted + `auto_reverted`, file gone, lane free, delivery `failed`,
+planner told to re-plan, run failed when it closed; re-proposed with `exit 2` → revision 2
+reverted too and the run failed "task make_out failed again after its re-plan". Not seen with the
+real model.

@@ -14,8 +14,8 @@
 //                  job, plus a plain child in pi's own group; then answers
 //   "work:<json>" -> runs scripted steps like a worker, then answers "worked" (see runWork)
 //   "plan:<json>" -> a scripted planner: a list of waves; the prompt runs the first wave and each
-//                  follow_up the next one (see runPlanWave); without waves left, follow_ups are
-//                  answered "followed: ..."
+//                  later prompt or follow_up the next one (see runPlanWave); without waves left,
+//                  follow_ups are answered "followed: ..." and prompts "echo: ..."
 //   anything    -> answers "echo: <message>"
 import {spawn} from "node:child_process"
 import {randomUUID} from "node:crypto"
@@ -233,6 +233,9 @@ function handle(command) {
     } else if (message.startsWith("plan:")) {
       planWaves = JSON.parse(message.slice("plan:".length))
       runPlanWave(planWaves.shift() ?? {})
+    } else if (planWaves && planWaves.length > 0) {
+      // The planner gets results and reminders as prompts when it is idle.
+      runPlanWave(planWaves.shift())
     } else if (message === "plan") {
       streamPlan()
     } else if (message === "fail") {

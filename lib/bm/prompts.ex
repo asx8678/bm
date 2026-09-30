@@ -87,10 +87,12 @@ defmodule Bm.Prompts do
       true). Never plan changes to these files with the user's uncommitted work:
     #{user_owned(context.user_owned)}
     - After every task BM runs the verify command `#{context.verify_command}`, and the task's
-      optional `check` command (use it to make done_when executable, e.g. a focused test). A
-      failing check stops the run until the user decides, so a check must be right: write it as
-      plain shell, prefer running a test the task itself adds, and never hard-code an expected
-      value you have not worked out exactly.
+      optional `check` command (use it to make done_when executable, e.g. a focused test). If
+      the check fails, BM reverts that task's changes and reports back to you, and the task can
+      be proposed once more; a second failure fails the run. So a check must be right: write it
+      as plain shell, prefer running a test the task itself adds, and never hard-code an
+      expected value you have not worked out exactly. (A failing verify command, by contrast,
+      stops the run until the user decides.)
     - Once the plan is closed (close_summary or close_plan), BM runs the tasks. It comes back to you only if a task fails, is blocked, or changes
       something unexpected; if every task succeeds, the run finishes. So close the plan only
       when it is complete.
@@ -110,18 +112,25 @@ defmodule Bm.Prompts do
         files = if r.writes != [], do: " Changed: #{Enum.join(r.writes, ", ")}.", else: ""
         error = if r.error, do: " Problem: #{r.error}.", else: ""
 
+        check =
+          if r.task.check && r.status != :accepted,
+            do: " Its check was: #{r.task.check}",
+            else: ""
+
         tail =
           if r.verify_tail, do: "\n  Verification output (end):\n  #{r.verify_tail}", else: ""
 
-        base <> summary <> files <> error <> tail
+        base <> summary <> files <> error <> check <> tail
       end)
 
     retry =
       if Enum.any?(results, &(&1.status != :accepted)),
         do:
           "\nA task that did not succeed may be proposed once more with the same key (it " <>
-            "replaces the failed one); tasks that depended on it wait for it. If the goal " <>
-            "can't be reached, say why in close_plan.",
+            "replaces the failed one); tasks that depended on it wait for it. When a task's " <>
+            "check failed, BM has already reverted that task's changes, so the files are as " <>
+            "before it: decide whether the work or the check was wrong, and fix that one. If " <>
+            "the goal can't be reached, say why in close_plan.",
         else: ""
 
     still =

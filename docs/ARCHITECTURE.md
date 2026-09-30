@@ -64,6 +64,7 @@ real pi/Fabric before anything relies on it.
 
 | D21 | **Planner and workers alternate** (2026-09-30, plan 7.3): a planner turn starts only while the lane is free, and the scheduler admits tasks only while the planner is idle | Each before/after snapshot then belongs to one agent, so "the planner changed files" is exact; parallel planning is not needed while tasks run one at a time | Planner turns during attempts (writes could not be attributed) |
 | D22 | **No final planner turn after a clean plan** (2026-09-30, plan 9.1): when the plan is closed and every delivered result is accepted without flags, the run completes without reporting back; the planner is told so in its first prompt | In 9 of 9 goal-benchmark runs and every earlier live goal run, that turn only said "all done", costing ≈2.5 s and ≈10 % of the run's spend | Always reporting back (kept for failures, blocked tasks, cancellations and flagged attempts) |
+| D23 | **A failed task check is the planner's error, not the user's decision** (2026-09-30, plan 10.6): in a goal run, a passing verify command with a failing or timed-out task `check` fails the attempt, reverts its changes (only if the files are unchanged since) and reports the failure to the planner; the user's verify command still holds the lane | The check is written by BM's planner; a wrong one (seen live in the 9.4 benchmark: bad quoting and a miscounted value) used to stop the run for the user, and a re-plan whose check failed again held the lane so the run could never end. Reverting first also keeps the next attempt's snapshot clean; delivering without reverting would let a re-proposed task that "finds the work done" be accepted with verification skipped | Holding for the user (old behaviour); delivering without reverting |
 
 Revisit a decision by adding a row, not by deleting one.
 
@@ -230,8 +231,12 @@ Leftovers after a short grace period are killed by group and the attempt is flag
 with a timeout), then records a **checkpoint**: a commit of the verified snapshot tree stored
 under `refs/bm/runs/<run>/<n>`. HEAD, the branch and the user's index are untouched. The checkpoint
 id is the exact state that was verified. A failed verification **holds** the lane until the user
-chooses Keep or Revert. Note: `refs/bm/…` include untracked non-ignored files and are pushed by
-`git push --mirror`; pruning old refs is an optional feature.
+chooses Keep or Revert. **Exception (D23):** in a goal run, when the verify command passes but
+the task's own `check` (written by the planner) fails or times out, the attempt fails, its
+changes are reverted if the files still hold exactly what it left (flag `auto_reverted`), and the
+failure goes to the planner for its one re-plan; if the files changed since, it is held as
+before. Note: `refs/bm/…` include untracked non-ignored files and are pushed by
+`git push --mirror`; old runs' refs are pruned after each run (newest 20 runs kept, plan 10.3).
 
 **Revert (core).** Only the latest attempt can be reverted: restore its write set from its
 `tree_before`, only if every file still equals its content in `tree_after`; created files are
