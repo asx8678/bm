@@ -1477,3 +1477,28 @@ through the real page in headless Chrome and the real API). Worth watching in re
 real worker heeds a steer, and a real extension's dialog (no BM profile loads one that asks yet).
 
 **Status: Phase 25 done (2026-09-30). Phases 23–25 done.**
+
+---
+
+## Phase 26: live checks of Phases 23–25
+
+Started 2026-09-30 on the user's "start working on next" without a named repository (the trial on
+a project of the user's still waits for one). Phases 23–25 were checked with the fake pi only (see
+the Phase 25 notes); this phase runs them with the real model on throwaway clones of the sandbox
+in /tmp (the sandbox itself is not touched). No tests (user's instruction).
+
+**26.1 Nothing misfires on a normal run.** A goal with two or three tasks, default settings, through
+the dev server and `mix bm.goal`. Passes if the outcome is as before Phases 23–25: no steer, no
+supervisor pause, no planner or review turn stopped for silence.
+
+**26.2 Undo during a run with the real planner.** Pause after the first task is accepted, undo it,
+Resume. Recorded: what the real planner does with "undone by the user; propose it again only if
+the goal still needs it".
+
+**26.3 A real worker gets a steer.** A scratch BEAM with the real pi and low no-progress thresholds
+(≈20 s, 3 tool calls) on a task that needs some reading first. Passes if, after the steer, the
+worker changes a file or submits blocked; if it changes a file before the threshold, the steer was
+not provoked and the thresholds are noted as sane.
+
+Left out: the approval inbox (no BM profile loads an extension that asks the user anything).
+Anything to fix goes into 26.4.
