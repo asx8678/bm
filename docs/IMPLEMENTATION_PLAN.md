@@ -1230,3 +1230,11 @@ two samples of the classic boundaries, not proof for every bug.
 verify command.
 
 **20.3 Fix what 20.1 and 20.2 find.**
+
+**Status: Phase 20 done with 20.1 (2026-09-30).** 20.1 found nothing to fix. 20.2 did not start: it
+needs a repository the user names, so it moves out of this phase and waits as its own item
+(below); 20.3 is empty.
+
+**Waiting for the user: a trial on one of their projects.** Starts when the user names the
+repository and its verify command (and says whether BM may commit accepted changes there with
+`mix bm.commit`). BM never picks a repository itself.
