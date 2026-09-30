@@ -699,9 +699,22 @@ defmodule Bm.Workspace.Planner do
 
         broadcast_run(state, run)
         state = %{state | rejections: 0, reminded?: false}
-        begin_turn(state, :delivery, Bm.Prompts.planner_delivery(results, queued))
+        text = Bm.Prompts.planner_delivery(results, queued) <> budget_note(run)
+        begin_turn(state, :delivery, text)
     end
   end
+
+  # Soft budget (plan 11.5): past 80 % the planner is asked to finish with the smallest plan.
+  defp budget_note(%{budget_usd: budget, spent_usd: spent})
+       when is_number(budget) and budget > 0 do
+    if spent >= 0.8 * budget,
+      do:
+        "\nBudget: $#{Float.round(spent, 4)} of $#{Float.round(budget * 1.0, 4)} spent. " <>
+          "Finish with the smallest plan that reaches the goal; propose nothing optional.\n",
+      else: ""
+  end
+
+  defp budget_note(_run), do: ""
 
   defp result(delivery) do
     task = delivery.task

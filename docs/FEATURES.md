@@ -136,7 +136,7 @@ Each has a precondition; don't start one before it holds.
 | **Freshness check** on edit/write (hash of files the worker read) | M |
 | **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** is done (plan 11.4); per-task rollback inside a run is not | M |
 | **Full recovery**: resume attempts that provably changed nothing | M |
-| **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates | S–M |
+| **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); provider/approval timeouts and in-flight estimates not | S–M |
 | **Approval inbox** in the browser for non-`bm:` dialogs | M |
 | **Reviewer role** (read-only; silent / message / stop) | M |
 | **`ask_planner`** tool for workers | S |

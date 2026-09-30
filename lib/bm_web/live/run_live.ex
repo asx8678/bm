@@ -460,6 +460,13 @@ defmodule BmWeb.RunLive do
             <dd :if={@run.spent_unknown > 0} class="text-[11px] text-bm-run">
               + {@run.spent_unknown} without a cost
             </dd>
+            <dd
+              :if={budget_low?(@run)}
+              id="budget-warning"
+              class="text-[11px] font-medium text-bm-run"
+            >
+              {round(@run.spent_usd / @run.budget_usd * 100)} % of the budget used
+            </dd>
           </dl>
         </header>
 
@@ -868,6 +875,13 @@ defmodule BmWeb.RunLive do
     </div>
     """
   end
+
+  # Soft budget warning (plan 11.5): an unfinished run past 80 % of its budget.
+  defp budget_low?(%{status: status, budget_usd: budget, spent_usd: spent})
+       when status in [:active, :paused] and is_number(budget) and budget > 0,
+       do: spent >= 0.8 * budget
+
+  defp budget_low?(_run), do: false
 
   defp activity_text(%{now: now, calls: calls}) when is_binary(now),
     do: "Now: #{now} · #{calls} tool #{if calls == 1, do: "call", else: "calls"}"

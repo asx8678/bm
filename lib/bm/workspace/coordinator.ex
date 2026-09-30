@@ -40,6 +40,11 @@ defmodule Bm.Workspace.Coordinator do
     # tool runs.
     max_duration: 20 * 60_000,
     stall_timeout: 3 * 60_000,
+    # Refined limits (plan 11.5): one tool call running this long cancels the attempt; the Nth
+    # identical guarded call is refused, the Mth cancels the attempt.
+    tool_timeout: 10 * 60_000,
+    repeat_refuse: 4,
+    repeat_cancel: 6,
     prompt: &Bm.Prompts.worker/2
   ]
 
@@ -201,6 +206,9 @@ defmodule Bm.Workspace.Coordinator do
       tool: nil,
       running_since: nil,
       last_event_at: nil,
+      # When the running tool call started, and identical guarded calls seen (plan 11.5).
+      tool_since: nil,
+      repeats: %{},
       # Monitor of the goal run's planner process.
       planner_ref: nil
     }
@@ -487,7 +495,9 @@ defmodule Bm.Workspace.Coordinator do
         spend_seen: %{confirmed: 0.0, unknown: 0},
         tool: nil,
         running_since: nil,
-        last_event_at: nil
+        last_event_at: nil,
+        tool_since: nil,
+        repeats: %{}
     }
   end
 
@@ -730,7 +740,9 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_info({:pi, id, event, summary}, %{agent_id: id} = state) do
     state =
-      %{state | tool: summary[:tool], last_event_at: now()}
+      state
+      |> track_tool(summary[:tool])
+      |> Map.put(:last_event_at, now())
       |> track_spend(summary)
       |> enforce_budget()
 
@@ -796,7 +808,11 @@ defmodule Bm.Workspace.Coordinator do
 
   defp worker_event(state, _event, _summary), do: state
 
-  ## Limits (5.1, 5.2)
+  ## Limits (5.1, 5.2, 11.5)
+
+  defp track_tool(%{tool: tool} = state, tool), do: state
+  defp track_tool(state, nil), do: %{state | tool: nil, tool_since: nil}
+  defp track_tool(state, tool), do: %{state | tool: tool, tool_since: now()}
 
   defp now, do: System.monotonic_time(:millisecond)
 
@@ -845,12 +861,41 @@ defmodule Bm.Workspace.Coordinator do
       state.tool == nil and now() - state.last_event_at >= state.config.stall_timeout ->
         request_cancel(state, "stall")
 
+      state.tool != nil and state.tool_since != nil and
+          now() - state.tool_since >= state.config.tool_timeout ->
+        request_cancel(state, "tool_timeout")
+
       true ->
         schedule_limits_check(state)
     end
   end
 
   defp handle_request(state, request) do
+    state = count_repeat(state, request)
+
+    {outcome, state} = handle_request_once(state, request)
+
+    if repeats(state, request) >= state.config.repeat_cancel,
+      do: {outcome, request_cancel(state, "repeating the same call")},
+      else: {outcome, state}
+  end
+
+  # Identical guarded tool calls (same tool, same input) in this attempt.
+  defp count_repeat(state, %{op: "authorize", payload: payload}) do
+    key = repeat_key(payload)
+    %{state | repeats: Map.update(state.repeats, key, 1, &(&1 + 1))}
+  end
+
+  defp count_repeat(state, _request), do: state
+
+  defp repeats(state, %{op: "authorize", payload: payload}),
+    do: Map.get(state.repeats, repeat_key(payload), 0)
+
+  defp repeats(_state, _request), do: 0
+
+  defp repeat_key(payload), do: :erlang.phash2({payload["tool"], payload["input"]})
+
+  defp handle_request_once(state, request) do
     Bm.Bridge.handle(:worker, state.agent_id, request, state.assignment, fn request ->
       case request.op do
         "authorize" -> authorize(state, request.payload)
@@ -867,6 +912,24 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp authorize(state, %{"tool" => tool} = payload) do
+    count = Map.get(state.repeats, repeat_key(payload), 0)
+
+    if count >= state.config.repeat_refuse do
+      %{
+        "ok" => true,
+        "allow" => false,
+        "reason" =>
+          "You have made this exact #{tool} call #{count} times; repeating it will not help. " <>
+            "Try a different approach, or submit_result with status blocked and say why."
+      }
+    else
+      authorize_policy(state, tool, payload)
+    end
+  end
+
+  defp authorize(_state, _payload), do: %{"ok" => false, "error" => "malformed_authorize"}
+
+  defp authorize_policy(state, tool, payload) do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
     ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
 
@@ -875,8 +938,6 @@ defmodule Bm.Workspace.Coordinator do
       {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
     end
   end
-
-  defp authorize(_state, _payload), do: %{"ok" => false, "error" => "malformed_authorize"}
 
   defp submit_result(state, payload) do
     attempt = Runs.get_attempt!(state.attempt.id)

@@ -861,3 +861,14 @@ clone through the UI: reverting run 55 put its 4 files back (run 54's file and t
 untouched); run 54 with a hand edit in its file was refused ("lib/mix/tasks/bm.runs.ex changed
 since the run. Nothing was touched.") and the edit survived; after undoing the edit, reverting run
 54 deleted the file it had added; the clone was back to the user's README change only.
+
+**Status 11.5 (2026-09-30); Phase 11 done.** Coordinator limits: identical guarded tool calls
+(same tool and input) are counted per attempt; the 4th is refused with a reason the model can act
+on ("You have made this exact bash call 4 times; repeating it will not help…"), the 6th cancels
+the attempt ("repeating the same call"); one tool call running longer than `tool_timeout`
+(10 min) cancels it ("tool_timeout"; before, only `max_duration` bounded a hung command). All
+three are coordinator options. Soft budget: an unfinished run past 80 % of its budget shows
+"N % of the budget used" in the run header, and the planner's next delivery asks it to finish
+with the smallest plan. Checked with a scratch script on the fake pi: 4th identical call refused;
+with `repeat_cancel: 3` the attempt was cancelled; with `tool_timeout: 1_000` a `sleep 5` was
+cancelled. The soft-budget warning and note were read through, not seen live.
