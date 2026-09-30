@@ -475,6 +475,7 @@ defmodule Bm.Workspace.Coordinator do
          {:ok, task} <- admit_task(run, attrs),
          {:ok, attempt} <- Runs.create_attempt(task, %{role: role(task)}),
          {:ok, tree_before} <- Git.snapshot(state.root),
+         {:ok, run} <- protect_outside_changes(state.root, run, tree_before),
          {:ok, attempt} <-
            Runs.transition_attempt(attempt, :admitted, %{tree_before: tree_before}),
          {:ok, task} <- Runs.update_task_status(task, :running) do
@@ -565,6 +566,49 @@ defmodule Bm.Workspace.Coordinator do
     state = %{state | run: run}
 
     if state.cancel?, do: finish(state, :cancelled, %{}), else: start_worker(state)
+  end
+
+  # Files changed since BM last touched the workspace were changed by the user (or something
+  # else outside BM) during the run: they join the run's user-owned files, like the ones dirty at
+  # its start (plan 13.1). BM's last state is the previous attempt's tree_after (tree_before if it
+  # was reverted), or the run's baseline tree before the first attempt.
+  defp protect_outside_changes(root, run, current_tree) do
+    with known when is_binary(known) <- last_known_tree(run),
+         true <- known != current_tree,
+         {:ok, entries} <- Git.diff(root, known, current_tree) do
+      owned = get_in(run.baseline, ["user_owned"]) || []
+
+      case Enum.map(entries, & &1.path) -- owned do
+        [] ->
+          {:ok, run}
+
+        new ->
+          Logger.info(
+            "run #{run.id}: protecting files changed outside BM: #{Enum.join(new, ", ")}"
+          )
+
+          baseline =
+            run.baseline
+            |> Map.put("user_owned", owned ++ new)
+            |> Map.update("changed_during_run", new, &Enum.uniq(&1 ++ new))
+
+          Runs.update_run(run, %{baseline: baseline})
+      end
+    else
+      _nothing_to_compare -> {:ok, run}
+    end
+  end
+
+  defp last_known_tree(run) do
+    run
+    |> Runs.list_run_attempts()
+    |> Enum.find(&is_binary(&1.tree_before))
+    |> case do
+      nil -> get_in(run.baseline || %{}, ["tree"])
+      %{status: :reverted, tree_before: tree} -> tree
+      %{tree_after: tree} when is_binary(tree) -> tree
+      %{tree_before: tree} -> tree
+    end
   end
 
   # A queued task of this run (the planner's), or a new one.
