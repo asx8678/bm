@@ -775,3 +775,19 @@ check `exit 1` → attempt reverted + `auto_reverted`, file gone, lane free, del
 planner told to re-plan, run failed when it closed; re-proposed with `exit 2` → revision 2
 reverted too and the run failed "task make_out failed again after its re-plan". Not seen with the
 real model.
+
+---
+
+## Consolidation (2026-09-30)
+
+Before merging `core-milestone-b` (phases 0–10, D1–D23) into `main`, at the user's request:
+- `mix test`: **199 passed**, 6 excluded. Nothing broke in phases 9–10.
+- `mix test --only live`: **5 passed** (qualification 4/4 with the current profiles, milestone B
+  gate against the current coordinator: stop job with transcripts, D23 branch).
+- Checked by hand (scratch scripts, fake pi, no model, no test files): a planner check with
+  escaped quotes is rejected with an actionable reason and plain shell is accepted; automatic
+  pruning after a run (`keep_checkpoint_runs` = 1): after the second run finished, only its refs
+  remained, branches untouched.
+- Still not seen live: D23 with the real model (only the scripted planner), the planner prompt's
+  new check guidance in effect, and `mix bm.bench --goals` stopping on a held attempt (read
+  through; no more benchmarks were to be run).
