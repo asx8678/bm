@@ -1406,6 +1406,32 @@ the reviewer still decline such dialogs (they are BM's own sessions).
 an approval, asks for it once in the terminal. New API endpoints: keep, revert, cancel, and
 answering an approval.
 
+**Status 24.1 (2026-09-30).** `Bm.Pi.Agent` started with `approvals: true` (the coordinator's
+workers) forwards `select`/`confirm`/`input`/`editor` requests of other extensions to its owner
+(op `approval`) and answers them in pi's shapes (`confirmed`, `value`, `cancelled`); the
+transcript notes the question and the answer. The coordinator keeps them in `approvals` (also in
+`@late_fields`), declines each after `approval_timeout` (2 minutes, or pi's own `timeout` if
+sooner), holds the stall check while one waits, drops them when the attempt ends, and answers
+through `Coordinator.answer_approval/3`. The run page shows a card per question (Yes/No, one
+button per option, a text field or text area, Decline); `GET /api/runs/:id` lists them and counts
+them as waiting for the user; `POST /api/runs/:id/approvals/:dialog_id` answers. The fake pi got
+a `{"dialog": …}` work step. Checked on a scratch BEAM serving the site on port 4011, the worker's
+stall limit set to 1 s: a confirm answered with the page's Yes in headless Chrome
+(`confirmed: true`), a select through the API (`value: "B"`), an input through the page's form
+(`value: "Ada"`), an editor left alone (declined at its 1.5 s timeout, `cancelled: true`); the
+attempt was accepted, never stopped for silence; the transcript holds each question and answer.
+A first pass declined the confirm after its 90 s timeout while I was slow to click: correct.
+
+**Status 24.2 (2026-09-30).** `Bm.CLI.follow/2` (moved from `mix bm.goal`, which now uses it)
+prints tasks, approvals and decisions; with `ask: true` it asks once per approval (y/n/d, an
+option number, or text) and once per held attempt (k/r), an empty answer or end of input leaving
+it for the page. `mix bm.attach BM-n` (`--watch` only follows). API: `POST /api/runs/:id/keep`,
+`/revert`, `/cancel` for the workspace's current run, 404 for other actions. Checked on the 4011
+scratch server with answers piped in (`y`, `2`, `r`): pi got `confirmed: true` and `value: "B"`,
+the held attempt (verify `false`) was reverted (out.txt gone), and attach followed the run to done.
+
+**Status: Phase 24 done (2026-09-30).**
+
 ## Phase 25: a supervisor for attempts
 
 Rules only, checked with the existing periodic limits check; no model calls (a model-based drift

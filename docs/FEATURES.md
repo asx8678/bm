@@ -137,7 +137,7 @@ Each has a precondition; don't start one before it holds.
 | **Per-task rollback** with dependency handling (beyond reverting the latest attempt) — reverting a **whole finished run** (plan 11.4) and **one task of a finished run** with dependency checks (plan 13.3) are done; undo **during a run** (paused goal run, active single-task run; plan 23.1, D28) is done | M |
 | **Full recovery**: resume attempts that provably changed nothing — **done for goal runs** after a restart (plan 21, D27): the task is queued again and planning resumes by itself; attempts that changed files still wait for the user | M |
 | **Refined limits**: soft budget, per-state timeouts (provider / tool / approval / stall), repeat-call guard, in-flight estimates — repeat-call guard, tool timeout and soft budget **done** (plan 11.5); a silent model stops planner and review turns too (plan 23.2); approval timeout with the inbox (plan 24.1); in-flight estimates not | S–M |
-| **Approval inbox** in the browser for non-`bm:` dialogs | M |
+| **Approval inbox** in the browser for non-`bm:` dialogs — **done** for workers' attempts (plan 24.1, D29) | M |
 | **Reviewer role** (read-only; silent / message / stop) — **done** as a review before accepting each goal-run task (plan 14.1, D25) | M |
 | **`ask_planner`** tool for workers — **done** (plan 12.2, D24); seen with the fake pi, no real worker has asked yet | S |
 | **Supervisor** (progress and drift checks) | M |
@@ -153,7 +153,7 @@ Each has a precondition; don't start one before it holds.
 | Short labels for runs and agents (`BM-12`) — runs **done** (plan 12.1) | S |
 | Transcript per attempt — **done 2026-09-30** as a stored compact transcript and an Activity fold (plan 10.4), not pi `export_html` | S |
 | Pruning old `refs/bm/…` checkpoints — **done 2026-09-30** (plan 10.3) | S |
-| CLI client attached to runs | M |
+| CLI client attached to runs — **done** as `mix bm.attach` (plan 24.2) | M |
 | Front "questioning" agent that sharpens vague requests — **done** as goal review in the Goal form (plan 12.3) | M |
 
 ### Experimental

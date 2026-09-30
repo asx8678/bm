@@ -10,15 +10,12 @@ defmodule Mix.Tasks.Bm.Goal do
 
   `--repo` defaults to the current directory; `--verify` defaults to the repository's saved
   verify command. The run is also on the web page (the URL is printed). A paused run can be
-  resumed there.
+  resumed there. What the run waits for is printed; `mix bm.attach` answers it in the terminal.
   """
 
   use Mix.Task
 
   alias Bm.CLI
-
-  @poll 2_000
-  @ended ~w(done failed cancelled)
 
   @impl true
   def run(args) do
@@ -42,91 +39,10 @@ defmodule Mix.Tasks.Bm.Goal do
     case CLI.post("/api/goals", body) do
       {:ok, run} ->
         Mix.shell().info("#{run["label"]} started in #{run["repo"]}\n#{run["url"]}")
-        unless opts[:no_wait], do: follow(run["id"], %{})
+        unless opts[:no_wait], do: CLI.follow(run["id"])
 
       {:error, message} ->
         Mix.raise("Not started: #{message}")
     end
   end
-
-  # The terminal bell (plan 16.2): the run ended, paused, or waits for a decision.
-  @bell "\a"
-
-  # A server restart is waited out (plan 21.3): after it, BM resumes the run by itself when it can.
-  @restart_wait 120_000
-
-  # Prints what changed since the last poll; returns when the run ends or pauses. `down_since`:
-  # when the server stopped answering, nil while it answers.
-  defp follow(id, seen, down_since \\ nil) do
-    case CLI.fetch("/api/runs/#{id}") do
-      {:ok, run} ->
-        if down_since, do: Mix.shell().info("BM answers again.")
-        lines = Enum.map(run["tasks"] || [], &CLI.task_line/1)
-        for line <- lines, not Map.has_key?(seen, line), do: Mix.shell().info(line)
-        waiting? = run["waiting_for_you"] == true
-
-        if waiting? and not Map.has_key?(seen, :waiting) do
-          Mix.shell().info(
-            @bell <> "#{run["label"]} waits for your decision (Keep or Revert) at #{run["url"]}"
-          )
-        end
-
-        # How often in a row the run was seen paused by a restart, still deciding (see report/3).
-        recovering = if run["status"] == "paused", do: Map.get(seen, :recovering, 0), else: 0
-        seen = Map.new(lines, &{&1, true})
-        seen = if waiting?, do: Map.put(seen, :waiting, true), else: seen
-        report(id, run, Map.put(seen, :recovering, recovering))
-
-      {:unreachable, message} ->
-        now = System.monotonic_time(:millisecond)
-
-        cond do
-          down_since == nil ->
-            Mix.shell().info("BM does not answer (restarting?); waiting up to 2 minutes…")
-            Process.sleep(@poll)
-            follow(id, seen, now)
-
-          now - down_since < @restart_wait ->
-            Process.sleep(@poll)
-            follow(id, seen, down_since)
-
-          true ->
-            Mix.raise("Lost the run: #{message}")
-        end
-
-      {:error, message} ->
-        Mix.raise("Lost the run: #{message}")
-    end
-  end
-
-  defp report(_id, %{"status" => status} = run, _seen) when status in @ended do
-    Mix.shell().info(
-      @bell <>
-        "#{run["label"]} #{status}: #{run["reason"]} · spent #{CLI.money(run["spent_usd"])}"
-    )
-  end
-
-  defp report(id, %{"status" => "paused"} = run, seen) do
-    if recovering?(run["reason"]) and seen.recovering < 5 do
-      Process.sleep(@poll)
-      follow(id, %{seen | recovering: seen.recovering + 1})
-    else
-      Mix.shell().info(
-        @bell <> "#{run["label"]} paused: #{run["reason"]}\nResume or finish it at #{run["url"]}"
-      )
-    end
-  end
-
-  defp report(id, _run, seen) do
-    Process.sleep(@poll)
-    follow(id, seen)
-  end
-
-  # Right after a restart, BM's recovery pauses a run whose planner was lost, then resumes it by
-  # itself or adds why not ("; not resumed by itself: …", "; resuming failed: …"; both strings
-  # come from Bm.Workspace.Recovery). A pause without either may be that moment: look again.
-  defp recovering?("planner lost: BM stopped" <> rest),
-    do: not String.contains?(rest, ["not resumed", "resuming failed"])
-
-  defp recovering?(_reason), do: false
 end
