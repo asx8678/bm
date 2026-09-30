@@ -420,6 +420,16 @@ defmodule BmWeb.RunLive do
     end
   end
 
+  def handle_event("pause", _params, socket) do
+    case Coordinator.pause_by_user(socket.assigns.root, socket.assigns.run.id) do
+      {:ok, _run} ->
+        {:noreply, put_flash(socket, :info, "Paused. The planner stopped; nothing new starts.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not paused: #{explain_action(reason)}")}
+    end
+  end
+
   def handle_event("resume_planning", _params, socket) do
     case Coordinator.resume_planning(socket.assigns.root, socket.assigns.run.id) do
       {:ok, run} ->
@@ -466,6 +476,14 @@ defmodule BmWeb.RunLive do
   def explain_action(:not_resumable), do: "only a paused goal run can resume planning."
   def explain_action(:already_reverted), do: "this run was already reverted."
   def explain_action(:run_not_finished), do: "finish the run first."
+
+  def explain_action(:run_not_paused),
+    do: "a goal run's task can be undone while the run is paused or finished (Pause first)."
+
+  def explain_action(:not_pausable), do: "only an active goal run can be paused."
+
+  def explain_action(:lane_held),
+    do: "an attempt waits for your decision (Keep or Revert); decide that first."
 
   def explain_action(:workspace_busy),
     do: "the workspace has an unfinished run; finish it first."
@@ -663,10 +681,7 @@ defmodule BmWeb.RunLive do
           <li :for={{dom_id, item} <- @streams.attempts} id={dom_id}>
             <.attempt_card
               item={item}
-              undo?={
-                @run.status in [:done, :failed, :cancelled] and @run.reverted_at == nil and
-                  @run.commit_sha == nil
-              }
+              undo?={undo_allowed?(@run)}
             />
           </li>
         </ol>
@@ -952,7 +967,8 @@ defmodule BmWeb.RunLive do
             <p class="min-w-0 flex-1 text-xs">
               <span class="font-semibold text-bm-run">Paused.</span>
               Resume planning starts a new planner session that knows the tasks so far; Finish
-              ends the run and keeps what was accepted.
+              ends the run and keeps what was accepted. While paused, a task can be undone on its
+              card.
             </p>
             <.action id="finish-run-btn" event="finish" style={:secondary} disable_with="Finishing…">
               Finish run
@@ -985,6 +1001,9 @@ defmodule BmWeb.RunLive do
               disable_with="Reverting…"
             >
               Revert last change
+            </.action>
+            <.action id="pause-run-btn" event="pause" style={:secondary} disable_with="Pausing…">
+              Pause
             </.action>
             <.action id="finish-run-btn" event="finish" style={:secondary} disable_with="Finishing…">
               Finish run
@@ -1312,6 +1331,15 @@ defmodule BmWeb.RunLive do
   defp tool_tone("ok"), do: "text-bm-idle"
   defp tool_tone("error"), do: "text-bm-error"
   defp tool_tone(_running), do: "text-bm-muted"
+
+  # Undo a task (13.3): in a finished run, and during a run (plan 23.1) while a goal run is paused
+  # or a single-task run is active; the coordinator refuses it while an attempt runs.
+  defp undo_allowed?(%{status: status} = run) when status in [:done, :failed, :cancelled],
+    do: run.reverted_at == nil and run.commit_sha == nil
+
+  defp undo_allowed?(%{status: :paused, planner: %{}}), do: true
+  defp undo_allowed?(%{status: :active, planner: nil}), do: true
+  defp undo_allowed?(_run), do: false
 
   defp review_label(%{"verdict" => "approve"}), do: "review approved"
   defp review_label(%{"verdict" => "reject"}), do: "review rejected"

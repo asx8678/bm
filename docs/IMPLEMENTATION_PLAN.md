@@ -1334,3 +1334,89 @@ pi, which echoes, went through it).
 (temporary repository); finished"); no unfinished runs are left.
 
 **Status: Phase 22 done (2026-09-30).**
+
+---
+
+## Phases 23–25: the finish line
+
+Scoped together 2026-09-30 at the user's request ("plan phases 23 and 25, make them together",
+read as 23 to 25, the three phases the user was shown as the finish line). None of these has
+evidence from a trial yet (FEATURES.md asks for evidence before optional features); the user
+chose to build them anyway to finish the list. The trial on a project of the user's stays
+waiting for a repository. No tests (user's instruction): each step is checked with the fake pi
+and, where it matters, live. Each phase is reviewed, then merged into `main`; pushed at the end.
+
+## Phase 23: safety during a run
+
+**23.1 Undo a task while its run is unfinished.** Until now only finished runs could undo a task
+(13.3). Now also: a *paused* goal run (its planner is not scheduling, so an undo cannot land
+inside a planner turn, which would read as "the planner changed files"), and an active
+single-task run with no attempt running. Same dependency check and conditional restore as 13.3.
+Two things are new: BM records the workspace after the undo as its own last state (13.1 compares
+the workspace with the latest attempt's tree and would otherwise protect the restored files as
+the user's), and in a goal run the planner hears of it: the task's delivery is dropped so the
+next scheduling reports it again, as "undone by the user; its changes are reverted; propose it
+again only if the goal still needs it". A run whose plan then ends without that task ends
+"failed: not every task succeeded", with the task named as undone by the user.
+
+**23.2 A silent model stops a planner or review turn.** Workers already stop after 3 minutes
+without a pi event (plus tool and total limits). The planner waited up to 15 minutes per turn
+and the reviewer 5 minutes, however quiet the model was. Now the same 3-minute silence rule
+applies to both: the planner turn is stopped and the run paused with the reason; the review
+counts as not run (the existing "not reviewed" path). Cost estimates for requests in flight are
+left out: the stream's partial usage could not be shown to carry a cost.
+
+**Status 23.1 (2026-09-30).** `Coordinator.revert_task/2` also works in an unfinished run
+(`revert_task_in_run`): refused while an attempt runs, while the lane is held, and for an active
+goal run (`:run_not_paused`). New `Coordinator.pause_by_user/2` and a Pause button for an active
+goal run: the planner is stopped (and no longer watched), the run paused "paused by the user"; a
+running attempt finishes first. After an undo, `remember_workspace/2` stores the workspace tree in
+`run.baseline["known_tree"]` with the newest attempt that ran, and `last_known_tree/1` uses it
+while no attempt ran since (first version used the newest attempt of all, which at admission is
+the one being admitted: task 3's write was refused as the user's; fixed). `Runs.drop_delivery/1`
+makes the planner hear of the undo; the undone attempt gets flag `undone` and "undone by the
+user; its changes are reverted"; the planner's delivery adds "Propose it again only if the goal
+still needs it"; a run that ends without the task names it "undone by the user". Checked with the
+fake pi: single-task run t1, t2, undo t1 (a.txt gone), t3 writes a.txt → accepted, nothing
+protected; goal run: undo refused while t2 ran, Pause while t2 ran → planner stopped, t2 accepted
+after, run "paused by the user"; undo t1 → a.txt gone, b.txt kept; Resume → the planner's results
+say "t1: cancelled … undone by the user … Propose it again only if the goal still needs it".
+
+**Status 23.2 (2026-09-30).** Planner: `stall_timeout` (3 minutes) checked on its tick, from the
+time of its model's last pi event, not while one of its commands runs; a silent planning turn
+pauses the run ("the planner's model sent nothing for 3 minutes"), a silent answer turn leaves the
+worker's question unanswered. Reviewer: no pi event for 3 minutes while no command runs ends the
+review as `:model_silent` (not reviewed); `config :bm, review_silence_ms:` sets it. Checked with
+the fake pi at 2 s: a hanging planner turn → run paused after 2.3 s with the reason; a hanging
+reviewer → the change accepted with `not_reviewed`, reason `:model_silent`.
+
+**Status: Phase 23 done (2026-09-30).**
+
+## Phase 24: control from anywhere
+
+**24.1 Approval inbox.** pi dialogs that are not BM's own (`select`, `confirm`, `input`,
+`editor`, from other extensions) were declined at once. In a worker's attempt they now wait for
+the user: the run page shows the question with its choices and answer controls, and the answer
+goes back to pi. An approval not answered within 2 minutes is declined (cancelled), and noted.
+While one waits, the attempt's silence clock is held, like during a tool call. The planner and
+the reviewer still decline such dialogs (they are BM's own sessions).
+
+**24.2 `mix bm.attach`.** Follows an existing run from the terminal (the same output as
+`mix bm.goal`, whose follow code moves into `Bm.CLI`), and when the run waits for a decision or
+an approval, asks for it once in the terminal. New API endpoints: keep, revert, cancel, and
+answering an approval.
+
+## Phase 25: a supervisor for attempts
+
+Rules only, checked with the existing periodic limits check; no model calls (a model-based drift
+check is left out: no evidence, and it would cost per check).
+
+**25.1 Steer the worker.** `Bm.Pi.steer/2` (pi's `steer`: delivered after the current tool calls,
+before the next model call). The supervisor steers once, and says so in the attempt's activity:
+when the worker writes a file outside the task's declared `writes` (allowed as before, flagged at
+the end as before, but now the worker is told at once); and when an attempt has run for a while
+with many tool calls but no change in the workspace. If the no-progress case repeats after the
+steer, the attempt is cancelled with the reason.
+
+**25.2 Run-level progress.** A goal run in which three attempts in a row ended without an accepted
+task is paused for the user ("no progress: …").

@@ -109,6 +109,12 @@ defmodule Bm.Workspace.Coordinator do
   @doc "Pauses the run `run_id` with `reason` (the planner lost or changed files)."
   def pause_run(path, run_id, reason), do: call(path, {:pause_run, run_id, reason})
 
+  @doc """
+  The user pauses the active goal run `run_id` (plan 23.1): its planner stops (a running
+  attempt finishes first) and the run waits for Resume planning or Finish.
+  """
+  def pause_by_user(path, run_id), do: call(path, {:pause_by_user, run_id})
+
   @doc "Resumes planning of the paused goal run `run_id` in a new planner session."
   def resume_planning(path, run_id, planner_opts \\ []),
     do: call(path, {:resume_planning, run_id, planner_opts})
@@ -396,6 +402,24 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:pause_run, _run_id, _reason}, _from, state),
     do: {:reply, {:error, :run_not_active}, state}
 
+  def handle_call({:pause_by_user, run_id}, _from, %{run: %{id: run_id}} = state) do
+    case Runs.get_run!(run_id) do
+      %{status: :active, planner: %{}} = run ->
+        # Stopped first, and no longer watched: its exit is not a surprise to report.
+        if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
+        Bm.Workspace.Planner.stop(run_id)
+        {:ok, run} = Runs.pause_run(run, "paused by the user")
+        broadcast_run(state, run)
+        {:reply, {:ok, run}, %{state | run: run, planner_ref: nil}}
+
+      _run ->
+        {:reply, {:error, :not_pausable}, state}
+    end
+  end
+
+  def handle_call({:pause_by_user, _run_id}, _from, state),
+    do: {:reply, {:error, :run_not_active}, state}
+
   def handle_call({:resume_planning, run_id, opts}, _from, %{run: %{id: run_id}} = state) do
     run = Runs.get_run!(run_id)
 
@@ -442,9 +466,6 @@ defmodule Bm.Workspace.Coordinator do
     {:reply, reply, state}
   end
 
-  def handle_call({:revert_task, _task_id}, _from, %{run: %{}} = state),
-    do: {:reply, {:error, :workspace_busy}, state}
-
   def handle_call({:revert_task, _task_id}, _from, %{phase: phase} = state) when phase != nil,
     do: {:reply, {:error, :attempt_running}, state}
 
@@ -452,14 +473,19 @@ defmodule Bm.Workspace.Coordinator do
     task = Runs.get_task!(task_id)
     run = Runs.get_run!(task.run_id)
 
-    reply =
-      cond do
-        run.workspace_id != state.workspace.id -> {:error, :run_not_in_workspace}
-        run.status in [:active, :paused] -> {:error, :run_not_finished}
-        true -> do_revert_task(state, run, task)
-      end
+    cond do
+      run.workspace_id != state.workspace.id ->
+        {:reply, {:error, :run_not_in_workspace}, state}
 
-    {:reply, reply, state}
+      run.status in [:active, :paused] ->
+        revert_task_in_run(state, run, task)
+
+      state.run != nil ->
+        {:reply, {:error, :workspace_busy}, state}
+
+      true ->
+        {:reply, do_revert_task(state, run, task), state}
+    end
   end
 
   def handle_call({:revert_run, _run_id}, _from, %{run: %{}} = state),
@@ -683,10 +709,19 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp last_known_tree(run) do
-    run
-    |> Runs.list_run_attempts()
-    |> Enum.find(&is_binary(&1.tree_before))
-    |> case do
+    # Attempts that started; the one being admitted has no tree_before yet.
+    latest = run |> Runs.list_run_attempts() |> Enum.find(&is_binary(&1.tree_before))
+    latest_id = if latest, do: latest.id
+
+    case get_in(run.baseline || %{}, ["known_tree"]) do
+      # Recorded after an undo during the run (plan 23.1), while no attempt ran after it.
+      %{"tree" => tree, "after_attempt" => ^latest_id} -> tree
+      _ -> last_attempt_tree(run, latest)
+    end
+  end
+
+  defp last_attempt_tree(run, latest) do
+    case latest do
       nil -> get_in(run.baseline || %{}, ["tree"])
       %{status: :reverted, tree_before: tree} -> tree
       %{tree_after: tree} when is_binary(tree) -> tree
@@ -832,6 +867,47 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Undoing one task (13.3)
 
+  # Undo in an unfinished run (plan 23.1): a goal run only while paused (its planner is not
+  # scheduling, so the undo can't land inside a planner turn), a single-task run while nothing
+  # runs; never while changes wait for the user. BM records the workspace after the undo as its
+  # own last state (13.1), and a goal run's planner is told at its next scheduling.
+  defp revert_task_in_run(state, run, task) do
+    cond do
+      state.run == nil or state.run.id != run.id ->
+        {:reply, {:error, :workspace_busy}, state}
+
+      state.lane != :free ->
+        {:reply, {:error, :lane_held}, state}
+
+      run.planner != nil and run.status != :paused ->
+        {:reply, {:error, :run_not_paused}, state}
+
+      true ->
+        case do_revert_task(state, run, task) do
+          {:ok, task} ->
+            {:ok, run} = remember_workspace(state.root, run)
+            if run.planner, do: Runs.drop_delivery(task)
+            broadcast_run(state, run)
+            {:reply, {:ok, task}, %{state | run: run}}
+
+          error ->
+            {:reply, error, state}
+        end
+    end
+  end
+
+  # BM's own change to the workspace outside an attempt: the next admission must not take it for
+  # the user's (plan 13.1, last_known_tree/1). Valid while the latest attempt is still the latest.
+  defp remember_workspace(root, run) do
+    with {:ok, tree} <- Git.snapshot(root) do
+      latest = run |> Runs.list_run_attempts() |> Enum.find(&is_binary(&1.tree_before))
+      known = %{"tree" => tree, "after_attempt" => latest && latest.id}
+      Runs.update_run(run, %{baseline: Map.put(run.baseline || %{}, "known_tree", known)})
+    else
+      _ -> {:ok, run}
+    end
+  end
+
   defp do_revert_task(state, run, task) do
     attempt =
       task
@@ -865,7 +941,11 @@ defmodule Bm.Workspace.Coordinator do
                  attempt.tree_before,
                  attempt.tree_after
                ),
-             {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted) do
+             {:ok, attempt} <-
+               Runs.transition_attempt(attempt, :reverted, %{
+                 flags: attempt.flags ++ ["undone"],
+                 error: "undone by the user; its changes are reverted"
+               }) do
           {:ok, task} = Runs.update_task_status(task, :cancelled)
 
           Phoenix.PubSub.broadcast(
