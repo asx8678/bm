@@ -124,6 +124,13 @@ defmodule Bm.Pi.Agent do
   def handle_call(_command, _from, %{port: nil} = state),
     do: {:reply, {:error, :not_running}, state}
 
+  def handle_call({:steer, text}, from, state) do
+    {:noreply,
+     state
+     |> emit({:notice, "BM told the worker: #{text}"})
+     |> send_command(%{type: "steer", message: text}, from)}
+  end
+
   def handle_call({:follow_up, text}, from, state) do
     {:noreply,
      state |> emit({:user, text}) |> send_command(%{type: "follow_up", message: text}, from)}

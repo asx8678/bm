@@ -33,6 +33,12 @@ defmodule Bm.Pi do
   @doc "Queues a message for delivery after the agent finishes its current work."
   def follow_up(id, text), do: GenServer.call(via(id), {:follow_up, text}, @command_timeout)
 
+  @doc """
+  Sends a steering message to a running agent (pi's `steer`): delivered after its current tool
+  calls, before its next model call (plan 25.1). The transcript notes it.
+  """
+  def steer(id, text), do: GenServer.call(via(id), {:steer, text}, @command_timeout)
+
   @doc "Replaces the pi session; `:ok` only after pi confirmed it."
   def new_session(id), do: GenServer.call(via(id), :new_session, @command_timeout)
 

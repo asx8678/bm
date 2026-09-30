@@ -37,6 +37,7 @@ defmodule Bm.Workspace.Planner do
 
   alias Bm.Pi.Profile
   alias Bm.Runs
+  alias Bm.Runs.Attempt
   alias Bm.Workspace.{Coordinator, Git}
 
   @defaults [
@@ -53,6 +54,8 @@ defmodule Bm.Workspace.Planner do
   ]
 
   @ended [:failed, :blocked, :cancelled]
+  # Attempts in a row without an accepted task that pause a goal run (plan 25.2).
+  @max_failure_streak 3
   @max_log 60
   @max_log_text 2_000
 
@@ -742,9 +745,12 @@ defmodule Bm.Workspace.Planner do
       Enum.any?(pending, &(&1.status != :accepted)) ->
         deliver(state, run, pending, tasks)
 
-      # 4. The next task whose dependencies are accepted.
+      # 4. The next task whose dependencies are accepted, unless the run makes no progress.
       task = List.first(runnable) ->
-        admit(state, run, task)
+        case failure_streak(run) do
+          {n, latest} when n >= @max_failure_streak -> no_progress(state, run, n, latest)
+          _progress -> admit(state, run, task)
+        end
 
       # 5. Tasks behind a dependency that ended without success.
       newly_blocked != [] ->
@@ -790,6 +796,40 @@ defmodule Bm.Workspace.Planner do
   end
 
   defp ended_label(task), do: Atom.to_string(task.status)
+
+  ## Run-level progress (25.2)
+
+  # Attempts in a row, newest first, that ended without an accepted task. Not counted: an
+  # interruption by a restart, an undo by the user, a stop by the user, and anything before the
+  # point where the user resumed after the last such pause.
+  defp failure_streak(run) do
+    mark = run.planner["progress_mark"] || 0
+
+    attempts =
+      run
+      |> Runs.list_run_attempts()
+      |> Enum.filter(
+        &(&1.id > mark and &1.status not in [:queued | Attempt.in_flight_statuses()])
+      )
+      |> Enum.reject(&ignored_failure?/1)
+
+    streak = Enum.take_while(attempts, &(&1.status != :accepted))
+    {length(streak), List.first(attempts)}
+  end
+
+  defp ignored_failure?(attempt) do
+    error = attempt.error || ""
+
+    String.starts_with?(error, "interrupted") or "undone" in attempt.flags or
+      (attempt.status == :cancelled and not String.starts_with?(error, "cancelled by BM"))
+  end
+
+  defp no_progress(state, run, n, latest) do
+    # Resuming starts a new count: only attempts after this one.
+    planner = Map.put(run.planner, "progress_mark", latest.id)
+    {:ok, _run} = Runs.update_run(run, %{planner: planner})
+    pause(state, "no progress: the last #{n} attempts ended without an accepted task")
+  end
 
   # An accepted task whose attempt raised no flag (undeclared writes, files changed by the
   # verify command, kept by the user, leftover processes, ...).

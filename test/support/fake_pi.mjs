@@ -19,7 +19,7 @@
 //   anything    -> answers "echo: <message>"
 import {spawn} from "node:child_process"
 import {randomUUID} from "node:crypto"
-import {writeFileSync, mkdirSync} from "node:fs"
+import {writeFileSync, mkdirSync, appendFileSync} from "node:fs"
 import {dirname} from "node:path"
 
 let buffer = ""
@@ -210,6 +210,10 @@ function handle(command) {
     const resolve = pendingUi.get(command.id)
     pendingUi.delete(command.id)
     resolve(command)
+  } else if (command.type === "steer") {
+    // Like pi: queued for the next model call. FAKE_STEER_LOG records it for scratch checks.
+    send({id: command.id, type: "response", command: "steer", success: true})
+    if (process.env.FAKE_STEER_LOG) appendFileSync(process.env.FAKE_STEER_LOG, command.message + "\n")
   } else if (command.type === "abort") {
     send({id: command.id, type: "response", command: "abort", success: true})
     if (abortWork) { abortWork(); abortWork = null } else { workAborted = true }

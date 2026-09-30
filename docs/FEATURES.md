@@ -140,7 +140,7 @@ Each has a precondition; don't start one before it holds.
 | **Approval inbox** in the browser for non-`bm:` dialogs — **done** for workers' attempts (plan 24.1, D29) | M |
 | **Reviewer role** (read-only; silent / message / stop) — **done** as a review before accepting each goal-run task (plan 14.1, D25) | M |
 | **`ask_planner`** tool for workers — **done** (plan 12.2, D24); seen with the fake pi, no real worker has asked yet | S |
-| **Supervisor** (progress and drift checks) | M |
+| **Supervisor** (progress and drift checks) — **done** as rules without model calls (plan 25): steer the worker on a write outside its files or when it changes nothing for a while, cancel if it still doesn't; pause a goal run after 3 attempts in a row without an accepted task | M |
 | **Sanitized replay fixtures** (A7) with an allowlist sanitizer | S |
 | Evaluate **Fabric managed-host mode** | M |
 

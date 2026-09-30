@@ -1446,3 +1446,34 @@ steer, the attempt is cancelled with the reason.
 
 **25.2 Run-level progress.** A goal run in which three attempts in a row ended without an accepted
 task is paused for the user ("no progress: …").
+
+**Status 25.1 (2026-09-30).** `Bm.Pi.steer/2` (pi's `steer` command; the transcript notes "BM told
+the worker: …"); the fake pi answers it and can log it (`FAKE_STEER_LOG`). Coordinator: an allowed
+edit/write outside `task.writes` steers once per file (`steer_drift`); `check_progress` in the
+limits check steers a writer attempt once after `progress_after` (6 minutes) with at least
+`progress_calls` (30) tool calls and no changed file (a snapshot compared with `tree_before`), and
+cancels it ("no progress: …") if still nothing changed after as long again; read-only attempts
+are left alone. New state fields in `@late_fields`, whose guard now checks the newest field.
+Checked with the fake pi: a task declaring a.txt that writes b.txt twice → one steer, the notice in
+the transcript, accepted with `undeclared_writes`; 4 tool calls then busy (limits 2 s / 3 calls) →
+steered at ≈2 s, cancelled at 4.5 s "no progress: 4 tool calls and no changed file" (a first try
+with four identical `true` commands met the repeat guard instead).
+
+**Status 25.2 (2026-09-30).** The planner's scheduler pauses the run before admitting a task when
+the last 3 finished attempts ended without an accepted task (not counted: interruptions by a
+restart, undos, stops by the user; nothing before `planner["progress_mark"]`, set at such a pause
+so a resume starts a new count). Checked with the fake pi: four tasks whose checks fail → paused
+"no progress: the last 3 attempts ended without an accepted task" with t4 still queued.
+
+Notes: of the 36 attempts BM made in real repositories so far (trial clone, sandbox), none wrote
+outside its declared files, so the drift steer would not have fired in them; its text leaves the
+worker free to go on when the task needs the file. Once past its thresholds, the no-progress
+check takes a snapshot on each limits check (every 45 s by default) until a file changes or the
+attempt is cancelled, at most about 8 per attempt. Attempts BM cancelled (silence, time,
+no progress) count toward the run-level streak on purpose.
+
+Not seen with the real model in Phases 23–25: every check used the fake pi (the approval inbox also
+through the real page in headless Chrome and the real API). Worth watching in real use: whether a
+real worker heeds a steer, and a real extension's dialog (no BM profile loads one that asks yet).
+
+**Status: Phase 25 done (2026-09-30). Phases 23–25 done.**
