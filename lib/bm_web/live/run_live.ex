@@ -4,6 +4,10 @@ defmodule BmWeb.RunLive do
   every file each attempt changed, updated live from the workspace coordinator. Actions depend on
   the workspace's lane: Stop while an attempt runs; Keep or Revert when an attempt waits for a
   decision; a next task, Revert of the last change, or Finish when the lane is free.
+
+  A goal run (plan 8.1) also shows its planner (state, waves, summary, log) and its task list
+  with dependencies and states; the planner picks the next task, so there is no next-task form,
+  and a paused goal run offers Resume planning.
   """
 
   use BmWeb, :live_view
@@ -11,7 +15,7 @@ defmodule BmWeb.RunLive do
   import BmWeb.RunComponents
 
   alias Bm.Runs
-  alias Bm.Workspace.{Coordinator, Git}
+  alias Bm.Workspace.{Coordinator, Git, Planner}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -38,9 +42,23 @@ defmodule BmWeb.RunLive do
        root: root,
        lane: lane(run),
        latest: List.last(attempts),
-       form: to_form(%{"goal" => ""}, as: :next)
+       form: to_form(%{"goal" => ""}, as: :next),
+       goal_run?: run.planner != nil,
+       planner_phase: planner_phase(run)
      )
+     |> stream(:tasks, if(run.planner, do: Runs.list_tasks(run), else: []))
      |> stream(:attempts, Enum.map(attempts, &decorate(&1, root)))}
+  end
+
+  defp planner_phase(%{planner: nil}), do: nil
+
+  defp planner_phase(run) do
+    case Planner.state(run.id) do
+      %{phase: phase} -> phase
+      nil -> nil
+    end
+  catch
+    :exit, _ -> nil
   end
 
   # The lane matters only for the workspace's unfinished run; the coordinator knows it.
@@ -87,6 +105,7 @@ defmodule BmWeb.RunLive do
       {:noreply,
        socket
        |> assign(lane: lane, latest: attempt, run: reload(socket.assigns.run))
+       |> stream_insert(:tasks, task)
        |> stream_insert(:attempts, decorate(attempt, socket.assigns.root))}
     else
       {:noreply, socket}
@@ -94,11 +113,33 @@ defmodule BmWeb.RunLive do
   end
 
   def handle_info(
+        {:workspace, _root, {:task, %{run_id: id} = task}},
+        %{assigns: %{run: %{id: id}}} = socket
+      ),
+      do: {:noreply, stream_insert(socket, :tasks, task)}
+
+  def handle_info(
+        {:workspace, _root, {:planner, id, info}},
+        %{assigns: %{run: %{id: id}}} = socket
+      ),
+      do: {:noreply, assign(socket, planner_phase: info.phase)}
+
+  def handle_info(
         {:workspace, _root, {:run, %{id: id} = run}},
         %{assigns: %{run: %{id: id}}} = socket
       ) do
     run = %{run | workspace: socket.assigns.run.workspace}
     lane = if run.status in [:active, :paused], do: socket.assigns.lane, else: :finished
+
+    socket =
+      if run.planner != nil and run.status != :active,
+        # Ending or pausing may cancel queued tasks without a task event.
+        do:
+          socket
+          |> stream(:tasks, Runs.list_tasks(run), reset: true)
+          |> assign(planner_phase: nil),
+        else: socket
+
     {:noreply, assign(socket, run: run, lane: lane)}
   end
 
@@ -142,6 +183,16 @@ defmodule BmWeb.RunLive do
     end
   end
 
+  def handle_event("resume_planning", _params, socket) do
+    case Coordinator.resume_planning(socket.assigns.root, socket.assigns.run.id) do
+      {:ok, run} ->
+        {:noreply, assign(socket, run: %{run | workspace: socket.assigns.run.workspace})}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not resume: #{explain_action(reason)}")}
+    end
+  end
+
   def handle_event("next", %{"next" => %{"goal" => goal}}, socket) do
     goal = String.trim(goal)
 
@@ -174,6 +225,9 @@ defmodule BmWeb.RunLive do
 
   def explain_action({:not_revertable, status}),
     do: "the latest attempt is #{status |> to_string() |> String.replace("_", " ")}."
+
+  def explain_action(:not_resumable), do: "only a paused goal run can resume planning."
+  def explain_action(:run_not_active), do: "this run is no longer the workspace's active run."
 
   def explain_action(:not_started),
     do: "BM is not managing this workspace right now; reload the page."
@@ -214,6 +268,16 @@ defmodule BmWeb.RunLive do
               <span class="flex-none font-mono font-medium">{Path.basename(@root)}</span>
               <span class="min-w-0 truncate font-mono text-bm-muted">{@root}</span>
             </p>
+            <p
+              :if={@run.status_reason}
+              id="run-reason"
+              class={[
+                "mt-2 text-xs",
+                if(@run.status in [:failed, :paused], do: "text-bm-run", else: "text-bm-muted")
+              ]}
+            >
+              {String.capitalize(@run.status_reason)}.
+            </p>
           </div>
           <dl id="run-spend" class="text-right">
             <dt class="text-[11px] text-bm-muted">Spent</dt>
@@ -230,8 +294,39 @@ defmodule BmWeb.RunLive do
 
         <.baseline_warning run={@run} />
 
-        <.action_bar lane={@lane} latest={@latest} run={@run} root={@root} form={@form} />
+        <.action_bar
+          lane={@lane}
+          latest={@latest}
+          run={@run}
+          root={@root}
+          form={@form}
+          goal_run?={@goal_run?}
+          planner_phase={@planner_phase}
+        />
 
+        <section
+          :if={@goal_run?}
+          id="plan"
+          class="mt-6 grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+        >
+          <.planner_panel run={@run} phase={@planner_phase} />
+          <div class="min-w-0">
+            <h2 class="text-xs font-semibold">Tasks</h2>
+            <ol id="tasks" phx-update="stream" class="mt-2 space-y-1.5">
+              <li
+                id="tasks-empty"
+                class="hidden rounded-lg border border-dashed border-bm-line p-4 text-center text-xs text-bm-muted only:block"
+              >
+                The planner has not proposed any task yet.
+              </li>
+              <li :for={{dom_id, task} <- @streams.tasks} id={dom_id}>
+                <.task_row task={task} />
+              </li>
+            </ol>
+          </div>
+        </section>
+
+        <h2 :if={@goal_run?} class="mt-8 text-xs font-semibold">Attempts</h2>
         <ol id="attempts" phx-update="stream" class="mt-6 space-y-4">
           <li
             id="attempts-empty"
@@ -306,11 +401,124 @@ defmodule BmWeb.RunLive do
 
   defp baseline_warning(assigns), do: ~H""
 
+  attr :run, :map, required: true
+  attr :phase, :atom, default: nil
+
+  # The goal run's planner: what it is doing, its waves, its summary and its log.
+  defp planner_panel(assigns) do
+    planner = assigns.run.planner || %{}
+    assigns = assign(assigns, planner: planner, log: Enum.reverse(planner["log"] || []))
+
+    ~H"""
+    <div id="planner" class="min-w-0 rounded-xl border border-bm-line bg-bm-surface">
+      <header class="flex flex-wrap items-center gap-2 border-b border-bm-line px-3 py-2">
+        <span class={[
+          "size-1.5 rounded-full",
+          if(@phase in [:starting, :busy],
+            do: "animate-pulse bg-bm-run motion-reduce:animate-none",
+            else: "bg-bm-muted"
+          )
+        ]}></span>
+        <h2 class="text-xs font-semibold">Planner</h2>
+        <span id="planner-phase" class="text-[11px] text-bm-muted">{phase_label(@phase, @run)}</span>
+        <span class="ml-auto font-mono text-[10px] text-bm-muted">
+          wave {@planner["waves"] || 1} · plan {if @run.plan_open, do: "open", else: "closed"}
+        </span>
+      </header>
+      <p
+        :if={@planner["summary"]}
+        id="planner-summary"
+        class="border-b border-bm-line px-3 py-2 text-xs"
+      >
+        <span class="text-bm-muted">Plan:</span> {@planner["summary"]}
+      </p>
+      <ol class="max-h-96 space-y-2 overflow-y-auto px-3 py-2">
+        <li :if={@log == []} class="text-xs text-bm-muted">Nothing yet.</li>
+        <li :for={entry <- @log} class="text-xs">
+          <details class="group" open={entry["kind"] in ["reply", "end", "paused"]}>
+            <summary class="flex cursor-pointer list-none items-center gap-2">
+              <span class="text-bm-muted transition-transform group-open:rotate-90">›</span>
+              <span class={["flex-none whitespace-nowrap font-medium", log_tone(entry["kind"])]}>
+                {log_label(entry["kind"])}
+              </span>
+              <span class="truncate text-[11px] text-bm-muted">{first_line(entry["text"])}</span>
+            </summary>
+            <div
+              :if={entry["kind"] == "reply"}
+              class="bm-prose mt-1 max-h-72 overflow-y-auto rounded-md bg-bm-bg px-2.5 py-1.5"
+            >
+              {markdown(entry["text"])}
+            </div>
+            <pre
+              :if={entry["kind"] != "reply"}
+              class="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-md bg-bm-bg px-2.5 py-1.5 font-sans text-xs leading-relaxed"
+              phx-no-format
+            >{String.trim(entry["text"])}</pre>
+          </details>
+        </li>
+      </ol>
+    </div>
+    """
+  end
+
+  defp phase_label(:starting, _run), do: "starting"
+  defp phase_label(:busy, _run), do: "thinking"
+  defp phase_label(:idle, _run), do: "waiting while tasks run"
+  defp phase_label(_phase, %{status: :active}), do: "not running"
+  defp phase_label(_phase, _run), do: "finished"
+
+  defp log_label("prompt"), do: "Goal sent"
+  defp log_label("results"), do: "Results sent"
+  defp log_label("reminder"), do: "Reminder sent"
+  defp log_label("reply"), do: "Planner"
+  defp log_label("end"), do: "Run ended"
+  defp log_label("paused"), do: "Run paused"
+  defp log_label(kind), do: kind
+
+  defp log_tone(kind) when kind in ["paused"], do: "text-bm-run"
+  defp log_tone("reply"), do: "text-bm-text"
+  defp log_tone(_kind), do: "text-bm-muted"
+
+  # The planner's replies are markdown; MDEx drops raw HTML (render: [unsafe: false]).
+  defp markdown(text) do
+    text
+    |> MDEx.to_html!(
+      extension: [table: true, strikethrough: true, autolink: true],
+      render: [unsafe: false]
+    )
+    |> Phoenix.HTML.raw()
+  end
+
+  defp first_line(text), do: text |> String.split("\n", trim: true) |> List.first("")
+
+  attr :task, :map, required: true
+
+  defp task_row(assigns) do
+    ~H"""
+    <div class="rounded-lg border border-bm-line bg-bm-surface px-3 py-2">
+      <div class="flex items-center gap-2">
+        <.task_status id={"task-#{@task.id}-status"} status={@task.status} />
+        <span class="min-w-0 flex-1 truncate text-[13px] font-medium" title={@task.title}>{@task.title}</span>
+        <span :if={@task.revision > 1} class="rounded bg-bm-raised px-1 text-[10px] text-bm-muted">re-planned</span>
+      </div>
+      <div class="bm-meta mt-1 flex flex-wrap items-center gap-y-0.5 font-mono text-[10px] text-bm-muted">
+        <span>{@task.key}</span>
+        <span :if={@task.depends_on != []}>after {Enum.join(@task.depends_on, ", ")}</span>
+        <span :if={!@task.mutates}>read-only</span>
+        <span :if={@task.writes != []} class="min-w-0 truncate">{Enum.join(@task.writes, ", ")}</span>
+        <span :if={@task.check}>check: {@task.check}</span>
+      </div>
+    </div>
+    """
+  end
+
   attr :lane, :any, required: true
   attr :latest, :any, required: true
   attr :run, :any, required: true
   attr :root, :string, required: true
   attr :form, :any, required: true
+  attr :goal_run?, :boolean, default: false
+  attr :planner_phase, :atom, default: nil
 
   defp action_bar(assigns) do
     ~H"""
@@ -351,11 +559,54 @@ defmodule BmWeb.RunLive do
             </p>
             <.link
               id="new-task-link"
-              navigate={~p"/?path=#{@root}"}
+              navigate={~p"/?#{%{path: @root, mode: if(@goal_run?, do: "goal", else: "task")}}"}
               class="rounded-md bg-bm-text px-3 py-1.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
             >
-              New task here
+              {if @goal_run?, do: "New goal here", else: "New task here"}
             </.link>
+          </div>
+        <% _free when @goal_run? and @run.status == :paused -> %>
+          <div class="flex flex-wrap items-center gap-3">
+            <p class="min-w-0 flex-1 text-xs">
+              <span class="font-semibold text-bm-run">Paused.</span>
+              Resume planning starts a new planner session that knows the tasks so far; Finish
+              ends the run and keeps what was accepted.
+            </p>
+            <.action id="finish-run-btn" event="finish" style={:secondary} disable_with="Finishing…">
+              Finish run
+            </.action>
+            <.action
+              id="resume-planning-btn"
+              event="resume_planning"
+              style={:primary}
+              disable_with="Resuming…"
+            >
+              Resume planning
+            </.action>
+          </div>
+        <% _free when @goal_run? -> %>
+          <div class="flex flex-wrap items-center gap-3">
+            <span
+              :if={@planner_phase in [:starting, :busy]}
+              class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"
+            ></span>
+            <p class="min-w-0 flex-1 text-xs">
+              {if @planner_phase in [:starting, :busy],
+                do: "The planner is working. Tasks start when it has proposed them.",
+                else: "The planner chooses the next task; nothing waits for you."}
+            </p>
+            <.action
+              :if={revertable?(@latest)}
+              id="revert-btn"
+              event="revert"
+              style={:secondary}
+              disable_with="Reverting…"
+            >
+              Revert last change
+            </.action>
+            <.action id="finish-run-btn" event="finish" style={:secondary} disable_with="Finishing…">
+              Finish run
+            </.action>
           </div>
         <% _free -> %>
           <.form

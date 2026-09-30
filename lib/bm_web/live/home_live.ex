@@ -1,7 +1,11 @@
 defmodule BmWeb.HomeLive do
   @moduledoc """
-  Tasks page: start a task in a checkout (milestone B: one guarded worker per task) and see the
-  recent runs. A task runs in the workspace's unfinished run, or starts a new one.
+  Tasks page: start work in a checkout and see the recent runs. Two ways to start:
+
+    * **Goal** (milestone C, plan 8.1): a planner splits the goal into tasks that guarded
+      workers run one at a time (`Coordinator.start_goal/3`);
+    * **Single task** (milestone B): one guarded worker does the task, in the workspace's
+      unfinished run or a new one.
   """
 
   use BmWeb, :live_view
@@ -22,7 +26,9 @@ defmodule BmWeb.HomeLive do
        page_title: "Tasks",
        runs_empty?: runs == [],
        workspaces: workspaces,
-       form: default_form(workspaces, params["path"])
+       mode: if(params["mode"] == "task", do: :task, else: :goal),
+       form: default_form(workspaces, params["path"]),
+       goal_form: default_form(workspaces, params["path"]) |> then(&to_form(&1.params, as: :goal))
      )
      |> stream(:runs, runs)}
   end
@@ -48,6 +54,29 @@ defmodule BmWeb.HomeLive do
   end
 
   @impl true
+  def handle_event("mode", %{"mode" => mode}, socket) do
+    {:noreply, assign(socket, mode: if(mode == "task", do: :task, else: :goal))}
+  end
+
+  def handle_event("validate_goal", %{"goal" => params}, socket) do
+    {:noreply, assign(socket, goal_form: to_form(params, as: :goal))}
+  end
+
+  def handle_event("start_goal", %{"goal" => params}, socket) do
+    path = String.trim(params["path"] || "")
+
+    with {:ok, attrs} <- goal_attrs(params),
+         {:ok, _pid} <- Coordinator.ensure_started(path),
+         {:ok, run} <- Coordinator.start_goal(path, attrs) do
+      {:noreply, push_navigate(socket, to: ~p"/runs/#{run.id}")}
+    else
+      {:error, reason} ->
+        {field, message} = explain(reason, path)
+        form = to_form(params, as: :goal, errors: [{field, {message, []}}], action: :validate)
+        {:noreply, assign(socket, goal_form: form)}
+    end
+  end
+
   def handle_event("validate", %{"task" => params}, socket) do
     {:noreply, assign(socket, form: to_form(params, as: :task))}
   end
@@ -65,6 +94,29 @@ defmodule BmWeb.HomeLive do
         {field, message} = explain(reason, path)
         form = to_form(params, as: :task, errors: [{field, {message, []}}], action: :validate)
         {:noreply, assign(socket, form: form)}
+    end
+  end
+
+  defp goal_attrs(params) do
+    goal = String.trim(params["goal"] || "")
+    budget_text = String.trim(params["budget_usd"] || "")
+
+    budget =
+      case Float.parse(budget_text) do
+        {budget, ""} when budget > 0 -> budget
+        _ -> nil
+      end
+
+    cond do
+      goal == "" ->
+        {:error, :no_goal}
+
+      budget_text != "" and budget == nil ->
+        {:error, :bad_budget}
+
+      true ->
+        {:ok,
+         %{goal: goal, verify_command: blank_to_nil(params["verify_command"]), budget_usd: budget}}
     end
   end
 
@@ -117,6 +169,10 @@ defmodule BmWeb.HomeLive do
   @doc false
   # Turns a start error into a message for one form field.
   def explain(:no_goal, _path), do: {:goal, "Describe the task."}
+
+  def explain(:workspace_busy, _path),
+    do: {:path, "This workspace has an unfinished run; finish it (or let it finish) first."}
+
   def explain(:bad_budget, _path), do: {:budget_usd, "Enter an amount in USD, like 0.50."}
 
   def explain({:not_a_directory, _}, _path), do: {:path, "No such directory."}
@@ -156,19 +212,123 @@ defmodule BmWeb.HomeLive do
     <Layouts.app flash={@flash} active={:tasks}>
       <div class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <section aria-labelledby="new-task-title" class="min-w-0">
-          <h1 id="new-task-title" class="text-lg font-semibold">New task</h1>
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h1 id="new-task-title" class="text-lg font-semibold">
+              {if @mode == :goal, do: "New goal", else: "New task"}
+            </h1>
+            <div
+              id="mode-toggle"
+              class="flex rounded-lg border border-bm-line bg-bm-bg p-0.5 text-xs"
+              role="tablist"
+            >
+              <button
+                :for={{mode, label} <- [goal: "Goal", task: "Single task"]}
+                id={"mode-#{mode}"}
+                type="button"
+                role="tab"
+                aria-selected={to_string(@mode == mode)}
+                phx-click="mode"
+                phx-value-mode={mode}
+                class={[
+                  "rounded-md px-2.5 py-1 font-medium transition-colors",
+                  if(@mode == mode,
+                    do: "bg-bm-surface text-bm-text shadow-sm",
+                    else: "text-bm-muted hover:text-bm-text"
+                  )
+                ]}
+              >
+                {label}
+              </button>
+            </div>
+          </div>
           <p class="mt-1 text-xs leading-relaxed text-bm-muted">
-            One guarded worker does the task in your checkout. BM checks every file write and
-            command, never touches your uncommitted work or git state, verifies the result and
-            records it as a checkpoint.
+            <%= if @mode == :goal do %>
+              A planner splits the goal into small tasks; guarded workers do them one at a time.
+              BM checks every file write and command, never touches your uncommitted work or git
+              state, verifies each change and records it as a checkpoint.
+            <% else %>
+              One guarded worker does the task in your checkout. BM checks every file write and
+              command, never touches your uncommitted work or git state, verifies the result and
+              records it as a checkpoint.
+            <% end %>
           </p>
+
+          <.form
+            for={@goal_form}
+            id="goal-form"
+            phx-change="validate_goal"
+            phx-submit="start_goal"
+            class={[
+              "mt-5 space-y-4 rounded-xl border border-bm-line bg-bm-surface p-4",
+              @mode != :goal && "hidden"
+            ]}
+          >
+            <.input
+              field={@goal_form[:goal]}
+              type="textarea"
+              label="Goal"
+              rows="5"
+              placeholder="Add a /health endpoint with a test, and document it in the README."
+              class={[@input, "resize-y leading-relaxed"]}
+              error_class="border-bm-error"
+            />
+            <div>
+              <.input
+                field={@goal_form[:path]}
+                id="goal-path"
+                label="Repository"
+                list="workspaces"
+                autocomplete="off"
+                class={[@input, "font-mono text-xs"]}
+                error_class="border-bm-error"
+              />
+              <.hint>Top level of a git checkout.</.hint>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+              <div>
+                <.input
+                  field={@goal_form[:verify_command]}
+                  id="goal-verify"
+                  label="Verify command"
+                  placeholder="mix precommit"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Runs after every task; must pass.</.hint>
+              </div>
+              <div>
+                <.input
+                  field={@goal_form[:budget_usd]}
+                  id="goal-budget"
+                  label="Budget (USD)"
+                  placeholder="none"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Planner and workers.</.hint>
+              </div>
+            </div>
+            <div class="flex justify-end">
+              <button
+                id="start-goal-btn"
+                type="submit"
+                phx-disable-with="Starting…"
+                class="rounded-md bg-bm-text px-3.5 py-1.5 text-sm font-semibold text-bm-surface transition-opacity hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text disabled:opacity-60"
+              >
+                Start planning
+              </button>
+            </div>
+          </.form>
 
           <.form
             for={@form}
             id="task-form"
             phx-change="validate"
             phx-submit="start"
-            class="mt-5 space-y-4 rounded-xl border border-bm-line bg-bm-surface p-4"
+            class={[
+              "mt-5 space-y-4 rounded-xl border border-bm-line bg-bm-surface p-4",
+              @mode != :task && "hidden"
+            ]}
           >
             <div>
               <.input

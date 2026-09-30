@@ -64,6 +64,15 @@ defmodule BmWeb.RunComponents do
     reverted: {"Reverted", :muted}
   }
 
+  @task_labels %{
+    queued: {"Queued", :muted},
+    running: {"Running", :active},
+    accepted: {"Accepted", :ok},
+    failed: {"Failed", :bad},
+    blocked: {"Blocked", :bad},
+    cancelled: {"Cancelled", :muted}
+  }
+
   @run_labels %{
     active: {"Active", :active_quiet},
     paused: {"Paused", :decide},
@@ -77,6 +86,20 @@ defmodule BmWeb.RunComponents do
 
   def attempt_status(assigns) do
     {label, tone} = Map.get(@attempt_labels, assigns.status, {to_string(assigns.status), :muted})
+    assigns = assign(assigns, label: label, tone: tone)
+
+    ~H"""
+    <span class={badge_class(@tone)} {@rest}>
+      <span class={dot_class(@tone)}></span>{@label}
+    </span>
+    """
+  end
+
+  attr :status, :atom, required: true
+  attr :rest, :global
+
+  def task_status(assigns) do
+    {label, tone} = Map.get(@task_labels, assigns.status, {to_string(assigns.status), :muted})
     assigns = assign(assigns, label: label, tone: tone)
 
     ~H"""
