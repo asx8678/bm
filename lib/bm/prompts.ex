@@ -49,6 +49,21 @@ defmodule Bm.Prompts do
     """
   end
 
+  # The user's own words (plan 18.3): a planner may restate a contract loosely, so the reviewer
+  # holds the change to the user's goal where the two differ.
+  defp user_goal_section(goal) when is_binary(goal) do
+    """
+
+    The user's goal for the whole run (BM's planner split it into tasks):
+    #{goal}
+
+    Where the task below states the contract differently from the user's goal, the user's goal
+    wins: reject a change that breaks it, even if the task's wording allows it.
+    """
+  end
+
+  defp user_goal_section(_goal), do: ""
+
   defp check_section(%Task{check: nil}), do: ""
 
   defp check_section(%Task{check: check}) do
@@ -71,12 +86,12 @@ defmodule Bm.Prompts do
   The prompt of the reviewer of an attempt (plan 14.1, D25): the task, its accepted
   dependencies, and the diff that would be checkpointed.
   """
-  def reviewer(%Task{} = task, dependencies, diff) do
+  def reviewer(%Task{} = task, dependencies, diff, run_goal \\ nil) do
     """
     You are a BM reviewer. A worker changed this repository for the task below; the workspace
     verify command #{if task.check, do: "and the task's check ", else: ""}already passed. Decide
     whether the change does what the task asks.
-
+    #{user_goal_section(run_goal)}
     Task: #{task.title}
 
     Goal:

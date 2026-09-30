@@ -46,7 +46,7 @@ defmodule Bm.Workspace.Coordinator do
     repeat_refuse: 4,
     repeat_cancel: 6,
     # The review prompt (plan 14.1); tests or scripts can replace it.
-    review_prompt: &Bm.Prompts.reviewer/3,
+    review_prompt: &Bm.Prompts.reviewer/4,
     prompt: &Bm.Prompts.worker/2
   ]
 
@@ -1698,7 +1698,13 @@ defmodule Bm.Workspace.Coordinator do
     if state.run.planner != nil and writes != [] and state.workspace.settings["review"] != false do
       tree_after = Map.get(changes, :tree_after, attempt.tree_after)
       diff = review_diff(state.root, attempt.tree_before, tree_after, writes)
-      prompt = state.config.review_prompt.(state.task, Runs.dependency_context(state.task), diff)
+      deps = Runs.dependency_context(state.task)
+
+      prompt =
+        if is_function(state.config.review_prompt, 4),
+          do: state.config.review_prompt.(state.task, deps, diff, state.run.goal),
+          else: state.config.review_prompt.(state.task, deps, diff)
+
       agent_id = "review-#{attempt.id}"
       root = state.root
       owned = user_owned(state)

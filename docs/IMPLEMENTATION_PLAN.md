@@ -36,6 +36,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 15 | Daily use | 15.1–15.3 | commit a run's changes on request (D26), one suite run, trial on the user's project |
 | 16 | Planner quality and notifications | 16.1–16.2 | clean planner rules (no build-only tasks, fewer tasks, less reading), planner spend, notifications |
 | 17 | First real use | 17.1– | goals on the user's real repositories, fixes from what they show |
+| 18 | Catch edge-case bugs | 18.1–18.3 | reviewer probes boundary inputs, planner names boundary cases, the user's goal wins in review |
 
 ---
 
@@ -1098,3 +1099,33 @@ pip/uv/poetry/pipenv, bundle/gem, cargo add·install, mix deps.*, go get/install
 a reason telling the model to report the task blocked and name the command; builds and tests stay
 allowed. The worker prompt says to report environment problems instead of repairing them.
 Checked by calling the policy on sample commands.
+
+---
+
+## Phase 18: catch edge-case bugs
+
+Scoped 2026-09-30 from the sandbox trial: run 78's `truncate` passed its tests, the verify command
+and the reviewer, yet `truncate("abcdef", 0)` returned 6 characters. No tests (user's instruction).
+
+**18.1 Reviewer probes edge cases.** The reviewer works out the contract the task states or
+implies and tries the changed code on boundary inputs (empty, zero, negative, the exact limit and
+one past it, very large, unusual characters) with print-only one-off commands (`node -e`,
+`python3 -c`, `mix run -e`), rejecting with the exact input and result. Because it now runs
+commands, the coordinator snapshots after the review: if the reviewer changed any file, the
+attempt is held (flag `reviewer_wrote`, verdict "invalid") for the user. Checked with the fake pi:
+a reviewer writing `probe.txt` → attempt held, reason names the file.
+
+**18.2 Planner names boundary cases.** For code with a contract, done_when names the boundary
+cases and asks for tests covering them.
+
+**18.3 The user's goal wins in review.** Proof run 1 (run 81, the run-78 goal re-run on a throwaway
+sandbox clone reset to before run 78): the planner now named max 0 and the tests covered it, but
+the planner's done_when said "max 0 or negative returns '…'" (1 character, still over max 0) and
+the reviewer accepted it because the task allowed it. Fixed: the reviewer also gets the run's
+original goal and is told the user's goal wins where the task restates the contract differently.
+Proof run 2 (run 82, fresh clone, same goal): `truncate("abcdef", 0)` → `""`, results never over
+max for max 0/1/2, tests include `truncate("", 0)`, the review reports probing max 0/1/2/3; 21 tests
+pass; $0.13. One sample per run: the model can vary, so this lowers the risk rather than removing
+it. The real sandbox was not touched (clones in /tmp).
+
+**Status: Phase 18 done (2026-09-30).**
