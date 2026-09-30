@@ -998,3 +998,20 @@ with a specific reason ($0.027); run done.
 Found again: the dev server's long-lived coordinator crashed on a state key added later
 (`:touched`). Fixed for good: before admitting work the coordinator merges any missing
 late-added state fields.
+
+**Status 14.2–14.3 (2026-09-30); Phase 14 done.** Local JSON API (`BmWeb.Api.RunController`,
+pipeline `:local_api` with `BmWeb.Plugs.LocalOnly`: requests from other machines get 403, since
+production binds every interface): `POST /api/goals` (through `Coordinator.start_goal/3`, errors
+worded like the Tasks page), `GET /api/runs` (`q`, `limit`), `GET /api/runs/:id` (also `BM-<id>`).
+Terminal client (`Bm.CLI`, `mix bm.goal`, `mix bm.runs`, `mix bm.status`) talks to the running
+server only (`BM_URL` or `PORT`, default 4001) and never starts BM itself. Checked against the dev
+server: `mix bm.runs` and `mix bm.status BM-68` print the runs and the run's tasks with the review
+verdict; `mix bm.goal … --repo /tmp/bm-trial` started BM-69, printed its URL (the web page showed
+it live) and followed it to the end.
+Found with the client: BM-69's goal needed `lib/bm/runs.ex`, which held run 68's accepted change,
+uncommitted (BM never commits, so earlier runs' changes are the user's uncommitted work to the
+next run); the planner proposed nothing and explained why, but the run ended "done: the planner
+found nothing to do". Fixed: `close_plan` has an optional `blocked` flag (the planner prompt says
+when to use it); a task-less plan ends failed if the planner marked it blocked or had proposals
+rejected. Checked: the same goal again (BM-70) ended "failed: the planner could not plan the goal:
+Blocked: … lib/bm/runs.ex … contains the user's uncommitted work".

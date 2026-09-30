@@ -586,7 +586,13 @@ defmodule Bm.Workspace.Planner do
     summary = if is_binary(payload["summary"]), do: String.slice(payload["summary"], 0, 1_000)
 
     {:ok, run} =
-      Runs.update_run(run, %{plan_open: false, planner: Map.put(run.planner, "summary", summary)})
+      Runs.update_run(run, %{
+        plan_open: false,
+        planner:
+          run.planner
+          |> Map.put("summary", summary)
+          |> Map.put("blocked", payload["blocked"] == true)
+      })
 
     broadcast_run(state, run)
     %{"ok" => true, "status" => "closed"}
@@ -835,7 +841,7 @@ defmodule Bm.Workspace.Planner do
         run = Runs.get_run!(state.run_id)
         summary = run.planner["summary"]
 
-        if (run.planner["rejected"] || 0) > 0,
+        if (run.planner["rejected"] || 0) > 0 or run.planner["blocked"] == true,
           do:
             end_run(state, :failed, with_summary("the planner could not plan the goal", summary)),
           else: end_run(state, :done, with_summary("the planner found nothing to do", summary))

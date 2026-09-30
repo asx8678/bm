@@ -130,7 +130,10 @@ defmodule Bm.Prompts do
       expected value you have not worked out exactly. (A failing verify command, by contrast,
       stops the run until the user decides.)
     - Once the plan is closed (close_summary or close_plan), BM runs the tasks. A worker may
-      ask you one question about an unclear task; then just answer it briefly. It comes back to you only if a task fails, is blocked, or changes
+      ask you one question about an unclear task; then just answer it briefly.
+    - If the goal can't be reached at all (for example it needs a file with the user's
+      uncommitted work), propose nothing and call close_plan with blocked: true and the reason.
+      Use blocked: false with no tasks only when the goal is already met. It comes back to you only if a task fails, is blocked, or changes
       something unexpected; if every task succeeds, the run finishes. So close the plan only
       when it is complete.
     """
