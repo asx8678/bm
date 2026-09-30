@@ -416,7 +416,7 @@ restart (D27); an approval inbox for other extensions' dialogs (D29); a rule-bas
 that steers or stops a worker making no progress and pauses a goal run after repeated failures.
 Real use: the sandbox repository (TRIALS.md). Testing: features after Phase 15 were checked with
 the fake pi, in the browser and in live runs at the user's instruction, not with new tests; the
-test suite last ran in Phase 15.2.
+existing suite ran again after Phase 27 (199 pass) and found one regression, fixed (27.4).
 
 ---
 

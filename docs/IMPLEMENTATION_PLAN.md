@@ -1557,3 +1557,20 @@ ARCHITECTURE.md §12 has a summary of phases 9–26 and says how they were check
 says its numbers are from Phase 8 and how to refresh them; ten merged local branches deleted
 (`git branch -d`); the throwaway sandbox clones in /tmp removed (18, 18b, 20a, 20b, 21; their runs'
 pages still load). The two items that wait for the user are unchanged.
+
+**Status 27.4 (2026-09-30): the test suite, approved by the user for this run.** First run: 192 of
+199 passed. Five failures came from a row my own Phase 24 scratch check had committed to the *test*
+database (it ran under `MIX_ENV=test` with the sandbox in auto mode and crashed before cleaning up):
+an attempt left `running` that every recovery test saw. The test database was dropped and
+recreated. One test expected the planner's environment to be empty (it has
+`PYTHONDONTWRITEBYTECODE` since 19.2): updated. One failure was a real bug: since 17.1 the
+dependency check answered first for `npm`, `mix`, `cargo` and `gem` and let their publishing
+commands through (`npm publish`, `mix hex.publish`, `cargo publish`, `gem push`); fixed so they
+still reach the publishing check. Second run: 199 passed, 6 excluded; `mix precommit` passes.
+
+**Status 27.5 (2026-09-30): scratch data, approved by the user.** Deleted from the dev database, in
+one transaction: 125 finished runs whose repositories were in temporary directories (BM's own
+checks; tasks, attempts and deliveries went with them), 113 workspaces left without runs, and 709
+bridge requests of those attempts and planners. Kept: the sandbox's 6 runs (77–79, 88–90).
+
+**Status: Phase 27 done (2026-09-30).**
