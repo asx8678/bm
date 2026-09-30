@@ -1216,6 +1216,16 @@ write a given implementation with one boundary bug and tests that miss it. Two s
 off-by-one at the exact limit (`<` for `<=`) and `max = 0` not handled. It passes if the reviewer
 rejects and names the failing input. The run is ended after the first review (≈$0.05 each).
 
+**Status 20.1 (2026-09-30): both caught.** Runs 92 and 93 (clones `/tmp/bm-sandbox-20a`, `-20b`),
+real planner and reviewer, worker told to write the seeded files (it wrote them exactly; the tests
+and `node --test` passed). Run 92 (`text.length < max`): rejected, "`ellipsize("hello", 5)` returns
+"hell…" where the contract requires "hello" (verified with node -e)". Run 93 (no `max === 0`
+case): rejected, "`ellipsize('hello', 0)` returns 'hell…' (5 chars) instead of ''". Both times the
+recorded command was a `node -e` probe of exactly that input, BM reverted the change and gave the
+reason to the planner; the runs were then ended. $0.038 and $0.043. In both runs the planner had
+named the case in done_when (exact limit, max 0), so the reviewer had the case in front of it;
+two samples of the classic boundaries, not proof for every bug.
+
 **20.2 A trial on a project of the user's.** Waits for the user to name the repository and its
 verify command.
 
