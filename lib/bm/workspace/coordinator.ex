@@ -1748,45 +1748,64 @@ defmodule Bm.Workspace.Coordinator do
     state = %{state | pending_review: nil}
 
     # The reviewer runs commands to probe edge cases (18.1); it must not change files.
-    case reviewer_writes(state, changes) do
-      [] ->
+    case changed_during_review(state, changes) do
+      :unchanged ->
         review_outcome(state, verify, changes, result)
 
-      paths ->
+      {:changed, paths, changes} ->
         state = add_review_spend(state, review_cost(result))
-
-        review = %{
-          "verdict" => "invalid",
-          "reason" => "the reviewer changed files: #{Enum.join(paths, ", ")}"
-        }
-
-        flags = Map.get(changes, :flags, Runs.get_attempt!(state.attempt.id).flags)
+        list = Enum.join(paths, ", ")
+        review = %{"verdict" => "invalid", "reason" => "files changed during the review: #{list}"}
 
         finish(
           state,
           :held,
           Map.merge(changes, %{
             verify: Map.put(verify, "review", review),
-            flags: flags ++ ["reviewer_wrote"],
-            error: "the reviewer changed files it must not: #{Enum.join(paths, ", ")}"
+            error: "files changed during the review (the reviewer must not change files): #{list}"
           })
         )
+
+      {:error, reason} ->
+        state = add_review_spend(state, review_cost(result))
+        error = "snapshot after the review failed: #{inspect(reason)}"
+        finish(state, :held, Map.merge(changes, %{verify: verify, error: error}))
     end
   end
 
   defp review_cost({:ok, %{cost: cost}}), do: cost
   defp review_cost(_result), do: 0.0
 
-  # Paths that differ between the tree the reviewer was shown and the workspace now.
-  defp reviewer_writes(state, changes) do
-    reviewed = Map.get(changes, :tree_after) || Runs.get_attempt!(state.attempt.id).tree_after
+  # Compares the workspace with the tree the reviewer was shown. Like the verify command's
+  # changes (reattribute_after_verify), whatever changed becomes part of the attempt, so Keep
+  # checkpoints what is on disk and Revert also undoes the review's changes.
+  defp changed_during_review(state, changes) do
+    attempt = Runs.get_attempt!(state.attempt.id)
+    reviewed = Map.get(changes, :tree_after, attempt.tree_after)
 
-    with true <- is_binary(reviewed),
+    with true <- is_binary(reviewed) || {:error, :no_reviewed_tree},
          {:ok, tree} <- Git.snapshot(state.root),
-         {:ok, entries} <- Git.diff(state.root, reviewed, tree) do
-      Enum.map(entries, & &1.path)
-    else
-      _ -> []
+         {:ok, by_review} <- Git.diff(state.root, reviewed, tree),
+         {:ok, entries} <- Git.diff(state.root, attempt.tree_before, tree) do
+      paths = Enum.map(by_review, & &1.path)
+      owned? = Enum.any?(paths, &(&1 in user_owned(state)))
+
+      flags =
+        Map.get(changes, :flags, attempt.flags)
+        |> Kernel.++(["reviewer_wrote"])
+        |> Kernel.++(if owned?, do: ["user_owned_writes"], else: [])
+
+      if paths == [] do
+        :unchanged
+      else
+        attrs = %{
+          tree_after: tree,
+          actual_writes: Enum.map(entries, &write_entry/1),
+          flags: flags
+        }
+
+        {:changed, paths, Map.merge(changes, attrs)}
+      end
     end
   end
 
