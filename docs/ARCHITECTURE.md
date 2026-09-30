@@ -63,6 +63,7 @@ real pi/Fabric before anything relies on it.
 | D20 | **Planner is its own process** per run (`Bm.Workspace.Planner`), decided 2026-09-29 after the milestone B review; it owns the planner session, validation, the task graph, scheduling and delivery, and asks the coordinator to admit tasks. Planner and reader get `bash` behind `bm_guard` in a **read-only policy mode**; a snapshot before and after the planner session holds the run if it changed anything. Tasks may carry an executable `check` run after the workspace verify | The coordinator already holds one state machine (the lane); planners must be able to run tests and `git log` to plan well; the workspace verify proves the checkout works, not that a task did its job | Planner logic inside the coordinator; planner limited to read tools; `done_when` as prose only |
 
 | D21 | **Planner and workers alternate** (2026-09-30, plan 7.3): a planner turn starts only while the lane is free, and the scheduler admits tasks only while the planner is idle | Each before/after snapshot then belongs to one agent, so "the planner changed files" is exact; parallel planning is not needed while tasks run one at a time | Planner turns during attempts (writes could not be attributed) |
+| D22 | **No final planner turn after a clean plan** (2026-09-30, plan 9.1): when the plan is closed and every delivered result is accepted without flags, the run completes without reporting back; the planner is told so in its first prompt | In 9 of 9 goal-benchmark runs and every earlier live goal run, that turn only said "all done", costing ≈2.5 s and ≈10 % of the run's spend | Always reporting back (kept for failures, blocked tasks, cancellations and flagged attempts) |
 
 Revisit a decision by adding a row, not by deleting one.
 
@@ -188,10 +189,16 @@ accepted dependency (plan step 7.5).
 old attempt or epoch are rejected. Fencing does not stop an OS process, so before a retry or
 reassignment the old process tree must be terminated or proven settled.
 
-**Results to the planner.** Receive → persist → settle and verify → queue → deliver as a
-`follow_up` at the planner's next boundary, batching related results. Routine results never
-interrupt the planner. The BEAM records *received*, *delivered* and *acknowledged* separately.
-Cancellation and safety events use a separate, prioritized path (`abort`).
+**Results to the planner.** Receive → persist → settle and verify → queue → deliver at the
+planner's next boundary, batching related results. Routine results never interrupt the planner.
+The BEAM records *received* and *delivered* separately. Cancellation and safety events use a
+separate, prioritized path (`abort`). Failures, blocked and cancelled tasks are delivered at
+once; accepted results in one batch when nothing else can run. When the plan is closed and every
+result is a clean success (accepted, no flags), nothing is delivered and the run completes (D22).
+
+**Proposals in one call.** The planner proposes its initial plan with `propose_plan` (all tasks
+in dependency order, validated in order, optional `close_summary` that closes the plan only if
+every task was accepted); `propose_task` adds or re-proposes one task (plan phase 9).
 
 ---
 

@@ -27,6 +27,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 6.6 | Hardening before the planner (review of 2026-09-29) | 6.6.1–6.6.5 | UI seen, harder benchmark, write-set data, baseline verify |
 | 7 | Planner | 7.1–7.9 | goal → plan → sequential tasks with the fake pi |
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
+| 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
 
 ---
 
@@ -654,3 +655,59 @@ gate ran as live scenarios from a scratch script with the real model.
   scheduler could still send a paid reminder turn (it now ends the run); a single task started
   from the Tasks page while a goal run was active would have joined that run behind the
   planner's back (now refused: "A planner run is active in this workspace").
+
+---
+
+## Phase 9 (optional): goal-run overhead
+
+Chosen by the 8.3 decision (BM planner ≈5× plain pi in cost and time on small goals).
+
+**9.0 Measure first.** A scratch profile of one live goal run (planner turn intervals from its
+log, attempt phase transitions, spend attributed to planner or workers, which is exact because
+they alternate, D21): worker start-up (admitted → running) is **0.3–0.45 s per task**, ≈1 s of a
+22–28 s run, so **warm worker reuse is dropped**. The planner was the cost: its first turn took
+7–13 s and ≈60 % of the spend, made of one model round-trip per action (list files, read files,
+one per proposed task, close_plan), plus a final turn that only said "all done" (≈2.5 s).
+
+**9.1 No final planner turn after a clean plan** (D22). When the plan is closed and every pending
+result is accepted without flags, the run completes; the planner log gets a note saying why.
+The planner prompt now says BM comes back only on failures, blocked tasks or surprises.
+
+**9.2 `propose_plan`.** One call with every task in dependency order, validated in order in one
+transaction (a task may depend on an earlier one in the list), reply per task, rejections counted
+per task, optional `close_summary` that closes the plan only if every task was accepted.
+`propose_task` stays for adding or re-proposing one task. Profile, bridge and the two existing
+tool-list assertions updated.
+
+**9.3 File list in the first planner prompt** (`git ls-files --cached --others
+--exclude-standard`, at most 150 paths), which removes the `ls` round-trip.
+
+**9.4 Benchmark before/after.** `mix bm.bench --goals`, compared with the Phase 8 numbers.
+
+**Status: Phase 9 done (2026-09-30), benchmark partial.** 9.1–9.3 implemented; `mix precommit`
+passed and `mix test --only live` passed 5/5 after 9.2. The 9.4 benchmark was **stopped by the
+user after 13 of 18 runs** (no more benchmarks or tests were to be run), so `BENCHMARK_GOALS.md`
+still holds the Phase 8 numbers. Finished runs, same goals as Phase 8:
+
+| Goals (3 runs each) | Phase 8 BM | Phase 9 BM | Plain pi (Phase 9 runs) |
+|---|---|---|---|
+| shapes + calc_cli: verified | 6 / 6 | 6 / 6 | 5 / 6 |
+| wall time (6 runs) | 150 s | 118 s (−21 %) | 41 s |
+| cost (6 runs) | $0.255 | $0.196 (−23 %) | $0.072 |
+| planner waves per run | 2 | 1 | – |
+
+BM is now ≈2.9× plain pi in time and ≈2.7× in cost on these goals (was ≈3.6× and ≈3.1×).
+One live profile after 9.1–9.3: planner round-trips 8 → 2, planner cost ≈$0.02–0.03 → $0.013.
+
+**Finding from the stopped benchmark (`text_tools` #1):** the planner wrote a task `check` with
+JSON-escaped quotes (`[ \"$(...)\" = \"3 12\" ]`) and a wrong expected value ("3 12"; the text
+has 13 non-space characters). The check could never pass, the attempt was held for the user,
+and the unattended benchmark waited 17 minutes ($0.17) until its timeout. The worker had even
+bent its code toward the wrong value. Fixed without running anything: `Bm.Plan` rejects checks
+containing `\"`; the planner prompt says a failing check stops the run until the user decides, so
+checks must be plain shell, preferably a test the task adds, never an uncomputed hard-coded
+value; `mix bm.bench --goals` stops waiting when an attempt is held (counted as a decision).
+These three fixes are compiled but **not verified by a test or a live run** (at the user's
+request). Open: a wrong planner check still holds the lane; delivering a failed *check* to the
+planner (instead of holding) would let it correct its own check, but changes the "failed
+verification waits for the user" rule and needs a decision first.

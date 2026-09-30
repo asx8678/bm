@@ -96,6 +96,7 @@ defmodule Bm.Plan do
          {:ok, goal} <- string(p, "goal", required: true),
          {:ok, done_when} <- string(p, "done_when"),
          {:ok, check} <- string(p, "check", max: @max_check),
+         :ok <- check_command(check),
          {:ok, mutates} <- boolean(p, "mutates"),
          {:ok, writes} <- strings(p, "writes"),
          {:ok, depends_on} <- strings(p, "depends_on") do
@@ -139,6 +140,19 @@ defmodule Bm.Plan do
         {:error, "`#{field}` must be a string."}
     end
   end
+
+  # A check with JSON-style escaped quotes (`\"`) reaches the shell literally and fails whatever
+  # the worker does (seen live in plan 9.4); ask for plain shell instead.
+  defp check_command(check) when is_binary(check) do
+    if String.contains?(check, ~S(\")),
+      do:
+        {:error,
+         "`check` contains escaped quotes (a backslash before a double quote); write it " <>
+           ~S[as plain shell, e.g. test "$(python3 wc.py f)" = "3 3"]},
+      else: :ok
+  end
+
+  defp check_command(_check), do: :ok
 
   defp boolean(p, field) do
     case Map.get(p, field) do

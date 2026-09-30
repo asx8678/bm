@@ -12,7 +12,7 @@ defmodule Bm.Pi.ProfileTest do
   test "each role builds an explicit, restricted command" do
     planner = Profile.build(:planner)
     assert "--no-extensions" in planner.command
-    assert tools(planner) == ~w(read grep find ls bash propose_task close_plan)
+    assert tools(planner) == ~w(read grep find ls bash propose_plan propose_task close_plan)
     assert planner.env == %{}
 
     writer = Profile.build(:writer)
@@ -35,7 +35,10 @@ defmodule Bm.Pi.ProfileTest do
 
   test "a tool outside the profile fails the check" do
     profile = Profile.build(:planner)
-    reports = %{"profile" => %{"tools" => ~w(read propose_task close_plan bash edit)}}
+
+    reports = %{
+      "profile" => %{"tools" => ~w(read propose_plan propose_task close_plan bash edit)}
+    }
 
     assert {:error, {:unexpected_tools, ["edit"]}} =
              Profile.verify({:ok, %{model: "Fake Model", reports: reports}}, profile)

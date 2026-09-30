@@ -356,11 +356,19 @@ sys.exit(1)"|, []},
     result
   end
 
+  # Ends when the run ends or pauses, or when an attempt waits for the user's decision (held):
+  # nobody decides in a benchmark, so waiting longer only runs into the timeout.
   defp await_run(id) do
     receive do
       {:workspace, _, {:run, %{id: ^id, status: status}}}
       when status in [:done, :failed, :cancelled, :paused] ->
         Runs.get_run!(id)
+
+      {:workspace, _, {:attempt, %{status: status} = attempt, _lane}}
+      when status in [:held, :needs_reconciliation] ->
+        if Runs.attempt_context(attempt).run.id == id,
+          do: Runs.get_run!(id),
+          else: await_run(id)
 
       {:workspace, _, _} ->
         await_run(id)

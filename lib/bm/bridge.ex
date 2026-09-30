@@ -26,7 +26,7 @@ defmodule Bm.Bridge do
   alias Bm.Repo
 
   @ops %{
-    planner: ~w(propose_task close_plan authorize),
+    planner: ~w(propose_plan propose_task close_plan authorize),
     worker: ~w(submit_result authorize)
   }
 

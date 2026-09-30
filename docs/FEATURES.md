@@ -103,8 +103,9 @@ exactly in 11/11 runs; plain pi overwrote the user's dirty file 3/3, BM 0/3.
 
 **Status: done (2026-09-30).** Gate passed live (plan 8.2); goals benchmark in
 [BENCHMARK_GOALS.md](BENCHMARK_GOALS.md). Decision: parallel read-only workers are not next;
-cutting per-goal overhead is (warm worker reuse; no final planner turn when the plan is closed
-and every task was accepted).
+cutting per-goal overhead is. **Corrected after measuring (plan phase 9):** worker start-up is
+0.3–0.45 s per task, so warm reuse is not worth it; the planner's round-trips were the cost,
+cut by a one-call `propose_plan` and no final planner turn after a clean plan.
 
 **Exit gate:** cancelled or invalid planner output never causes writes; a planner that writes
 holds the run; duplicate deliveries have one effect; a run finishes only when the plan is closed
@@ -123,7 +124,7 @@ Each has a precondition; don't start one before it holds.
 |---|---|---|
 | **Parallel read-only workers** (reader profile exists already) | Milestone C benchmark shows planner-side reading is the bottleneck | M |
 | **Two or more mutating workers**: persisted file claims, resource scheduling, hold-and-wait prevention | Parallel readers in use; every mutation path enforced or isolated; concurrency tests | L |
-| **Warm worker reuse** (fence → settle → confirmed `new_session` → profile check) | Start-up time measured as significant in the benchmark | M |
+| **Warm worker reuse** (fence → settle → confirmed `new_session` → profile check) | Start-up time measured as significant in the benchmark. **Measured 2026-09-30: not significant** (0.3–0.45 s per task, ≈1 s of a 22–28 s goal run); not planned for now | M |
 | **Streaming read-only preparation** from proposals | Parallel readers | S |
 | **Context reuse** (fork workers from the planner's session) | Measured cheaper with zro caching | M |
 | **Fabric in workers** through a BM-managed `PI_CODING_AGENT_DIR` | Guard coverage of Fabric's nested calls re-qualified | M |

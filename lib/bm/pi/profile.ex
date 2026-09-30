@@ -5,7 +5,7 @@ defmodule Bm.Pi.Profile do
 
   | Role | Extensions | Tools |
   |---|---|---|
-  | `:planner` | zro, bm_planner, bm_guard | read-only + `bash` (read-only policy) + `propose_task`, `close_plan` |
+  | `:planner` | zro, bm_planner, bm_guard | read-only + `bash` (read-only policy) + `propose_plan`, `propose_task`, `close_plan` |
   | `:reader` | zro, bm_worker, bm_guard | read-only + `bash` (read-only policy) + `submit_result` |
   | `:writer` | zro, bm_worker, bm_guard | + `edit`, `write`, `bash` |
 
@@ -32,8 +32,8 @@ defmodule Bm.Pi.Profile do
     planner: %{
       fabric?: false,
       extensions: ~w(bm_planner bm_guard),
-      tools: @read_tools ++ ~w(bash propose_task close_plan),
-      required: ~w(bash propose_task close_plan),
+      tools: @read_tools ++ ~w(bash propose_plan propose_task close_plan),
+      required: ~w(bash propose_plan propose_task close_plan),
       reports: ~w(profile guard)
     },
     reader: %{

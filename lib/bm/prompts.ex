@@ -72,12 +72,13 @@ defmodule Bm.Prompts do
 
     Goal:
     #{goal}
-
+    #{files_section(context[:files])}
     How BM works:
     - Look around first (read, grep, find, ls, and read-only bash such as tests or git log).
       You cannot change files yourself; BM refuses writes and pauses the run if files change.
-    - Call propose_task once per task. BM validates each proposal and answers "accepted" or
-      "not accepted" with a reason; fix the proposal and propose it again if needed.
+    - Propose the whole plan in ONE propose_plan call, tasks in dependency order, and pass
+      close_summary if the plan is complete: that also closes it. BM validates every task and
+      answers per task; fix a rejected task with propose_task, then call close_plan.
     - Each task is done by a separate worker that sees only that task and short summaries of
       the tasks it depends on, never this conversation. Make every goal self-contained.
     - Tasks run one at a time, in order of `depends_on`. Keep tasks small; one to four tasks
@@ -86,9 +87,13 @@ defmodule Bm.Prompts do
       true). Never plan changes to these files with the user's uncommitted work:
     #{user_owned(context.user_owned)}
     - After every task BM runs the verify command `#{context.verify_command}`, and the task's
-      optional `check` command (use it to make done_when executable, e.g. a focused test).
-    - When you have proposed every task, call close_plan with a one-sentence summary. BM then
-      runs the tasks and reports back; you may propose more tasks then.
+      optional `check` command (use it to make done_when executable, e.g. a focused test). A
+      failing check stops the run until the user decides, so a check must be right: write it as
+      plain shell, prefer running a test the task itself adds, and never hard-code an expected
+      value you have not worked out exactly.
+    - Once the plan is closed (close_summary or close_plan), BM runs the tasks. It comes back to you only if a task fails, is blocked, or changes
+      something unexpected; if every task succeeds, the run finishes. So close the plan only
+      when it is complete.
     """
   end
 
@@ -164,6 +169,13 @@ defmodule Bm.Prompts do
       succeed, once), then call close_plan.
       """
   end
+
+  defp files_section({[_ | _] = files, more}) do
+    rest = if more > 0, do: "\n(and #{more} more)", else: ""
+    "\nFiles in the repository:\n" <> Enum.join(files, "\n") <> rest <> "\n"
+  end
+
+  defp files_section(_none), do: ""
 
   defp user_owned([]), do: "      (none)"
   defp user_owned(paths), do: Enum.map_join(paths, "\n", &"      - #{&1}")

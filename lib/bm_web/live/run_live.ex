@@ -473,6 +473,7 @@ defmodule BmWeb.RunLive do
   defp log_label("reply"), do: "Planner"
   defp log_label("end"), do: "Run ended"
   defp log_label("paused"), do: "Run paused"
+  defp log_label("note"), do: "Note"
   defp log_label(kind), do: kind
 
   defp log_tone(kind) when kind in ["paused"], do: "text-bm-run"

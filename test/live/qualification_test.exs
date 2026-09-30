@@ -91,7 +91,7 @@ defmodule Bm.Live.QualificationTest do
     report = start!(ctx, :planner)
 
     assert Enum.sort(report.tools) ==
-             Enum.sort(~w(read grep find ls bash propose_task close_plan))
+             Enum.sort(~w(read grep find ls bash propose_plan propose_task close_plan))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """

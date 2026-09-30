@@ -309,8 +309,27 @@ defmodule Bm.Workspace.Planner do
     %{
       root: root,
       verify_command: workspace.verify_command,
-      user_owned: get_in(run.baseline, ["user_owned"]) || []
+      user_owned: get_in(run.baseline, ["user_owned"]) || [],
+      files: repository_files(root)
     }
+  end
+
+  @max_files 150
+
+  # Tracked and untracked, non-ignored files, so the planner needs no `ls` round-trip.
+  defp repository_files(root) do
+    case System.cmd("git", ~w(ls-files --cached --others --exclude-standard),
+           cd: root,
+           env: [{"GIT_OPTIONAL_LOCKS", "0"}],
+           stderr_to_stdout: true
+         ) do
+      {out, 0} ->
+        files = String.split(out, "\n", trim: true)
+        {Enum.take(files, @max_files), max(length(files) - @max_files, 0)}
+
+      _error ->
+        {[], 0}
+    end
   end
 
   ## Turns
@@ -384,16 +403,30 @@ defmodule Bm.Workspace.Planner do
       Bm.Bridge.handle(:planner, state.agent_id, request, state.assignment, fn request ->
         case request.op do
           "propose_task" -> propose(state, request.payload)
+          "propose_plan" -> propose_plan(state, request.payload)
           "close_plan" -> close_plan(state, request.payload)
           "authorize" -> authorize(state, request.payload)
         end
       end)
 
+    # Each rejected task counts once, also when a duplicate request returns the stored outcome.
+    rejected =
+      case outcome do
+        %{"status" => "rejected"} ->
+          1
+
+        %{"tasks" => tasks} when is_list(tasks) ->
+          Enum.count(tasks, &(&1["status"] == "rejected"))
+
+        _other ->
+          0
+      end
+
     state =
-      if outcome["status"] == "rejected" and not MapSet.member?(state.counted, request.request_id),
+      if rejected > 0 and not MapSet.member?(state.counted, request.request_id),
         do: %{
           state
-          | rejections: state.rejections + 1,
+          | rejections: state.rejections + rejected,
             counted: MapSet.put(state.counted, request.request_id)
         },
         else: state
@@ -428,6 +461,52 @@ defmodule Bm.Workspace.Planner do
         %{"ok" => true, "status" => "rejected", "reason" => reason}
     end
   end
+
+  # The whole plan in one request: tasks validated and stored in order (each sees the ones
+  # stored before it, in the same transaction), then the plan is closed if a summary was given
+  # and every task was accepted.
+  defp propose_plan(state, %{"tasks" => tasks} = payload) when is_list(tasks) do
+    results =
+      Enum.map(tasks, fn task ->
+        outcome =
+          if is_map(task), do: propose(state, task), else: rejected("A task must be an object.")
+
+        %{
+          "key" => if(is_map(task), do: task["key"]),
+          "status" => outcome["status"],
+          "reason" => outcome["reason"]
+        }
+      end)
+
+    accepted? = results != [] and Enum.all?(results, &(&1["status"] == "accepted"))
+
+    closed? =
+      is_binary(payload["close_summary"]) and accepted? and
+        close_plan(state, %{"summary" => payload["close_summary"]})["status"] == "closed"
+
+    %{
+      "ok" => true,
+      "status" =>
+        cond do
+          accepted? -> "accepted"
+          Enum.any?(results, &(&1["status"] == "accepted")) -> "partial"
+          true -> "rejected_all"
+        end,
+      "tasks" => results,
+      "closed" => closed?
+    }
+  end
+
+  defp propose_plan(_state, _payload),
+    do: %{
+      "ok" => true,
+      "status" => "rejected_all",
+      "tasks" => [],
+      "closed" => false,
+      "reason" => "`tasks` must be a list."
+    }
+
+  defp rejected(reason), do: %{"ok" => true, "status" => "rejected", "reason" => reason}
 
   defp close_plan(state, payload) do
     run = Runs.get_run!(state.run_id)
@@ -527,7 +606,21 @@ defmodule Bm.Workspace.Planner do
 
         schedule(state, run)
 
-      # 6. End of a wave: report the accepted results together.
+      # 6a. The plan is closed and every result is a clean success: nothing needs the
+      # planner, so the run completes without another turn (decision D22).
+      pending != [] and not run.plan_open and Enum.all?(pending, &clean?/1) ->
+        Runs.mark_delivered(pending)
+
+        log(
+          state,
+          "note",
+          "Results not sent: every task was accepted without flags and the plan is closed, " <>
+            "so nothing needed the planner."
+        )
+
+        complete(state, tasks)
+
+      # 6b. End of a wave: report the accepted results together.
       pending != [] ->
         deliver(state, run, pending, tasks)
 
@@ -539,6 +632,17 @@ defmodule Bm.Workspace.Planner do
         complete(state, tasks)
     end
   end
+
+  # An accepted task whose attempt raised no flag (undeclared writes, files changed by the
+  # verify command, kept by the user, leftover processes, ...).
+  defp clean?(%{status: :accepted, task: task}) do
+    case Runs.latest_attempt(task) do
+      %{status: :accepted, flags: []} -> true
+      _other -> false
+    end
+  end
+
+  defp clean?(_delivery), do: false
 
   defp runnable?(%{status: :queued, depends_on: deps}, by_key),
     do: Enum.all?(deps, &(by_key[&1] && by_key[&1].status == :accepted))
