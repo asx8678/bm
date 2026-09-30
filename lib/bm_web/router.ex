@@ -35,6 +35,7 @@ defmodule BmWeb.Router do
     post "/goals", RunController, :create_goal
     get "/runs", RunController, :index
     get "/runs/:id", RunController, :show
+    post "/runs/:id/commit", RunController, :commit
   end
 
   # Enable LiveDashboard and Swoosh mailbox preview in development

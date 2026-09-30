@@ -30,6 +30,8 @@ defmodule Bm.Runs.Run do
     field :status_reason, :string
     # When the user reverted every change the run left (plan 11.4).
     field :reverted_at, :utc_datetime_usec
+    # The commit the user made of the run's accepted changes (plan 15.1, D26).
+    field :commit_sha, :string
     field :finished_at, :utc_datetime_usec
 
     has_many :tasks, Bm.Runs.Task

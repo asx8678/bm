@@ -123,6 +123,15 @@ defmodule Bm.Workspace.Coordinator do
   def revert_run(path, run_id), do: call(path, {:revert_run, run_id})
 
   @doc """
+  Commits the changes a finished run left (plan 15.1, D26), only on the user's request: the
+  files of its attempts whose changes stayed, as the run left them, on the user's current branch
+  with the run's goal as the message (`Git.commit_paths/3`). Refused if any of those files
+  changed since the run (`{:changed_since, paths}`), if the user staged changes in them, while
+  the workspace has an unfinished run, or for a reverted or already committed run.
+  """
+  def commit_run(path, run_id), do: call(path, {:commit_run, run_id})
+
+  @doc """
   Undoes one task of a finished run (plan 13.3): a conditional restore of its accepted attempt's
   write set to `tree_before`. Refused if a later change touched those files
   (`{:changed_since, paths}`, nothing touched), if an accepted task depends on it
@@ -414,6 +423,24 @@ defmodule Bm.Workspace.Coordinator do
 
   def handle_call({:resume_planning, _run_id, _opts}, _from, state),
     do: {:reply, {:error, :not_resumable}, state}
+
+  def handle_call({:commit_run, _run_id}, _from, %{run: %{}} = state),
+    do: {:reply, {:error, :workspace_busy}, state}
+
+  def handle_call({:commit_run, run_id}, _from, state) do
+    run = Runs.get_run!(run_id)
+
+    reply =
+      cond do
+        run.workspace_id != state.workspace.id -> {:error, :run_not_in_workspace}
+        run.status in [:active, :paused] -> {:error, :run_not_finished}
+        run.reverted_at != nil -> {:error, :already_reverted}
+        run.commit_sha != nil -> {:error, {:already_committed, run.commit_sha}}
+        true -> do_commit_run(state, run)
+      end
+
+    {:reply, reply, state}
+  end
 
   def handle_call({:revert_task, _task_id}, _from, %{run: %{}} = state),
     do: {:reply, {:error, :workspace_busy}, state}
@@ -734,6 +761,72 @@ defmodule Bm.Workspace.Coordinator do
           broadcast_run(state, run)
           {:ok, run}
         end
+    end
+  end
+
+  ## Committing a run (15.1, D26)
+
+  defp do_commit_run(state, run) do
+    stayed =
+      run
+      |> Runs.list_run_attempts()
+      |> Enum.sort_by(& &1.id)
+      |> Enum.filter(fn a ->
+        a.actual_writes != [] and is_binary(a.tree_after) and
+          (a.status == :accepted or (a.status != :reverted and "kept" in a.flags))
+      end)
+
+    paths =
+      stayed |> Enum.flat_map(&Enum.map(&1.actual_writes, fn w -> w["path"] end)) |> Enum.uniq()
+
+    # The run's final content of each path: from the last attempt that wrote it.
+    final =
+      Map.new(paths, fn path ->
+        last =
+          stayed
+          |> Enum.filter(&Enum.any?(&1.actual_writes, fn w -> w["path"] == path end))
+          |> List.last()
+
+        {path, last.tree_after}
+      end)
+
+    changed =
+      Enum.filter(paths, fn path ->
+        match?({:ok, true}, Git.changed_since?(state.root, final[path], path))
+      end)
+
+    cond do
+      paths == [] ->
+        {:error, :nothing_to_commit}
+
+      changed != [] ->
+        {:error, {:changed_since, changed}}
+
+      true ->
+        label = "BM-#{run.id}"
+
+        subject = commit_subject(run.goal)
+
+        message = "#{subject}\n\nChanges made by BM run #{label} and accepted.\n"
+
+        with {:ok, sha} <- Git.commit_paths(state.root, paths, message) do
+          {:ok, run} = Runs.update_run(run, %{commit_sha: sha})
+          broadcast_run(state, run)
+          {:ok, run}
+        end
+    end
+  end
+
+  # The goal's first line, cut at a word boundary to fit a git subject line.
+  defp commit_subject(goal) do
+    line = goal |> String.split("\n", trim: true) |> List.first("") |> String.trim()
+
+    if String.length(line) <= 72 do
+      line
+    else
+      words = line |> String.slice(0, 71) |> String.split(" ")
+      cut = if length(words) > 1, do: words |> Enum.drop(-1) |> Enum.join(" "), else: hd(words)
+      String.trim_trailing(cut, ",.;:") <> "…"
     end
   end
 

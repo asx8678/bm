@@ -201,6 +201,57 @@ defmodule Bm.Workspace.Git do
 
   def checkpoint(_repo, _tree, _parent, ref, _message), do: {:error, {:not_a_bm_ref, ref}}
 
+  ## Committing a run's changes for the user (15.1, D26)
+
+  @doc """
+  Commits exactly `paths`, as they are in the working tree, on top of HEAD, as the user asked
+  (D26: the only time BM moves a branch). The commit is built in a temporary index, so the
+  user's own staged changes to other files stay staged and uncommitted; HEAD moves only if it is
+  still the commit it was (`update-ref` with the old value); afterwards the user's index entries
+  for `paths` are set to the new HEAD, so `git status` shows them clean.
+
+  Refused with `{:error, reason}`: `:detached_head`, `:no_commits`, `{:staged, paths}` (the user
+  staged changes in these paths), `:nothing_to_commit`. The author and committer are the user's
+  git identity; `message` is the commit message.
+  """
+  def commit_paths(repo, paths, message) do
+    tmp_index = Path.join(System.tmp_dir!(), "bm-commit-#{System.unique_integer([:positive])}")
+
+    try do
+      with {:ok, _branch} <- current_branch(repo),
+           head when is_binary(head) <- head(repo) || {:error, :no_commits},
+           {:ok, staged} <-
+             git(repo, ["diff", "--cached", "--name-only", "-z", "HEAD", "--" | paths]),
+           [] <- String.split(staged, <<0>>, trim: true),
+           {:ok, _} <- git(repo, ["read-tree", "HEAD"], index: tmp_index),
+           {:ok, _} <- git(repo, ["add", "-A", "--" | paths], index: tmp_index, stderr: true),
+           {:ok, tree} <- git(repo, ["write-tree"], index: tmp_index) |> trimmed(),
+           {:ok, head_tree} <- git(repo, ["rev-parse", "HEAD^{tree}"]) |> trimmed(),
+           true <- tree != head_tree || {:error, :nothing_to_commit},
+           {:ok, commit} <-
+             git(repo, ["commit-tree", tree, "-p", head, "-m", message]) |> trimmed(),
+           {:ok, _} <-
+             git(repo, ["update-ref", "-m", "bm: commit a run's changes", "HEAD", commit, head],
+               stderr: true
+             ),
+           {:ok, _} <- git(repo, ["reset", "-q", "--" | paths], stderr: true) do
+        {:ok, commit}
+      else
+        [_ | _] = staged_paths -> {:error, {:staged, staged_paths}}
+        {:error, _} = error -> error
+      end
+    after
+      File.rm(tmp_index)
+    end
+  end
+
+  defp current_branch(repo) do
+    case git(repo, ["symbolic-ref", "-q", "--short", "HEAD"]) do
+      {:ok, out} -> {:ok, String.trim(out)}
+      {:error, _} -> {:error, :detached_head}
+    end
+  end
+
   ## Freshness (13.2)
 
   @doc """
