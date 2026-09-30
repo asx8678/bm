@@ -961,3 +961,9 @@ attributes it).
 accepted task's attempt can be reverted alone: conditional `Git.restore` of its write set from its
 `tree_before`, refused if a later task changed those files (they no longer match its
 `tree_after`) or if an accepted task depends on it.
+
+**Status 13.2 (2026-09-30).** `Coordinator.freshness/3` in the authorize path, `Git.changed_since?/3`;
+per attempt `touched` (paths allowed for edit/write) and `bash_ran?`. Checked (fake pi): README.md
+edited while the worker was busy → its `write` refused ("README.md changed since your task
+started, and not by you…"), the concurrent edit intact; a worker writing its own a.txt twice →
+allowed, accepted.

@@ -217,6 +217,9 @@ defmodule Bm.Workspace.Coordinator do
       # When the running tool call started, and identical guarded calls seen (plan 11.5).
       tool_since: nil,
       repeats: %{},
+      # Paths this attempt was allowed to edit/write, and whether it ran bash (plan 13.2).
+      touched: MapSet.new(),
+      bash_ran?: false,
       # Workers' questions waiting for the planner (plan 12.2): task ref => {agent_id, request}.
       asks: %{},
       # Monitor of the goal run's planner process.
@@ -508,7 +511,9 @@ defmodule Bm.Workspace.Coordinator do
         running_since: nil,
         last_event_at: nil,
         tool_since: nil,
-        repeats: %{}
+        repeats: %{},
+        touched: MapSet.new(),
+        bash_ran?: false
     }
   end
 
@@ -989,11 +994,60 @@ defmodule Bm.Workspace.Coordinator do
     state = count_repeat(state, request)
 
     {outcome, state} = handle_request_once(state, request)
+    state = note_allowed(state, request, outcome)
 
     if repeats(state, request) >= state.config.repeat_cancel,
       do: {outcome, request_cancel(state, "repeating the same call")},
       else: {outcome, state}
   end
+
+  # What the worker was allowed to do so far, for the freshness check (13.2).
+  defp note_allowed(state, %{op: "authorize", payload: payload}, %{"allow" => true}) do
+    case payload do
+      %{"tool" => "bash"} ->
+        %{state | bash_ran?: true}
+
+      %{"tool" => tool, "input" => %{"path" => path}} when tool in ["edit", "write"] ->
+        %{state | touched: MapSet.put(state.touched, relative_path(state.root, path))}
+
+      _other ->
+        state
+    end
+  end
+
+  defp note_allowed(state, _request, _outcome), do: state
+
+  defp relative_path(root, path),
+    do: path |> String.replace_prefix("@", "") |> Path.expand(root) |> Path.relative_to(root)
+
+  # A `write` replaces the whole file. If the file changed since the attempt started and not by
+  # this worker (no earlier edit/write of it, no bash that could have), someone else changed it
+  # meanwhile: refuse rather than overwrite (13.2). `edit` needs no check: pi re-reads the file
+  # and fails if the text to replace changed.
+  defp freshness(state, "write", %{"path" => path}) when is_binary(path) do
+    relative = relative_path(state.root, path)
+
+    cond do
+      state.bash_ran? or MapSet.member?(state.touched, relative) ->
+        :ok
+
+      not File.regular?(Path.join(state.root, relative)) ->
+        :ok
+
+      true ->
+        case Git.changed_since?(state.root, state.attempt.tree_before, relative) do
+          {:ok, true} ->
+            {:deny,
+             "#{relative} changed since your task started, and not by you. Read it again and " <>
+               "use edit for your change, or report the task as blocked."}
+
+          _unchanged_or_unknown ->
+            :ok
+        end
+    end
+  end
+
+  defp freshness(_state, _tool, _input), do: :ok
 
   # Identical guarded tool calls (same tool, same input) in this attempt.
   defp count_repeat(state, %{op: "authorize", payload: payload}) do
@@ -1048,8 +1102,12 @@ defmodule Bm.Workspace.Coordinator do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
     ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
 
-    case Bm.Policy.authorize(tool, payload["input"] || %{}, ctx) do
-      :allow -> %{"ok" => true, "allow" => true}
+    input = payload["input"] || %{}
+
+    with :allow <- Bm.Policy.authorize(tool, input, ctx),
+         :ok <- freshness(state, tool, input) do
+      %{"ok" => true, "allow" => true}
+    else
       {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
     end
   end

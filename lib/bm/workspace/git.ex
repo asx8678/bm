@@ -201,6 +201,19 @@ defmodule Bm.Workspace.Git do
 
   def checkpoint(_repo, _tree, _parent, ref, _message), do: {:error, {:not_a_bm_ref, ref}}
 
+  ## Freshness (13.2)
+
+  @doc """
+  Whether the file at repository path `path` differs from its entry in `tree` (content or mode;
+  present in one and absent in the other counts). `{:ok, boolean}`, or an error from git.
+  """
+  def changed_since?(repo, tree, path) do
+    with {:ok, in_tree} <- ls_tree(repo, tree, [path]),
+         {:ok, current} <- object_at(repo, Path.join(repo, path), path) do
+      {:ok, in_tree[path] != current}
+    end
+  end
+
   ## Pruning checkpoints
 
   @doc "Ids of the runs that have checkpoint refs (`refs/bm/runs/<id>/...`)."
