@@ -60,6 +60,14 @@ defmodule Bm.Pi.Agent do
       owner: owner,
       port: nil,
       os_pid: nil,
+      # pi leads its own process group (pgid == os_pid). pi's bash tool starts each command in
+      # a session of its own; bm_guard records those group ids in `pgid_file` (BM_PGID_FILE).
+      # Every group is ended when pi exits or the agent stops (decision D18).
+      pgid: nil,
+      pgid_file: nil,
+      # Groups seen empty once are never signalled again: their ids may be reused.
+      dead_groups: MapSet.new(),
+      pgid_dir: opts[:pgid_dir] || config[:pgid_dir] || Path.join(System.tmp_dir!(), "bm/pgids"),
       buffer: "",
       # Incremented every time the pi session is replaced (new process or confirmed new_session).
       session_epoch: 0,
@@ -104,6 +112,11 @@ defmodule Bm.Pi.Agent do
   end
 
   def handle_call(:os_pid, _from, state), do: {:reply, state.os_pid, state}
+
+  def handle_call(:process_groups, _from, state) do
+    {live, state} = live_groups(state)
+    {:reply, live, state}
+  end
 
   def handle_call(_command, _from, %{port: nil} = state),
     do: {:reply, {:error, :not_running}, state}
@@ -151,7 +164,7 @@ defmodule Bm.Pi.Agent do
     for {_id, %{from: from}} <- state.pending, from, do: GenServer.reply(from, {:error, :exited})
 
     state = %{
-      state
+      end_groups(state)
       | port: nil,
         os_pid: nil,
         buffer: "",
@@ -195,12 +208,52 @@ defmodule Bm.Pi.Agent do
       end
 
     Logger.info("pi agent #{state.id}: stopped by #{stopped_by}")
+    end_groups(state)
     Port.close(port)
   catch
     :error, :badarg -> :ok
   end
 
   def terminate(_reason, _state), do: :ok
+
+  # Ends every process pi or its bash commands left behind, then forgets the groups.
+  defp end_groups(%{pgid: nil} = state), do: state
+
+  defp end_groups(state) do
+    {groups, state} = live_groups(state)
+
+    case Bm.Proc.terminate_groups(groups) do
+      :ok ->
+        File.rm(state.pgid_file)
+
+      {:error, pids} ->
+        Logger.error("pi agent #{state.id}: processes survived a group kill: #{inspect(pids)}")
+    end
+
+    %{state | pgid: nil, pgid_file: nil, dead_groups: MapSet.new()}
+  end
+
+  # pi's group and every group bm_guard recorded that still has processes; the empty ones are
+  # remembered as dead so a later reuse of their ids is never signalled.
+  defp live_groups(%{pgid: nil} = state), do: {[], state}
+
+  defp live_groups(state) do
+    known =
+      [state.pgid | Bm.Proc.read_pgid_file(state.pgid_file)]
+      |> Enum.reject(&MapSet.member?(state.dead_groups, &1))
+
+    live = Bm.Proc.live_groups(known)
+    dead = MapSet.union(state.dead_groups, MapSet.new(known -- live))
+    {live, %{state | dead_groups: dead}}
+  end
+
+  defp new_pgid_file(state) do
+    File.mkdir_p!(state.pgid_dir)
+    name = String.replace(state.id, ~r/[^\w.-]/, "_")
+    path = Path.join(state.pgid_dir, "#{name}-#{System.unique_integer([:positive])}.pgids")
+    File.write!(path, "")
+    path
+  end
 
   defp kill_and_wait(%{os_pid: os_pid, port: port}, signal, timeout) do
     System.cmd("kill", ["-#{signal}", to_string(os_pid)], stderr_to_stdout: true)
@@ -228,24 +281,31 @@ defmodule Bm.Pi.Agent do
         )
 
       path ->
+        pgid_file = new_pgid_file(state)
+        env = Map.put(state.env, "BM_PGID_FILE", pgid_file)
+        {launcher, launch_args} = Bm.Proc.launch_args(path, args)
+
         port =
-          Port.open({:spawn_executable, path}, [
+          Port.open({:spawn_executable, launcher}, [
             :binary,
             :exit_status,
             :use_stdio,
             :hide,
             {:line, @max_line_bytes},
-            {:args, args},
+            {:args, launch_args},
             {:cd, state.cwd},
-            {:env, Enum.map(state.env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)}
+            {:env, Enum.map(env, fn {k, v} -> {to_charlist(k), to_charlist(v)} end)}
           ])
 
+        # The launcher execs pi, so this is pi's pid and its process group id.
         {:os_pid, os_pid} = Port.info(port, :os_pid)
 
         %{
           state
           | port: port,
             os_pid: os_pid,
+            pgid: os_pid,
+            pgid_file: pgid_file,
             status: :starting,
             session_epoch: state.session_epoch + 1,
             tool_calls: ToolCalls.new()
@@ -484,7 +544,9 @@ defmodule Bm.Pi.Agent do
       usage: state.usage,
       spend: state.spend,
       session_epoch: state.session_epoch,
-      cwd: state.cwd
+      cwd: state.cwd,
+      pgid: state.pgid,
+      pgid_file: state.pgid_file
     }
   end
 

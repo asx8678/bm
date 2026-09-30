@@ -66,6 +66,44 @@ defmodule Bm.PiTest do
     end
   end
 
+  describe "process groups" do
+    defp spawn_children(id) do
+      Bm.Pi.prompt(id, "spawn-child")
+      %{summary: %{pgid: pgid, pgid_file: file}} = settle(id)
+      assert pgid == Bm.Pi.os_pid(id)
+      assert [bash_group] = Bm.Proc.read_pgid_file(file)
+
+      groups = [pgid, bash_group]
+      # pi and its plain child, and the bash command's background job.
+      assert length(Bm.Proc.group_members(groups)) == 3
+      {groups, file}
+    end
+
+    test "stopping the agent ends pi's group and every recorded bash group", %{id: id} do
+      {groups, file} = spawn_children(id)
+
+      Bm.Pi.stop(id)
+      assert Bm.Proc.group_members(groups) == []
+      refute File.exists?(file)
+    end
+
+    test "live groups are reported, and a group seen empty is never reported again", %{id: id} do
+      {[pgid, bash_group] = groups, _file} = spawn_children(id)
+      assert Bm.Pi.process_groups(id) == groups
+
+      Bm.Proc.terminate_groups([bash_group])
+      assert Bm.Pi.process_groups(id) == [pgid]
+    end
+
+    test "processes left behind are ended when pi exits by itself", %{id: id} do
+      {groups, _file} = spawn_children(id)
+
+      Bm.Pi.prompt(id, "crash")
+      assert_receive {:pi, ^id, {:error, "pi exited" <> _}, %{pgid: nil}}, 5_000
+      assert Bm.Proc.group_members(groups) == []
+    end
+  end
+
   describe "usage and spend" do
     test "usage keeps the cost and spend adds confirmed cost per message", %{id: id} do
       Bm.Pi.prompt(id, "hello")
@@ -138,6 +176,116 @@ defmodule Bm.PiTest do
       assert_receive {:pi, ^id, {:bridge, "result", %{"status" => "done", "summary" => "probe"}},
                       _},
                      5_000
+    end
+  end
+
+  describe "scripted work (fake pi)" do
+    @describetag owner: true
+    @describetag :tmp_dir
+
+    defp work(id, steps), do: Bm.Pi.prompt(id, "work:" <> JSON.encode!(steps))
+
+    defp answer_next(id, op, reply) do
+      assert_receive {:pi_request, ^id, %{op: ^op, dialog_id: dialog_id} = request}, 5_000
+      Bm.Pi.respond(id, dialog_id, reply)
+      request
+    end
+
+    test "steps ask the BEAM, write, run recorded commands and submit", %{id: id, tmp_dir: dir} do
+      file = Path.join(dir, "out.txt")
+
+      work(id, [
+        %{authorize: %{tool: "write", input: %{path: file}}},
+        %{write: [file, "hi"]},
+        %{bash: "true"},
+        %{submit: %{status: "done", summary: "did it"}}
+      ])
+
+      allow = %{"ok" => true, "allow" => true}
+      assert %{payload: %{"tool" => "write"}} = answer_next(id, "authorize", allow)
+      assert %{payload: %{"tool" => "bash"}} = answer_next(id, "authorize", allow)
+
+      assert %{payload: %{"status" => "done"}} =
+               answer_next(id, "submit_result", %{"ok" => true})
+
+      %{transcript: transcript, summary: %{pgid_file: pgid_file}} = settle(id)
+      assert %{role: :assistant, text: "worked"} = List.last(transcript)
+      assert File.read!(file) == "hi"
+      assert [_bash_group] = Bm.Proc.read_pgid_file(pgid_file)
+    end
+
+    test "a denied authorization stops the work", %{id: id, tmp_dir: dir} do
+      file = Path.join(dir, "out.txt")
+      work(id, [%{bash: "touch #{file}"}, %{write: [file, "no"]}])
+      answer_next(id, "authorize", %{"ok" => true, "allow" => false, "reason" => "policy"})
+
+      %{transcript: transcript} = settle(id)
+      assert %{text: "denied: policy"} = List.last(transcript)
+      refute File.exists?(file)
+    end
+
+    test "a spawned background job is recorded; hang waits until aborted", %{id: id} do
+      work(id, [%{spawn: "sleep 60"}, %{hang: true}])
+      assert_receive {:pi, ^id, :status, %{status: :running}}, 5_000
+
+      # Wait until the background job is recorded.
+      pgid_file = Bm.Pi.snapshot(id).summary.pgid_file
+      assert eventually(fn -> Bm.Proc.read_pgid_file(pgid_file) != [] end)
+
+      assert :ok = Bm.Pi.abort(id)
+      %{transcript: transcript} = settle(id)
+      assert %{role: :notice, text: "Stopped."} = List.last(transcript)
+      assert [_pi, _job] = Bm.Pi.process_groups(id)
+    end
+  end
+
+  describe "scripted planner (fake pi)" do
+    @describetag owner: true
+
+    defp answer_request(id, op, reply) do
+      assert_receive {:pi_request, ^id, %{op: ^op, dialog_id: dialog_id} = request}, 5_000
+      Bm.Pi.respond(id, dialog_id, reply)
+      request
+    end
+
+    test "waves propose tasks and close the plan; a follow_up runs the next wave", %{id: id} do
+      waves = [
+        %{tasks: [%{key: "a", title: "A"}, %{key: "b", title: "B"}], summary: "two"},
+        %{tasks: [%{key: "c", title: "C"}], close: false}
+      ]
+
+      :ok = Bm.Pi.prompt(id, "plan:" <> JSON.encode!(waves))
+      accepted = %{"ok" => true, "status" => "accepted"}
+      assert %{payload: %{"key" => "a"}} = answer_request(id, "propose_task", accepted)
+
+      assert %{payload: %{"key" => "b"}} =
+               answer_request(id, "propose_task", %{
+                 "ok" => true,
+                 "status" => "rejected",
+                 "reason" => "no"
+               })
+
+      assert %{payload: %{"summary" => "two"}} = answer_request(id, "close_plan", %{"ok" => true})
+      %{transcript: transcript} = settle(id)
+      assert %{text: "a: accepted; b: rejected (no)"} = List.last(transcript)
+
+      :ok = Bm.Pi.follow_up(id, "results")
+      assert %{payload: %{"key" => "c"}} = answer_request(id, "propose_task", accepted)
+      %{transcript: transcript} = settle(id)
+      assert %{text: "c: accepted"} = List.last(transcript)
+      # No close_plan in the second wave, and no waves left: follow_ups are echoed.
+      refute_received {:pi_request, ^id, %{op: "close_plan"}}
+      :ok = Bm.Pi.follow_up(id, "more")
+      assert %{transcript: transcript} = settle(id)
+      assert %{text: "followed: more"} = List.last(transcript)
+    end
+  end
+
+  defp eventually(fun, attempts \\ 50) do
+    cond do
+      fun.() -> true
+      attempts == 0 -> false
+      true -> receive(after: (20 -> eventually(fun, attempts - 1)))
     end
   end
 

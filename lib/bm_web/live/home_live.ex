@@ -1,291 +1,515 @@
 defmodule BmWeb.HomeLive do
+  @moduledoc """
+  Tasks page: start work in a checkout and see the recent runs. Two ways to start:
+
+    * **Goal** (milestone C, plan 8.1): a planner splits the goal into tasks that guarded
+      workers run one at a time (`Coordinator.start_goal/3`);
+    * **Single task** (milestone B): one guarded worker does the task, in the workspace's
+      unfinished run or a new one.
+  """
+
   use BmWeb, :live_view
 
-  alias Bm.Pi.Transcript
+  alias Bm.Runs
+  import BmWeb.RunComponents
 
-  @agent_id "main"
-  @agent_node "agent"
+  alias Bm.Workspace.Coordinator
+
+  @page 20
+  @statuses ~w(active paused done failed cancelled)
 
   @impl true
-  def mount(_params, _session, socket) do
-    {transcript, summary} =
-      if connected?(socket) do
-        Bm.Pi.subscribe(@agent_id)
-        {:ok, _pid} = Bm.Pi.ensure_agent(@agent_id)
-        %{transcript: transcript, summary: summary} = Bm.Pi.snapshot(@agent_id)
-        {transcript, summary}
-      else
-        {[], %{status: :starting, model: nil, tool: nil, usage: nil, cwd: nil}}
-      end
+  def mount(params, _session, socket) do
+    {runs, more?} = Runs.search_runs("", nil, @page)
+    workspaces = Runs.list_workspaces()
 
     {:ok,
-     assign(socket,
-       transcript: transcript,
-       agent: summary,
-       graph: graph(summary),
-       form: to_form(%{"text" => ""})
-     )}
+     socket
+     |> assign(
+       page_title: "Tasks",
+       runs_empty?: runs == [],
+       search: to_form(%{"text" => "", "status" => ""}, as: :search),
+       runs_limit: @page,
+       more_runs?: more?,
+       workspaces: workspaces,
+       mode: if(params["mode"] == "task", do: :task, else: :goal),
+       form: default_form(workspaces, params["path"]),
+       goal_form: default_form(workspaces, params["path"]) |> then(&to_form(&1.params, as: :goal))
+     )
+     |> stream(:runs, runs)}
+  end
+
+  # Prefills the requested workspace (`?path=`) or the last used one, with its verify command.
+  defp default_form(workspaces, requested) do
+    {path, verify} =
+      case Enum.find(workspaces, &(&1.path == requested)) || List.first(workspaces) do
+        %{path: path, verify_command: verify} -> {path, verify}
+        nil -> {requested || File.cwd!(), nil}
+      end
+
+    to_form(
+      %{
+        "path" => path,
+        "goal" => "",
+        "writes" => "",
+        "verify_command" => verify || "",
+        "budget_usd" => ""
+      },
+      as: :task
+    )
   end
 
   @impl true
-  def handle_event("send", %{"text" => text}, socket) do
-    case String.trim(text) do
-      "" ->
-        {:noreply, socket}
-
-      text ->
-        socket = assign(socket, form: to_form(%{"text" => ""}))
-
-        case Bm.Pi.prompt(@agent_id, text) do
-          :ok -> {:noreply, socket}
-          {:error, _} -> {:noreply, put_flash(socket, :error, "pi is not running.")}
-        end
-    end
+  def handle_event("search", %{"search" => params}, socket) do
+    {:noreply,
+     socket |> assign(search: to_form(params, as: :search), runs_limit: @page) |> load_runs()}
   end
 
-  def handle_event("stop", _params, socket) do
-    Bm.Pi.abort(@agent_id)
-    {:noreply, socket}
+  def handle_event("more_runs", _params, socket) do
+    {:noreply, socket |> assign(runs_limit: socket.assigns.runs_limit + @page) |> load_runs()}
   end
 
-  # Node drags on the canvas are not persisted yet.
-  def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
+  def handle_event("mode", %{"mode" => mode}, socket) do
+    {:noreply, assign(socket, mode: if(mode == "task", do: :task, else: :goal))}
+  end
 
-  @impl true
-  def handle_info({:pi, @agent_id, event, summary}, socket) do
-    socket = assign(socket, transcript: Transcript.apply(socket.assigns.transcript, event))
+  def handle_event("validate_goal", %{"goal" => params}, socket) do
+    {:noreply, assign(socket, goal_form: to_form(params, as: :goal))}
+  end
 
-    if summary == socket.assigns.agent do
-      {:noreply, socket}
+  def handle_event("start_goal", %{"goal" => params}, socket) do
+    path = String.trim(params["path"] || "")
+
+    with {:ok, attrs} <- goal_attrs(params),
+         {:ok, _pid} <- Coordinator.ensure_started(path),
+         {:ok, run} <- Coordinator.start_goal(path, attrs) do
+      {:noreply, push_navigate(socket, to: ~p"/runs/#{run.id}")}
     else
-      {:noreply,
-       socket
-       |> assign(agent: summary)
-       |> push_event("flow:update_node", %{id: @agent_node, data: node_data(summary)})}
+      {:error, reason} ->
+        {field, message} = explain(reason, path)
+        form = to_form(params, as: :goal, errors: [{field, {message, []}}], action: :validate)
+        {:noreply, assign(socket, goal_form: form)}
     end
   end
 
-  defp graph(summary) do
-    %{
-      nodes: [
-        %{id: @agent_node, type: "agent", position: %{x: 0, y: 0}, data: node_data(summary)}
-      ],
-      edges: []
-    }
+  def handle_event("validate", %{"task" => params}, socket) do
+    {:noreply, assign(socket, form: to_form(params, as: :task))}
   end
 
-  defp node_data(summary), do: Map.put(summary, :label, "pi agent")
+  def handle_event("start", %{"task" => params}, socket) do
+    path = String.trim(params["path"] || "")
 
-  @suggestions [
-    "Explain how this project is structured",
-    "List the LiveView pages and what each one does",
-    "Run the tests and summarize the result"
-  ]
+    with {:ok, attrs} <- task_attrs(params),
+         {:ok, _pid} <- Coordinator.ensure_started(path),
+         {:ok, attempt} <- Coordinator.run_task(path, attrs) do
+      %{run: run} = Runs.attempt_context(attempt)
+      {:noreply, push_navigate(socket, to: ~p"/runs/#{run.id}")}
+    else
+      {:error, reason} ->
+        {field, message} = explain(reason, path)
+        form = to_form(params, as: :task, errors: [{field, {message, []}}], action: :validate)
+        {:noreply, assign(socket, form: form)}
+    end
+  end
 
-  @status_labels %{starting: "Starting", idle: "Ready", running: "Working", exited: "Stopped"}
+  # Refills the runs list from the search form and the current page size.
+  defp load_runs(socket) do
+    params = socket.assigns.search.params
+    status = if params["status"] in @statuses, do: String.to_existing_atom(params["status"])
+    {runs, more?} = Runs.search_runs(params["text"], status, socket.assigns.runs_limit)
+
+    socket
+    |> assign(more_runs?: more?, runs_empty?: runs == [])
+    |> stream(:runs, runs, reset: true)
+  end
+
+  defp goal_attrs(params) do
+    goal = String.trim(params["goal"] || "")
+    budget_text = String.trim(params["budget_usd"] || "")
+
+    budget =
+      case Float.parse(budget_text) do
+        {budget, ""} when budget > 0 -> budget
+        _ -> nil
+      end
+
+    cond do
+      goal == "" ->
+        {:error, :no_goal}
+
+      budget_text != "" and budget == nil ->
+        {:error, :bad_budget}
+
+      true ->
+        {:ok,
+         %{goal: goal, verify_command: blank_to_nil(params["verify_command"]), budget_usd: budget}}
+    end
+  end
+
+  defp task_attrs(params) do
+    goal = String.trim(params["goal"] || "")
+
+    budget =
+      case Float.parse(String.trim(params["budget_usd"] || "")) do
+        {budget, ""} when budget > 0 -> budget
+        _ -> nil
+      end
+
+    cond do
+      goal == "" ->
+        {:error, :no_goal}
+
+      String.trim(params["budget_usd"] || "") != "" and budget == nil ->
+        {:error, :bad_budget}
+
+      true ->
+        {:ok,
+         %{
+           title: title(goal),
+           goal: goal,
+           writes: split_files(params["writes"]),
+           verify_command: blank_to_nil(params["verify_command"]),
+           budget_usd: budget,
+           run_goal: title(goal)
+         }}
+    end
+  end
+
+  @doc false
+  def title(goal) do
+    line = goal |> String.split("\n", trim: true) |> List.first("") |> String.trim()
+    if String.length(line) > 80, do: String.slice(line, 0, 79) <> "…", else: line
+  end
+
+  @doc false
+  def split_files(nil), do: []
+  def split_files(text), do: text |> String.split([",", "\n", " "], trim: true) |> Enum.uniq()
+
+  defp blank_to_nil(value) do
+    case String.trim(value || "") do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  @doc false
+  # Turns a start error into a message for one form field.
+  def explain(:no_goal, _path), do: {:goal, "Describe the task."}
+
+  def explain(:goal_run_active, _path),
+    do: {:path, "A planner run is active in this workspace; its planner chooses the tasks."}
+
+  def explain(:workspace_busy, _path),
+    do: {:path, "This workspace has an unfinished run; finish it (or let it finish) first."}
+
+  def explain(:bad_budget, _path), do: {:budget_usd, "Enter an amount in USD, like 0.50."}
+
+  def explain({:not_a_directory, _}, _path), do: {:path, "No such directory."}
+
+  def explain({:not_repository_root, top}, _path),
+    do: {:path, "Not the top of a git repository; this folder is inside #{top}."}
+
+  def explain({:git, "rev-parse", _, _}, _path), do: {:path, "Not a git repository."}
+
+  def explain(:no_verify_command, _path),
+    do: {:verify_command, "A verify command is required, e.g. mix precommit or npm test."}
+
+  def explain(:lane_busy, _path),
+    do: {:path, "An attempt in this workspace is running or waiting for your decision."}
+
+  def explain(:run_paused, _path),
+    do: {:path, "This workspace's run is paused after an interruption; resolve it first."}
+
+  def explain(:budget_exhausted, _path),
+    do: {:budget_usd, "The run's budget is spent. Finish the run to start a new one."}
+
+  def explain(%Ecto.Changeset{} = changeset, _path) do
+    {:goal, "Could not create the task: #{inspect(changeset.errors)}"}
+  end
+
+  def explain(other, _path), do: {:path, "Could not start: #{inspect(other)}"}
 
   @impl true
   def render(assigns) do
     assigns =
       assign(assigns,
-        suggestions: @suggestions,
-        status_label: @status_labels[assigns.agent.status]
+        input:
+          "block w-full rounded-md border border-bm-line bg-bm-bg px-2.5 py-1.5 text-[13px] text-bm-text outline-none transition-colors placeholder:text-bm-muted/70 focus:border-bm-muted"
       )
 
     ~H"""
-    <div class="flex h-dvh flex-col">
-      <header class="flex h-11 flex-none items-center gap-4 border-b border-bm-line bg-bm-surface px-4">
-        <span id="brand" class="text-sm font-bold tracking-wide">BEAM</span>
-
-        <div id="agent-status" class="flex min-w-0 items-center gap-1.5 text-xs">
-          <span class={["size-1.5 flex-none rounded-full", status_dot(@agent.status)]}></span>
-          <span class="font-medium">{@status_label}</span>
-          <span :if={@agent.model} class="truncate text-bm-muted">{@agent.model}</span>
-        </div>
-      </header>
-
-      <main class="flex min-h-0 flex-1">
-        <section class="flex w-full min-w-0 flex-col border-bm-line bg-bm-surface md:w-[24rem] md:flex-none md:border-r">
-          <div id="messages" phx-hook=".StickToBottom" class="flex-1 overflow-y-auto px-4 py-4">
-            <div :if={@transcript == []} class="flex h-full flex-col justify-center">
-              <h1 class="text-base font-semibold">What should we work on?</h1>
-              <p :if={@agent[:cwd]} class="mt-1.5 text-xs leading-relaxed text-bm-muted">
-                The agent reads, runs and edits code in <code class="font-mono text-[11px] text-bm-text">{@agent.cwd}</code>.
-              </p>
-              <div class="mt-4 flex flex-col items-start gap-1.5">
-                <button
-                  :for={suggestion <- @suggestions}
-                  type="button"
-                  phx-click="send"
-                  phx-value-text={suggestion}
-                  class="rounded-md border border-bm-line px-2.5 py-1 text-left text-xs transition-colors hover:bg-bm-raised focus-visible:outline-2 focus-visible:outline-bm-text"
-                >
-                  {suggestion}
-                </button>
-              </div>
-            </div>
-
-            <div class="space-y-3">
-              <.entry :for={entry <- @transcript} entry={entry} />
-              <div
-                :if={@agent.status == :running}
-                class="flex items-center gap-1.5 text-xs text-bm-muted"
+    <Layouts.app flash={@flash} active={:tasks}>
+      <div class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section aria-labelledby="new-task-title" class="min-w-0">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h1 id="new-task-title" class="text-lg font-semibold">
+              {if @mode == :goal, do: "New goal", else: "New task"}
+            </h1>
+            <div
+              id="mode-toggle"
+              class="flex rounded-lg border border-bm-line bg-bm-bg p-0.5 text-xs"
+              role="tablist"
+            >
+              <button
+                :for={{mode, label} <- [goal: "Goal", task: "Single task"]}
+                id={"mode-#{mode}"}
+                type="button"
+                role="tab"
+                aria-selected={to_string(@mode == mode)}
+                phx-click="mode"
+                phx-value-mode={mode}
+                class={[
+                  "rounded-md px-2.5 py-1 font-medium transition-colors",
+                  if(@mode == mode,
+                    do: "bg-bm-surface text-bm-text shadow-sm",
+                    else: "text-bm-muted hover:text-bm-text"
+                  )
+                ]}
               >
-                <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
-                Working
-              </div>
+                {label}
+              </button>
             </div>
           </div>
+          <p class="mt-1 text-xs leading-relaxed text-bm-muted">
+            <%= if @mode == :goal do %>
+              A planner splits the goal into small tasks; guarded workers do them one at a time.
+              BM checks every file write and command, never touches your uncommitted work or git
+              state, verifies each change and records it as a checkpoint.
+            <% else %>
+              One guarded worker does the task in your checkout. BM checks every file write and
+              command, never touches your uncommitted work or git state, verifies the result and
+              records it as a checkpoint.
+            <% end %>
+          </p>
 
-          <.form for={@form} id="chat-form" phx-submit="send" class="flex-none px-3 pb-3">
-            <div class="rounded-xl border border-bm-line bg-bm-bg transition-colors focus-within:border-bm-muted">
-              <label for="chat-input" class="sr-only">Message the agent</label>
-              <textarea
-                name={@form[:text].name}
-                id="chat-input"
-                rows="1"
-                placeholder="Ask the agent to read, change or explain code"
-                class="block max-h-48 w-full resize-none bg-transparent px-3 pt-2 text-[13px] leading-relaxed outline-none placeholder:text-bm-muted"
-                phx-hook=".Composer"
-              >{@form[:text].value}</textarea>
-              <div class="flex items-center justify-between gap-2 px-2 pt-0.5 pb-1.5">
-                <span class="pl-1 text-[10px] text-bm-muted">Shift + Enter adds a new line</span>
-                <div class="flex items-center gap-1.5">
-                  <button
-                    :if={@agent.status == :running}
-                    type="button"
-                    phx-click="stop"
-                    class="rounded-md border border-bm-line px-2 py-0.5 text-xs font-medium transition-colors hover:bg-bm-raised focus-visible:outline-2 focus-visible:outline-bm-text"
-                  >
-                    Stop
-                  </button>
-                  <button
-                    type="submit"
-                    class="rounded-md bg-bm-text px-2.5 py-0.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text"
-                  >
-                    Send
-                  </button>
-                </div>
+          <.form
+            for={@goal_form}
+            id="goal-form"
+            phx-change="validate_goal"
+            phx-submit="start_goal"
+            class={[
+              "mt-5 space-y-4 rounded-xl border border-bm-line bg-bm-surface p-4",
+              @mode != :goal && "hidden"
+            ]}
+          >
+            <.input
+              field={@goal_form[:goal]}
+              type="textarea"
+              label="Goal"
+              rows="5"
+              placeholder="Add a /health endpoint with a test, and document it in the README."
+              class={[@input, "resize-y leading-relaxed"]}
+              error_class="border-bm-error"
+            />
+            <div>
+              <.input
+                field={@goal_form[:path]}
+                id="goal-path"
+                label="Repository"
+                list="workspaces"
+                autocomplete="off"
+                class={[@input, "font-mono text-xs"]}
+                error_class="border-bm-error"
+              />
+              <.hint>Top level of a git checkout.</.hint>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_10rem]">
+              <div>
+                <.input
+                  field={@goal_form[:verify_command]}
+                  id="goal-verify"
+                  label="Verify command"
+                  placeholder="mix precommit"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Runs after every task; must pass.</.hint>
               </div>
+              <div>
+                <.input
+                  field={@goal_form[:budget_usd]}
+                  id="goal-budget"
+                  label="Budget (USD)"
+                  placeholder="none"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Planner and workers.</.hint>
+              </div>
+            </div>
+            <div class="flex justify-end">
+              <button
+                id="start-goal-btn"
+                type="submit"
+                phx-disable-with="Starting…"
+                class="rounded-md bg-bm-text px-3.5 py-1.5 text-sm font-semibold text-bm-surface transition-opacity hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text disabled:opacity-60"
+              >
+                Start planning
+              </button>
+            </div>
+          </.form>
+
+          <.form
+            for={@form}
+            id="task-form"
+            phx-change="validate"
+            phx-submit="start"
+            class={[
+              "mt-5 space-y-4 rounded-xl border border-bm-line bg-bm-surface p-4",
+              @mode != :task && "hidden"
+            ]}
+          >
+            <div>
+              <.input
+                field={@form[:goal]}
+                type="textarea"
+                label="Task"
+                rows="4"
+                placeholder="Add a /health endpoint that returns ok, with a test."
+                class={[@input, "resize-y leading-relaxed"]}
+                error_class="border-bm-error"
+              />
+            </div>
+            <div>
+              <.input
+                field={@form[:path]}
+                label="Repository"
+                list="workspaces"
+                autocomplete="off"
+                class={[@input, "font-mono text-xs"]}
+                error_class="border-bm-error"
+              />
+              <datalist id="workspaces">
+                <option :for={workspace <- @workspaces} value={workspace.path}>
+                  {Path.basename(workspace.path)}
+                </option>
+              </datalist>
+              <.hint>
+                Top level of a git checkout. Earlier repositories are suggested as you type.
+              </.hint>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div>
+                <.input
+                  field={@form[:verify_command]}
+                  label="Verify command"
+                  placeholder="mix precommit"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Must pass for a change to be accepted.</.hint>
+              </div>
+              <div>
+                <.input
+                  field={@form[:writes]}
+                  label="Files to change"
+                  placeholder="lib/app/health.ex"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Optional; changes to other files are flagged.</.hint>
+              </div>
+            </div>
+            <div class="flex flex-wrap items-end justify-between gap-4">
+              <div class="w-40">
+                <.input
+                  field={@form[:budget_usd]}
+                  label="Budget (USD)"
+                  placeholder="none"
+                  class={[@input, "font-mono text-xs"]}
+                  error_class="border-bm-error"
+                />
+                <.hint>Caps a new run.</.hint>
+              </div>
+              <button
+                id="start-task-btn"
+                type="submit"
+                phx-disable-with="Starting…"
+                class="rounded-md bg-bm-text px-3.5 py-1.5 text-sm font-semibold text-bm-surface transition-opacity hover:opacity-85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bm-text disabled:opacity-60"
+              >
+                Start task
+              </button>
             </div>
           </.form>
         </section>
 
-        <section
-          id="agent-flow"
-          phx-hook="FlowCanvas"
-          phx-update="ignore"
-          data-graph={JSON.encode!(@graph)}
-          class="hidden min-w-0 flex-1 md:block"
-        >
+        <section aria-labelledby="runs-title" class="min-w-0">
+          <h2 id="runs-title" class="text-sm font-semibold">Runs</h2>
+          <.form
+            for={@search}
+            id="run-search"
+            phx-change="search"
+            phx-submit="search"
+            class="mt-2 flex gap-2"
+          >
+            <input
+              type="search"
+              name={@search[:text].name}
+              value={@search[:text].value}
+              id="run-search-text"
+              placeholder="Search goals and repositories"
+              phx-debounce="250"
+              autocomplete="off"
+              class="min-w-0 flex-1 rounded-md border border-bm-line bg-bm-bg px-2.5 py-1 text-xs outline-none transition-colors placeholder:text-bm-muted/70 focus:border-bm-muted"
+            />
+            <select
+              name={@search[:status].name}
+              id="run-search-status"
+              aria-label="Status"
+              class="rounded-md border border-bm-line bg-bm-bg px-1.5 py-1 text-xs outline-none focus:border-bm-muted"
+            >
+              <option value="" selected={@search[:status].value in [nil, ""]}>Any</option>
+              <option
+                :for={status <- ~w(active paused done failed cancelled)}
+                value={status}
+                selected={@search[:status].value == status}
+              >
+                {String.capitalize(status)}
+              </option>
+            </select>
+          </.form>
+          <ol id="runs" phx-update="stream" class="mt-3 space-y-1">
+            <li id="runs-empty" class="hidden text-xs text-bm-muted only:block">No runs yet.</li>
+            <li :for={{dom_id, run} <- @streams.runs} id={dom_id}>
+              <.link
+                navigate={~p"/runs/#{run.id}"}
+                class="group block rounded-lg border border-transparent px-3 py-2 transition-colors hover:border-bm-line hover:bg-bm-surface focus-visible:outline-2 focus-visible:outline-bm-text"
+              >
+                <div class="flex items-center gap-2">
+                  <.run_status status={run.status} />
+                  <span class="min-w-0 flex-1 truncate text-[13px] font-medium">{run.goal}</span>
+                </div>
+                <div class="mt-1 flex items-center gap-2 text-[11px] text-bm-muted">
+                  <span class="min-w-0 truncate font-mono" title={run.workspace.path}>
+                    {Path.basename(run.workspace.path)}
+                  </span>
+                  <span class="flex-none">·</span>
+                  <.ago at={run.updated_at} class="flex-none" />
+                  <span class="ml-auto flex-none font-mono tabular-nums">{money(run.spent_usd)}</span>
+                </div>
+              </.link>
+            </li>
+          </ol>
+          <button
+            :if={@more_runs?}
+            id="more-runs-btn"
+            type="button"
+            phx-click="more_runs"
+            class="mt-2 w-full rounded-md border border-bm-line px-3 py-1.5 text-xs text-bm-muted transition-colors hover:bg-bm-surface hover:text-bm-text"
+          >
+            Show more
+          </button>
         </section>
-      </main>
-    </div>
-
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".Composer">
-      export default {
-        mounted() {
-          this.resize = () => {
-            this.el.style.height = "auto"
-            this.el.style.height = `${this.el.scrollHeight}px`
-          }
-          this.el.addEventListener("input", this.resize)
-          this.el.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-              e.preventDefault()
-              this.el.form.requestSubmit()
-            }
-          })
-          // LiveView reads the form while the submit event bubbles; clear the box after that.
-          this.el.form.addEventListener("submit", () => setTimeout(() => {
-            this.el.value = ""
-            this.resize()
-          }))
-        },
-        updated() { this.resize() }
-      }
-    </script>
-
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".StickToBottom">
-      export default {
-        mounted() { this.el.scrollTop = this.el.scrollHeight },
-        beforeUpdate() {
-          this.atBottom = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 80
-        },
-        updated() {
-          if (this.atBottom) this.el.scrollTop = this.el.scrollHeight
-        }
-      }
-    </script>
+      </div>
+    </Layouts.app>
     """
   end
 
-  attr :entry, :map, required: true
+  slot :inner_block, required: true
 
-  defp entry(%{entry: %{role: :user}} = assigns) do
+  defp hint(assigns) do
     ~H"""
-    <div
-      class="ml-auto w-fit max-w-[85%] whitespace-pre-wrap rounded-xl rounded-br-sm bg-bm-raised px-3 py-1.5 text-[13px] leading-relaxed"
-      phx-no-format
-    >{@entry.text}</div>
+    <p class="-mt-1 text-[11px] text-bm-muted">{render_slot(@inner_block)}</p>
     """
   end
-
-  defp entry(%{entry: %{role: :assistant, text: ""}} = assigns), do: ~H""
-
-  defp entry(%{entry: %{role: :assistant}} = assigns) do
-    ~H"""
-    <div class="bm-prose">{markdown(@entry.text)}</div>
-    """
-  end
-
-  defp entry(%{entry: %{role: :tool}} = assigns) do
-    ~H"""
-    <div class="bm-tool flex items-center gap-1.5 font-mono text-[11px]">
-      <span class={["w-3 flex-none text-center", tool_color(@entry.status)]}>
-        {tool_icon(@entry.status)}
-      </span>
-      <span class="flex-none font-medium">{@entry.name}</span>
-      <span class="truncate text-bm-muted" title={@entry.detail}>{@entry.detail}</span>
-    </div>
-    """
-  end
-
-  defp entry(%{entry: %{role: :error}} = assigns) do
-    ~H"""
-    <div
-      class="rounded-md border-l-2 border-bm-error bg-bm-error/10 px-2.5 py-1.5 text-xs whitespace-pre-wrap"
-      phx-no-format
-    >{@entry.text}</div>
-    """
-  end
-
-  defp entry(%{entry: %{role: :notice}} = assigns) do
-    ~H"""
-    <div class="text-[11px] text-bm-muted">{@entry.text}</div>
-    """
-  end
-
-  # MDEx drops raw HTML from the model's output (render: [unsafe: false]).
-  defp markdown(text) do
-    text
-    |> MDEx.to_html!(
-      extension: [table: true, strikethrough: true, autolink: true],
-      render: [unsafe: false]
-    )
-    |> Phoenix.HTML.raw()
-  end
-
-  defp status_dot(:idle), do: "bg-bm-idle"
-  defp status_dot(:running), do: "bg-bm-run animate-pulse motion-reduce:animate-none"
-  defp status_dot(:exited), do: "bg-bm-error"
-  defp status_dot(_), do: "bg-bm-muted"
-
-  defp tool_icon(:running), do: "•"
-  defp tool_icon(:ok), do: "✓"
-  defp tool_icon(:error), do: "✕"
-
-  defp tool_color(:running), do: "text-bm-run animate-pulse motion-reduce:animate-none"
-  defp tool_color(:ok), do: "text-bm-idle"
-  defp tool_color(:error), do: "text-bm-error"
 end

@@ -3,17 +3,21 @@ defmodule Bm.Bridge do
   Authoritative handling of requests from BM's pi extensions.
 
   A request reaches the agent's owner as `{:pi_request, agent_id, request}` (see `Bm.Pi.Agent`).
-  The owner calls `handle/4`, which:
+  The owner calls `handle/5` with its **current assignment** for that agent, which:
 
     1. checks that the agent's **role** may perform the operation (planners propose tasks,
-       workers report results);
-    2. returns the stored outcome if this `request_id` was already handled (duplicate delivery
+       workers report results; both ask for authorization of guarded tool calls);
+    2. **fences** the request: it is rejected unless the owner has assigned the agent work
+       (`"not_assigned"`; a worker needs an attempt) and the request comes from the pi session
+       the assignment was made for (`"stale"`);
+    3. returns the stored outcome if this `request_id` was already handled (duplicate delivery
        has one logical effect);
-    3. otherwise runs the owner's `fun`, **persists** request and outcome in one transaction,
-       and only then returns the outcome for `Bm.Pi.respond/3`.
+    4. otherwise runs the owner's `fun`, **persists** request, attempt and outcome in one
+       transaction, and only then returns the outcome for `Bm.Pi.respond/3`.
 
   Identity comes from the channel: `agent_id` is the adapter the dialog arrived on and the
-  `session_epoch` is the adapter's, never values supplied by the model.
+  request's `session_epoch` is the adapter's, never values supplied by the model. Rejections in
+  steps 1 and 2 run nothing and persist nothing.
   """
 
   import Ecto.Query
@@ -22,35 +26,51 @@ defmodule Bm.Bridge do
   alias Bm.Repo
 
   @ops %{
-    planner: ~w(propose_task close_plan),
+    planner: ~w(propose_plan propose_task close_plan authorize),
     worker: ~w(submit_result authorize)
   }
 
   @type role :: :planner | :worker
   @type outcome :: %{required(String.t()) => term()}
+  @typedoc "What the owner assigned the agent: the pi session and, for workers, the attempt."
+  @type assignment :: %{session_epoch: integer(), attempt_id: integer() | nil} | nil
 
   @doc "Operations a role may perform."
   def allowed_ops(role), do: Map.get(@ops, role, [])
 
   @doc """
-  Handles one forwarded request. `fun` receives the request and returns the outcome map (it
-  must contain `"ok"`); it runs inside the transaction that persists the outcome.
+  Handles one forwarded request under the owner's current `assignment` for the agent. `fun`
+  receives the request and returns the outcome map (it must contain `"ok"`); it runs inside the
+  transaction that persists the outcome.
   """
-  @spec handle(role, String.t(), map(), (map() -> outcome)) :: outcome
-  def handle(role, agent_id, request, fun) do
+  @spec handle(role, String.t(), map(), assignment, (map() -> outcome)) :: outcome
+  def handle(role, agent_id, request, assignment, fun) do
     cond do
       request.op not in allowed_ops(role) ->
         %{"ok" => false, "error" => "operation_not_allowed", "op" => request.op}
+
+      not assigned?(role, assignment) ->
+        %{"ok" => false, "error" => "not_assigned"}
+
+      request.session_epoch != assignment.session_epoch ->
+        %{"ok" => false, "error" => "stale"}
 
       get(request.request_id) ->
         stored_outcome(request.request_id, agent_id)
 
       true ->
-        persist(role, agent_id, request, fun)
+        persist(role, agent_id, request, assignment, fun)
     end
   end
 
-  defp persist(role, agent_id, request, fun) do
+  defp assigned?(_role, nil), do: false
+
+  defp assigned?(:worker, assignment),
+    do: is_integer(assignment[:session_epoch]) and is_integer(assignment[:attempt_id])
+
+  defp assigned?(_role, assignment), do: is_integer(assignment[:session_epoch])
+
+  defp persist(role, agent_id, request, assignment, fun) do
     Repo.transaction(fn ->
       outcome = fun.(request)
 
@@ -60,6 +80,7 @@ defmodule Bm.Bridge do
         role: Atom.to_string(role),
         op: request.op,
         session_epoch: request.session_epoch,
+        attempt_id: assignment[:attempt_id],
         payload: request.payload,
         outcome: outcome
       }

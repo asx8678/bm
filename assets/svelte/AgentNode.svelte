@@ -4,7 +4,10 @@
   // data: {label, status, model, tool, usage: {input, output, cache_read} | null}
   let {data} = $props()
 
-  const statusLabels = {starting: "Starting", idle: "Ready", running: "Working", exited: "Stopped"}
+  const statusLabels = {
+    starting: "Starting", idle: "Ready", running: "Working", exited: "Stopped",
+    paused: "Paused", finished: "Finished",
+  }
 
   // Unknown counts (not reported by the provider) show as a dash, never as 0.
   const formatTokens = count =>
@@ -12,7 +15,7 @@
 </script>
 
 <div class="agent" data-status={data.status}>
-  <Handle type="target" position={Position.Top} />
+  <Handle type="target" position={data.horizontal ? Position.Left : Position.Top} />
   <div class="strip" aria-hidden="true"></div>
 
   <div class="body">
@@ -50,7 +53,7 @@
     </dl>
   </div>
 
-  <Handle type="source" position={Position.Bottom} />
+  <Handle type="source" position={data.horizontal ? Position.Right : Position.Bottom} />
 </div>
 
 <style>
@@ -70,6 +73,8 @@
   .agent[data-status="idle"] { --state: var(--bm-idle); }
   .agent[data-status="running"] { --state: var(--bm-run); border-color: color-mix(in srgb, var(--bm-run) 55%, var(--bm-line)); }
   .agent[data-status="exited"] { --state: var(--bm-error); }
+  .agent[data-status="paused"] { --state: var(--bm-run); }
+  .agent[data-status="finished"] { --state: var(--bm-muted); }
 
   .strip {
     flex: none;

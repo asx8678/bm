@@ -86,19 +86,12 @@ defmodule Bm.Live.QualificationTest do
     end
   end
 
-  defp prompt_code(ctx, code) do
-    :ok =
-      Bm.Pi.prompt(
-        ctx.id,
-        "Call the fabric_exec tool exactly once with exactly this code, then reply \"done\":\n" <>
-          code
-      )
-  end
-
   test "planner: the profile check passes and propose_task / close_plan are answered by the BEAM",
        ctx do
     report = start!(ctx, :planner)
-    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls propose_task close_plan))
+
+    assert Enum.sort(report.tools) ==
+             Enum.sort(~w(read grep find ls bash propose_plan propose_task close_plan))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """
@@ -113,7 +106,7 @@ defmodule Bm.Live.QualificationTest do
 
   test "reader: submit_result is answered by the BEAM; mutating tools are not available", ctx do
     report = start!(ctx, :reader)
-    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls submit_result))
+    assert Enum.sort(report.tools) == Enum.sort(~w(read grep find ls bash submit_result))
 
     :ok =
       Bm.Pi.prompt(ctx.id, """
@@ -121,9 +114,23 @@ defmodule Bm.Live.QualificationTest do
       submit_result with status "done" and summary "reader probe". Do nothing else.
       """)
 
-    requests = serve(ctx, fn _ -> %{"ok" => true, "status" => "received"} end)
+    # The reader has bash behind the guard (6.6.5): the BEAM answers with the read-only policy.
+    requests =
+      serve(ctx, fn
+        %{op: "authorize", payload: %{"tool" => tool, "input" => input}} ->
+          case Bm.Policy.authorize(tool, input, %{root: ctx.dir, user_owned: [], mode: :read_only}) do
+            :allow -> %{"ok" => true, "allow" => true}
+            {:deny, reason} -> %{"ok" => true, "allow" => false, "reason" => reason}
+          end
+
+        _request ->
+          %{"ok" => true, "status" => "received"}
+      end)
+
     # The model may report "done" or honestly "blocked"; what matters is the request and no file.
-    assert [%{op: "submit_result", payload: %{"status" => _}}] = requests
+    assert [%{op: "submit_result", payload: %{"status" => _}}] =
+             Enum.filter(requests, &(&1.op == "submit_result"))
+
     refute File.exists?(Path.join(ctx.dir, "q3.txt"))
   end
 
@@ -156,46 +163,39 @@ defmodule Bm.Live.QualificationTest do
     assert File.read!(Path.join(ctx.dir, "allowed.txt")) == "y"
   end
 
-  # Finding: a `nohup ... &` process is re-parented to PID 1, so it escapes the descendant check
-  # entirely. Settling must track the worker's process group (stage B5).
-  test "writer: a backgrounded shell command escapes pi's process tree", ctx do
+  # D18: pi runs every bash command in a session of its own, outside pi's process group.
+  # bm_guard records each allowed command's group id in BM_PGID_FILE, so a backgrounded job is
+  # still found after the agent settles, and stopping the agent ends it.
+  test "writer: bm_guard records each bash command's process group", ctx do
     start!(ctx, :writer)
+    %{summary: %{pgid: pgid, pgid_file: file}} = Bm.Pi.snapshot(ctx.id)
 
     :ok =
-      Bm.Pi.prompt(
-        ctx.id,
-        "Run exactly this bash command once and do nothing else: nohup sleep 45 >/dev/null 2>&1 &"
-      )
+      Bm.Pi.prompt(ctx.id, """
+      Run exactly this bash command once: nohup sleep 45 >/dev/null 2>&1 & echo started-ok
+      Then reply with the command's output and nothing else.
+      """)
 
     requests = serve(ctx, fn _ -> %{"ok" => true, "allow" => true} end)
-    bash = Enum.find(requests, &match?(%{op: "authorize", payload: %{"tool" => "bash"}}, &1))
-    IO.puts("\n[qualification] guard saw bash input: #{inspect(bash && bash.payload["input"])}")
-    assert bash
 
-    descendants = descendants(Bm.Pi.os_pid(ctx.id))
-    IO.puts("[qualification] descendants after agent_settled: #{inspect(descendants)}")
-    for line <- descendants, [pid | _] = String.split(line), do: System.cmd("kill", [pid])
-  end
+    # The BEAM authorizes the model's original command, not the prefixed one.
+    assert %{payload: %{"input" => %{"command" => command}}} =
+             Enum.find(requests, &match?(%{op: "authorize", payload: %{"tool" => "bash"}}, &1))
 
-  defp descendants(pid) do
-    {out, _} = System.cmd("ps", ["-axo", "pid=,ppid=,command="])
+    refute command =~ "printf"
 
-    rows =
-      for line <- String.split(out, "\n", trim: true) do
-        [p, pp | cmd] = String.split(String.trim(line), ~r/\s+/, parts: 3)
-        {String.to_integer(p), String.to_integer(pp), Enum.join(cmd, " ")}
-      end
+    # The model saw the command's normal output.
+    %{transcript: transcript} = Bm.Pi.snapshot(ctx.id)
+    assert %{role: :assistant, text: text} = List.last(transcript)
+    assert text =~ "started-ok"
 
-    collect(rows, [pid])
-  end
+    groups = Bm.Proc.read_pgid_file(file)
+    assert [_ | _] = groups
+    refute pgid in groups
+    assert [_ | _] = Bm.Proc.group_members(groups), "the background sleep should still run"
 
-  defp collect(_rows, []), do: []
-
-  defp collect(rows, parents) do
-    children = for {p, pp, cmd} <- rows, pp in parents, do: {p, cmd}
-
-    Enum.map(children, fn {p, cmd} -> "#{p} #{cmd}" end) ++
-      collect(rows, Enum.map(children, &elem(&1, 0)))
+    Bm.Pi.stop(ctx.id)
+    assert Bm.Proc.group_members([pgid | groups]) == []
   end
 
   # Sanitized copy of the raw RPC stream for replay tests: local paths are replaced.

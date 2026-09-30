@@ -5,8 +5,8 @@ defmodule Bm.Pi.Profile do
 
   | Role | Extensions | Tools |
   |---|---|---|
-  | `:planner` | zro, bm_planner | read-only + `propose_task`, `close_plan` |
-  | `:reader` | zro, bm_worker | read-only + `submit_result` |
+  | `:planner` | zro, bm_planner, bm_guard | read-only + `bash` (read-only policy) + `propose_plan`, `propose_task`, `close_plan` |
+  | `:reader` | zro, bm_worker, bm_guard | read-only + `bash` (read-only policy) + `submit_result` |
   | `:writer` | zro, bm_worker, bm_guard | + `edit`, `write`, `bash` |
 
   Workers are **Fabric-free** (decision D16): live qualification showed that `--tools` does not
@@ -26,19 +26,22 @@ defmodule Bm.Pi.Profile do
   @mutating_tools ~w(edit write bash)
 
   @roles %{
+    # Planner and reader run commands too (tests, git log, builds), with the guard asking the
+    # BEAM in read-only policy mode; the snapshot after the session catches what the policy
+    # cannot (plan step 6.6.5).
     planner: %{
       fabric?: false,
-      extensions: ~w(bm_planner),
-      tools: @read_tools ++ ~w(propose_task close_plan),
-      required: ~w(propose_task close_plan),
-      reports: ~w(profile)
+      extensions: ~w(bm_planner bm_guard),
+      tools: @read_tools ++ ~w(bash propose_plan propose_task close_plan),
+      required: ~w(bash propose_plan propose_task close_plan),
+      reports: ~w(profile guard)
     },
     reader: %{
       fabric?: false,
-      extensions: ~w(bm_worker),
-      tools: @read_tools ++ ~w(submit_result),
-      required: ~w(submit_result),
-      reports: ~w(profile)
+      extensions: ~w(bm_worker bm_guard),
+      tools: @read_tools ++ ~w(bash submit_result),
+      required: ~w(bash submit_result),
+      reports: ~w(profile guard)
     },
     writer: %{
       fabric?: false,

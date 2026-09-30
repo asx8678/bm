@@ -15,6 +15,13 @@ defmodule Bm.Application do
       # pi agents: one Bm.Pi.Agent per agent id, found through the registry
       {Registry, keys: :unique, name: Bm.Pi.Registry},
       {DynamicSupervisor, name: Bm.Pi.AgentSupervisor, strategy: :one_for_one},
+      # Workspace coordinators: one per checkout, found by canonical path
+      {Registry, keys: :unique, name: Bm.Workspace.Registry},
+      {DynamicSupervisor, name: Bm.Workspace.Supervisor, strategy: :one_for_one},
+      # Blocking work of coordinators (starting/stopping pi, verification)
+      {Task.Supervisor, name: Bm.TaskSupervisor},
+      # Attempts left in flight by the previous run of the app (docs/ARCHITECTURE.md §11)
+      recovery(),
       # Start to serve requests, typically the last entry
       BmWeb.Endpoint
     ]
@@ -23,6 +30,12 @@ defmodule Bm.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: Bm.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp recovery do
+    if Application.get_env(:bm, :recover_on_start, true),
+      do: {Task, &Bm.Workspace.Recovery.run/0},
+      else: {Task, fn -> :ok end}
   end
 
   # Tell Phoenix to update the endpoint configuration

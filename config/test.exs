@@ -40,6 +40,9 @@ config :phoenix_live_view,
 config :phoenix,
   sort_verified_routes_query_params: true
 
+# Recovery at start needs the database outside the test sandbox; tests call it directly.
+config :bm, recover_on_start: false
+
 # Replace pi with a scripted stand-in that speaks the same RPC protocol
 config :bm, Bm.Pi, command: ["node", Path.expand("../test/support/fake_pi.mjs", __DIR__)]
 

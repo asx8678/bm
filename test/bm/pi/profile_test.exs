@@ -12,14 +12,18 @@ defmodule Bm.Pi.ProfileTest do
   test "each role builds an explicit, restricted command" do
     planner = Profile.build(:planner)
     assert "--no-extensions" in planner.command
-    assert tools(planner) == ~w(read grep find ls propose_task close_plan)
+    assert tools(planner) == ~w(read grep find ls bash propose_plan propose_task close_plan)
     assert planner.env == %{}
 
     writer = Profile.build(:writer)
     assert ~w(edit write bash submit_result) -- tools(writer) == []
     assert writer.env == %{}
     assert Enum.any?(writer.command, &String.ends_with?(&1, "bm_guard.ts"))
-    refute Enum.any?(Profile.build(:reader).command, &String.ends_with?(&1, "bm_guard.ts"))
+    # Planner and reader run bash too, so they carry the guard (read-only policy, 6.6.5).
+    for role <- [:reader, :planner] do
+      assert Enum.any?(Profile.build(role).command, &String.ends_with?(&1, "bm_guard.ts"))
+      refute "edit" in tools(Profile.build(role))
+    end
   end
 
   test "every role starts and passes its check" do
@@ -31,15 +35,18 @@ defmodule Bm.Pi.ProfileTest do
 
   test "a tool outside the profile fails the check" do
     profile = Profile.build(:planner)
-    reports = %{"profile" => %{"tools" => ~w(read propose_task close_plan bash)}}
 
-    assert {:error, {:unexpected_tools, ["bash"]}} =
+    reports = %{
+      "profile" => %{"tools" => ~w(read propose_plan propose_task close_plan bash edit)}
+    }
+
+    assert {:error, {:unexpected_tools, ["edit"]}} =
              Profile.verify({:ok, %{model: "Fake Model", reports: reports}}, profile)
   end
 
   test "a missing required tool fails the check" do
     profile = Profile.build(:reader)
-    reports = %{"profile" => %{"tools" => ~w(read grep)}}
+    reports = %{"profile" => %{"tools" => ~w(read grep bash)}}
 
     assert {:error, {:missing_tools, ["submit_result"]}} =
              Profile.verify({:ok, %{model: "Fake Model", reports: reports}}, profile)
@@ -47,7 +54,7 @@ defmodule Bm.Pi.ProfileTest do
 
   test "a different model fails the check" do
     profile = Profile.build(:reader)
-    reports = %{"profile" => %{"tools" => ~w(read submit_result)}}
+    reports = %{"profile" => %{"tools" => ~w(read bash submit_result)}}
 
     assert {:error, {:model_mismatch, "Other"}} =
              Profile.verify({:ok, %{model: "Other", reports: reports}}, profile)
