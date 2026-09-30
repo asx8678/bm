@@ -578,7 +578,10 @@ suite (199 tests) and a live goal run with the real model (below).
   results in one batch when nothing else can run; each delivery reopens planning (a wave).
   A re-plan is the same key proposed again (revision 2, once); a second failure fails the run.
 - 7.7: `tasks.check` runs after a passing verify command; a failing check holds the lane
-  (`check_failed` / `check_timeout`), its output is in `verify.check`.
+  (`check_failed` / `check_timeout`), its output is in `verify.check`. Found in the final review:
+  `bm_planner.ts` had no `check` parameter, so the real model could not set one; added. Live:
+  a goal asking for checks produced 2 tasks, each with a check that ran after verification and
+  passed (`verify.check.exit == 0`), run done ($0.05).
 - 7.8: `max_rejections` (5 per wave), `max_waves` (5), a reminder then `plan_timeout` (5 min)
   for an idle open plan, `turn_timeout` (15 min).
 - 7.9: done when the plan is closed and every latest task is accepted (failed otherwise);
@@ -644,6 +647,8 @@ gate ran as live scenarios from a scratch script with the real model.
   reading); the next optional work is cutting per-goal overhead: warm worker reuse (start-up per
   task) and ending a run without a final "all done" planner turn when the plan is closed and
   every task was accepted (each benchmark run spent its second wave on it).
+- After the review: `mix test --only live` (qualification 4/4 + milestone B gate) passes
+  against the current coordinator.
 - 8.4 review, fixed: an idle planner never noticed a coordinator that had died (it now re-checks
   every 5 s and restarts the coordinator); with the budget spent and the plan open, the
   scheduler could still send a paid reminder turn (it now ends the run); a single task started

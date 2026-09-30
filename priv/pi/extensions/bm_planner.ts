@@ -28,6 +28,13 @@ const proposeTask = defineTool({
 		),
 		depends_on: Type.Optional(Type.Array(Type.String(), { description: "Keys of tasks that must be accepted first." })),
 		done_when: Type.String({ description: "Concrete check that proves the task is complete." }),
+		check: Type.Optional(
+			Type.String({
+				description:
+					"Optional shell command BM runs after the task (after the verify command); it must exit 0 for the " +
+					"task to be accepted. Use it to make done_when executable, e.g. `python3 test_shapes.py`.",
+			}),
+		),
 	}),
 	async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 		const reply = await bmRequest(ctx, "propose_task", params);
