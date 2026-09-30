@@ -24,6 +24,10 @@ defmodule Bm.Runs.Run do
     # The verify command's result on the checkout before the first attempt (6.6.3):
     # "exit", "output", "timeout", and "changed" (files it changed).
     field :baseline_verify, :map
+    # Goal runs only (plan 7.3): planner session, waves, summary, log and process groups.
+    field :planner, :map
+    # Why the run is paused, failed or cancelled.
+    field :status_reason, :string
     field :finished_at, :utc_datetime_usec
 
     has_many :tasks, Bm.Runs.Task
@@ -37,7 +41,7 @@ defmodule Bm.Runs.Run do
   @doc "Changeset for a new run; `workspace_id` is set by the caller, not cast."
   def create_changeset(run, attrs) do
     run
-    |> cast(attrs, [:goal, :plan_open, :budget_usd, :baseline])
+    |> cast(attrs, [:goal, :plan_open, :budget_usd, :baseline, :planner])
     |> validate_required([:goal])
     |> validate_number(:budget_usd, greater_than: 0)
     |> unique_constraint(:workspace_id, name: :runs_one_unfinished_per_workspace)
