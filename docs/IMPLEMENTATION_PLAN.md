@@ -1533,3 +1533,21 @@ cancelled. $0.032 and $0.023.
 
 **Status: Phase 26 done (2026-09-30).** Total live cost $0.35. The approval inbox is still seen with
 the fake pi only (no real extension asks).
+
+---
+
+## Phase 27: housekeeping
+
+Scoped 2026-09-30 from a check of what else needs doing (after Phase 26, nothing is unfinished).
+
+**27.1 README.** The README was Phoenix's default; it now says what BM is, how to set it up and
+start it, the terminal commands, the safety model, and where the docs are.
+
+**27.2 Stale docs.** ARCHITECTURE.md §12 listed only phases up to 8; BENCHMARK_GOALS.md holds the
+Phase 8 numbers (the 9.4 re-run was stopped) without saying so.
+
+**27.3 Leftovers.** Merged local branches deleted; throwaway sandbox clones in /tmp removed.
+
+Waiting for the user: running the existing test suite (not run since Phase 15.2; the user's
+instruction is no tests unless approved), and deleting BM's own scratch runs from the dev
+database (125 of 131 runs point at temporary directories).
