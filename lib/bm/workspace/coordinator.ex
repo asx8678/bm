@@ -45,6 +45,10 @@ defmodule Bm.Workspace.Coordinator do
     tool_timeout: 10 * 60_000,
     # Another extension's question to the user waits this long, then is declined (plan 24.1).
     approval_timeout: 2 * 60_000,
+    # Supervisor (plan 25.1): a writing attempt this old with this many tool calls and no changed
+    # file is told once, and cancelled if it still changes nothing after as long again.
+    progress_after: 6 * 60_000,
+    progress_calls: 30,
     repeat_refuse: 4,
     repeat_cancel: 6,
     # The review prompt (plan 14.1); tests or scripts can replace it.
@@ -261,7 +265,12 @@ defmodule Bm.Workspace.Coordinator do
       # Monitor of the goal run's planner process.
       planner_ref: nil,
       # Other extensions' questions to the user from the running worker (plan 24.1).
-      approvals: %{}
+      approvals: %{},
+      # Supervisor (plan 25.1): the attempt's tool calls, files it was told about, and
+      # nil | {:steered, at} | :changed for the no-progress check.
+      tool_calls: 0,
+      steered: MapSet.new(),
+      progress: nil
     }
 
     # Attempts left in flight by an earlier coordinator have nobody looking after them.
@@ -328,12 +337,16 @@ defmodule Bm.Workspace.Coordinator do
     bash_ran?: false,
     pending_review: nil,
     planner_ref: nil,
-    approvals: %{}
+    approvals: %{},
+    tool_calls: 0,
+    steered: MapSet.new(),
+    progress: nil
   }
 
+  # Checked on the newest late field: a state without it lacks some of the others too.
   def handle_call(message, from, state)
       when is_tuple(message) and elem(message, 0) in [:run_task, :start_goal] and
-             not is_map_key(state, :pending_review) do
+             not is_map_key(state, :progress) do
     handle_call(message, from, Map.merge(@late_fields, state))
   end
 
@@ -615,6 +628,7 @@ defmodule Bm.Workspace.Coordinator do
   defp assign_attempt(state, %{workspace: workspace, run: run, task: task, attempt: attempt}) do
     agent_id = "attempt-#{attempt.id}"
     Bm.Pi.subscribe(agent_id)
+    state = Map.merge(state, %{tool_calls: 0, steered: MapSet.new(), progress: nil})
 
     %{
       state
@@ -1203,6 +1217,9 @@ defmodule Bm.Workspace.Coordinator do
   defp worker_event(%{phase: :running} = state, _event, %{status: :exited}),
     do: begin_settling(%{state | flags: ["pi_exited" | state.flags]})
 
+  defp worker_event(state, {:tool_start, _id, _name, _detail}, _summary),
+    do: Map.update(state, :tool_calls, 1, &(&1 + 1))
+
   defp worker_event(state, _event, _summary), do: state
 
   ## Questions for the planner (12.2, D24)
@@ -1313,8 +1330,109 @@ defmodule Bm.Workspace.Coordinator do
         request_cancel(state, "tool_timeout")
 
       true ->
-        schedule_limits_check(state)
+        case check_progress(state) do
+          %{cancel?: true} = state -> state
+          state -> schedule_limits_check(state)
+        end
     end
+  end
+
+  ## Supervisor (25.1)
+
+  # A write outside the task's declared files is allowed and flagged at the end, as before; the
+  # worker is also told at once, once per file.
+  defp steer_drift(
+         state,
+         %{op: "authorize", payload: %{"tool" => tool, "input" => %{"path" => path}}},
+         %{"allow" => true}
+       )
+       when tool in ["edit", "write"] and is_binary(path) do
+    relative = relative_path(state.root, path)
+    writes = state.task.writes || []
+    steered = Map.get(state, :steered, MapSet.new())
+
+    if writes == [] or relative in writes or MapSet.member?(steered, relative) do
+      state
+    else
+      steer(
+        state,
+        "#{relative} is not among this task's files (#{Enum.join(writes, ", ")}). Change it " <>
+          "only if the task needs it; otherwise leave it and stay on the task."
+      )
+
+      Map.put(state, :steered, MapSet.put(steered, relative))
+    end
+  end
+
+  defp steer_drift(state, _request, _outcome), do: state
+
+  # A writing attempt that ran a while with many tool calls but changed no file is told once;
+  # if it still changes nothing after as long again, it is cancelled.
+  defp check_progress(%{attempt: %{role: :writer}} = state) do
+    after_ms = Map.get(state.config, :progress_after, 6 * 60_000)
+    calls = Map.get(state, :tool_calls, 0)
+
+    since_steer =
+      case Map.get(state, :progress) do
+        {:steered, at} -> now() - at
+        _ -> nil
+      end
+
+    cond do
+      Map.get(state, :progress) == :changed ->
+        state
+
+      calls < Map.get(state.config, :progress_calls, 30) or now() - state.running_since < after_ms ->
+        state
+
+      is_integer(since_steer) and since_steer < after_ms ->
+        state
+
+      changed_any?(state) ->
+        Map.put(state, :progress, :changed)
+
+      since_steer == nil ->
+        span =
+          if after_ms >= 60_000,
+            do: "#{div(after_ms, 60_000)} minutes",
+            else: "#{div(after_ms, 1000)} seconds"
+
+        steer(
+          state,
+          "After #{span} and #{calls} tool calls this attempt has changed no file. " <>
+            "Make the change the task asks for now, or if you are stuck, submit_result with " <>
+            "status blocked and say what blocks you."
+        )
+
+        Map.put(state, :progress, {:steered, now()})
+
+      true ->
+        request_cancel(state, "no progress: #{calls} tool calls and no changed file")
+    end
+  end
+
+  defp check_progress(state), do: state
+
+  defp changed_any?(state) do
+    with {:ok, tree} <- Git.snapshot(state.root),
+         {:ok, entries} <- Git.diff(state.root, state.attempt.tree_before, tree) do
+      entries != []
+    else
+      # Can't tell: no action against the worker.
+      _ -> true
+    end
+  end
+
+  defp steer(state, text) do
+    agent_id = state.agent_id
+
+    Task.start(fn ->
+      try do
+        Bm.Pi.steer(agent_id, text)
+      catch
+        :exit, _ -> :ok
+      end
+    end)
   end
 
   defp handle_request(state, request) do
@@ -1322,6 +1440,7 @@ defmodule Bm.Workspace.Coordinator do
 
     {outcome, state} = handle_request_once(state, request)
     state = note_allowed(state, request, outcome)
+    state = steer_drift(state, request, outcome)
 
     if repeats(state, request) >= state.config.repeat_cancel,
       do: {outcome, request_cancel(state, "repeating the same call")},

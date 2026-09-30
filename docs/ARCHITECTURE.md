@@ -283,6 +283,11 @@ unless a shell reads it (plan 19.2). In goal runs the reviewer may run such
 print-only commands; anything that changes during the review becomes part of the attempt,
 which is held for the user (flag `reviewer_wrote`). It is a safety net, not a sandbox.
 
+A rule-based supervisor (plan 25) watches attempts through the same limits check: a write outside the task's
+declared files, or a writing attempt that changes no file for 6 minutes despite many tool calls, gets one
+steering message (pi's `steer`); the second case is then cancelled. A goal run whose last 3 attempts ended
+without an accepted task is paused for the user.
+
 ---
 
 ## 9. Data model
