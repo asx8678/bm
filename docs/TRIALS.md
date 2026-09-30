@@ -50,3 +50,23 @@ user's `README.md` line is intact after all four runs; no attempt was held, flag
   "done"; now `close_plan(blocked: true)` → failed with the planner's reason (run 70).
 - **Note for users:** BM never commits. Commit or stash accepted changes before the next goal that
   touches the same files, or BM will treat them as your uncommitted work and leave them alone.
+
+## Sandbox repository (plan 17, 2026-09-30)
+
+At the user's request, a new repository made for trying BM: `~/projects/bm-sandbox`, a small
+dependency-free Node package (`slugify`, `wordCount`, tests with `node --test`). Verify command:
+`node --test`. Goals started with `mix bm.goal`, each accepted change committed with
+`mix bm.commit`.
+
+| Run | Goal | Tasks | Outcome | Cost |
+|---|---|---|---|---|
+| 77 | Fix `wordCount` for runs of whitespace, tabs, newlines, surrounding whitespace | 1 | done, review approved; committed | $0.035 |
+| 78 | `truncate(text, max)` at a word boundary with an ellipsis, plus a `bin/textkit.js` CLI and README section | 2 (CLI after truncate) | done, both reviews approved; committed | $0.095 |
+| 79 | Bug found by hand in 78: `truncate('abcdef', 0)` returned 6 characters; fix it and reject negative or non-integer `max` | 1 | done, review approved; committed | $0.038 |
+
+- Every change was checked by hand: code read, the CLI run on sample input (bad usage exits 1),
+  tests 2 → 19 → 21, all passing.
+- **Finding:** run 78's `truncate` passed its tests, the verify command and the reviewer, but broke
+  its own contract for `max = 0`. BM's gates only catch what the tests and the reviewer think of;
+  edge cases still need a human look or a goal that names them. Run 79 fixed it cleanly.
+- Total: 3 goals, 4 tasks, $0.17, no attempt held or failed; HEAD moved only through `mix bm.commit`.
