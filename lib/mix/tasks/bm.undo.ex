@@ -2,10 +2,11 @@ defmodule Mix.Tasks.Bm.Undo do
   @shortdoc "Put one task's files back (paused or finished run)"
 
   @moduledoc """
-  Puts a task's files back as they were before the run did it (plan 15.1, decision D26).
-  Talks to the running BM server and refuses with a readable message when the coordinator
-  refuses: undoing only works while the run is paused or finished and no dependent task was
-  accepted after it.
+  Puts a task's files back as they were before the run did it, like the run page's Undo this
+  task (plans 13.3, 23.1, decision D28; the command: 28.3). Works in a finished run, a paused
+  goal run, and an active single-task run with no attempt running, when no accepted task depends
+  on it; a goal run's planner hears of it. Talks to the running BM server and refuses with a
+  readable message when the coordinator refuses.
 
       mix bm.undo BM-68 my_task_key
   """

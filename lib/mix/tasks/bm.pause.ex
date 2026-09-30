@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Bm.Pause do
   @shortdoc "Pause an active goal run"
 
   @moduledoc """
-  Pauses an active goal run (plan 15.1, decision D26). Talks to the running BM server and
-  refuses with a readable message when the coordinator refuses: pausing only works on an
-  active goal run.
+  Pauses an active goal run, like the run page's Pause (plans 23.1, 26.4; the command: 28.3):
+  its planner stops and nothing new starts; an attempt that is running finishes first. Talks
+  to the running BM server and refuses with a readable message when the coordinator refuses:
+  pausing only works on an active goal run.
 
       mix bm.pause BM-68
   """

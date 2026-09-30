@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Bm.Resume do
   @shortdoc "Resume a paused goal run's planning"
 
   @moduledoc """
-  Resumes a paused goal run's planning (plan 15.1, decision D26). Talks to the running BM
-  server and refuses with a readable message when the coordinator refuses: resuming only
-  works on a paused goal run.
+  Resumes a paused goal run's planning in a new planner session, like the run page's Resume
+  planning (plans 7.9, 22.1; the command: 28.3); a run whose plan is closed goes on without a
+  planner turn. Talks to the running BM server and refuses with a readable message when the
+  coordinator refuses: resuming only works on a paused goal run.
 
       mix bm.resume BM-68
   """
