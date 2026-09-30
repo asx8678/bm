@@ -1540,6 +1540,17 @@ defmodule Bm.Workspace.Coordinator do
 
           finish(state, :failed, Map.put(attrs, :error, error))
 
+        # Nothing changed but the task has a check (a read-only task whose point is running it,
+        # found in the 15.3 trial): run the check alone; the verify command can't show anything
+        # new without changes.
+        writes == [] and is_binary(state.task.check) ->
+          {:ok, attempt} = Runs.transition_attempt(attempt, :verifying, attrs)
+
+          start_verification(
+            broadcast_attempt(%{state | attempt: attempt, phase: :verifying}),
+            :check_only
+          )
+
         writes == [] ->
           # Nothing changed, so there is nothing to verify or checkpoint.
           {:ok, attempt} = Runs.transition_attempt(attempt, :verifying, attrs)
@@ -1560,6 +1571,16 @@ defmodule Bm.Workspace.Coordinator do
   defp add_flag(flags, false, _flag), do: flags
 
   ## Verification (4.7)
+
+  defp start_verification(state, :check_only) do
+    coordinator = self()
+    %{root: root, task: %{check: check}, config: %{verify_timeout: timeout}} = state
+
+    start_job(state, :verify, fn ->
+      check_result = Bm.Workspace.Verify.run(check, root, timeout, coordinator)
+      %{"exit" => 0, "output" => "", "skipped" => "no changes", "check" => check_result}
+    end)
+  end
 
   defp start_verification(state) do
     coordinator = self()
