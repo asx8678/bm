@@ -301,6 +301,7 @@ defmodule Bm.Workspace.Coordinator do
       {:ok, run} = Runs.finish_run(run, status, reason)
       if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
       broadcast_run(state, run)
+      state = prune_checkpoints(state)
       {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
     else
       {:reply, {:error, :lane_busy}, state}
@@ -409,6 +410,7 @@ defmodule Bm.Workspace.Coordinator do
 
     {:ok, run} = Runs.finish_run(run, status, reason)
     broadcast_run(state, run)
+    state = prune_checkpoints(state)
     {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
   end
 
@@ -543,6 +545,35 @@ defmodule Bm.Workspace.Coordinator do
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
+  end
+
+  ## Pruning checkpoints
+
+  @keep_checkpoint_runs 20
+
+  # After a run ends: checkpoint refs of the workspace's newest runs are kept (the workspace
+  # setting "keep_checkpoint_runs", default #{@keep_checkpoint_runs}); older runs' refs are
+  # deleted in the background. Runs never share checkpoint commits, so this can't affect a
+  # kept run.
+  defp prune_checkpoints(state) do
+    %{root: root, workspace: workspace} = state
+    keep = workspace.settings["keep_checkpoint_runs"] || @keep_checkpoint_runs
+
+    Task.Supervisor.start_child(Bm.TaskSupervisor, fn ->
+      kept = workspace |> Runs.list_run_ids() |> Enum.take(keep) |> MapSet.new()
+
+      for run_id <- Git.checkpoint_runs(root), not MapSet.member?(kept, run_id) do
+        case Git.delete_checkpoints(root, run_id) do
+          :ok ->
+            Logger.info("pruned the checkpoints of run #{run_id} in #{root}")
+
+          error ->
+            Logger.warning("could not prune run #{run_id}'s checkpoints: #{inspect(error)}")
+        end
+      end
+    end)
+
+    state
   end
 
   defp maybe_set_verify_command(workspace, %{verify_command: command}) when is_binary(command),

@@ -201,6 +201,48 @@ defmodule Bm.Workspace.Git do
 
   def checkpoint(_repo, _tree, _parent, ref, _message), do: {:error, {:not_a_bm_ref, ref}}
 
+  ## Pruning checkpoints
+
+  @doc "Ids of the runs that have checkpoint refs (`refs/bm/runs/<id>/...`)."
+  def checkpoint_runs(repo) do
+    case git(repo, ["for-each-ref", "--format=%(refname)", "refs/bm/runs/"]) do
+      {:ok, out} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(fn ref ->
+          case String.split(ref, "/") do
+            ["refs", "bm", "runs", id | _] -> [String.to_integer(id)]
+            _ -> []
+          end
+        end)
+        |> Enum.uniq()
+
+      {:error, _} ->
+        []
+    end
+  rescue
+    ArgumentError -> []
+  end
+
+  @doc """
+  Deletes every checkpoint ref of run `run_id` in one `update-ref --stdin` transaction. Their
+  commits and trees become unreachable and are removed by git's own garbage collection later.
+  Only refs under `refs/bm/runs/<run_id>/` are touched.
+  """
+  def delete_checkpoints(repo, run_id) when is_integer(run_id) do
+    with {:ok, out} <-
+           git(repo, ["for-each-ref", "--format=%(refname)", "refs/bm/runs/#{run_id}/"]) do
+      case String.split(out, "\n", trim: true) do
+        [] ->
+          :ok
+
+        refs ->
+          git(repo, ["update-ref", "--stdin"], input: Enum.map_join(refs, "", &"delete #{&1}\n"))
+          |> ok()
+      end
+    end
+  end
+
   ## Conditional restore
 
   @doc """

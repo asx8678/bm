@@ -52,12 +52,24 @@ defmodule BmWeb.RunLive do
        watching: MapSet.new(),
        worker: nil,
        worker_tool: nil,
+       checkpoints_pruned?: pruned?(run, root, attempts),
        graph: if(run.planner, do: RunGraph.build(run, Runs.latest_tasks(run)))
      )
      |> stream(:tasks, if(run.planner, do: Runs.list_tasks(run), else: []))
      |> stream(:attempts, Enum.map(attempts, &decorate(&1, root)))
      |> then(&if(connected?(&1), do: watch_live(&1, List.last(attempts)), else: &1))}
   end
+
+  # A finished run whose checkpoint refs are gone (pruned after newer runs, see the coordinator).
+  defp pruned?(%{status: status}, root, attempts) when status in [:done, :failed, :cancelled] do
+    case Enum.find_value(attempts, & &1.checkpoint_ref) do
+      nil -> false
+      # A repository that no longer exists was not pruned by BM.
+      ref -> File.dir?(root) and Git.rev_parse(root, ref) == nil
+    end
+  end
+
+  defp pruned?(_run, _root, _attempts), do: false
 
   ## Live activity (canvas and action bar)
 
@@ -429,6 +441,7 @@ defmodule BmWeb.RunLive do
           run={@run}
           root={@root}
           form={@form}
+          checkpoints_pruned?={@checkpoints_pruned?}
           goal_run?={@goal_run?}
           planner_phase={@planner_phase}
           worker_tool={@worker_tool}
@@ -662,6 +675,7 @@ defmodule BmWeb.RunLive do
   attr :goal_run?, :boolean, default: false
   attr :planner_phase, :atom, default: nil
   attr :worker_tool, :map, default: nil
+  attr :checkpoints_pruned?, :boolean, default: false
 
   defp action_bar(assigns) do
     ~H"""
@@ -705,8 +719,13 @@ defmodule BmWeb.RunLive do
         <% :finished -> %>
           <div class="flex flex-wrap items-center gap-3">
             <p class="min-w-0 flex-1 text-xs text-bm-muted">
-              This run is finished. Accepted changes are in your working tree and checkpointed
-              under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+              <%= if @checkpoints_pruned? do %>
+                This run is finished. Its checkpoints were pruned after newer runs; accepted
+                changes stay in your working tree, and old diffs may be gone.
+              <% else %>
+                This run is finished. Accepted changes are in your working tree and checkpointed
+                under <code class="font-mono">refs/bm/runs/{@run.id}/</code>.
+              <% end %>
             </p>
             <.link
               id="new-task-link"

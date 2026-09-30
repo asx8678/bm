@@ -28,6 +28,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 7 | Planner | 7.1–7.9 | goal → plan → sequential tasks with the fake pi |
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
+| 10 | Optional: seeing a run | 10.1–10.3 | live run canvas, live worker activity, checkpoint pruning |
 
 ---
 
@@ -711,3 +712,36 @@ These three fixes are compiled but **not verified by a test or a live run** (at 
 request). Open: a wrong planner check still holds the lane; delivering a failed *check* to the
 planner (instead of holding) would let it correct its own check, but changes the "failed
 verification waits for the user" rule and needs a decision first.
+
+---
+
+## Phase 10 (optional): seeing a run
+
+Chosen 2026-09-30 from FEATURES.md (usability); the user asked for no tests, so each step was
+checked by compiling (`--warnings-as-errors`), in the browser, or by hand.
+
+**10.1 Run canvas.** A goal run's page shows a Svelte Flow canvas (`#run-canvas`, the chat
+page's `FlowCanvas` hook): the planner (the chat page's agent node, with side handles), one
+`TaskNode` per task key, edges from dependencies (from the planner for tasks without any),
+laid out left to right by dependency depth (`BmWeb.RunGraph`). It redraws on task, attempt and
+run events, keeps nodes the user dragged, and refits when nodes are added. A paused or ended
+run's planner shows Paused / Finished whatever its last pi event said.
+
+**10.2 Live worker activity.** The run page subscribes to the planner's and the running
+worker's pi sessions. The running task's node and the action bar show the tool running now, or
+the last one while the model thinks, the number of tool calls, and tokens. (Tools often run for
+milliseconds, so "last" is what one mostly sees.) The planner now broadcasts the end of its
+turns, so the panel says "waiting while tasks run" instead of "thinking".
+
+**10.3 Checkpoint pruning.** When a run ends, the coordinator keeps the checkpoint refs of the
+workspace's newest runs (workspace setting `keep_checkpoint_runs`, default 20) and deletes
+older runs' `refs/bm/runs/<id>/*` in one `update-ref --stdin` transaction, in the background.
+Runs never share checkpoint commits, so kept runs are unaffected. A pruned run's page says so.
+
+**Status: done (2026-09-30).** Checked live: two small goal runs through the form (runs 46 and
+47, ≈$0.03 each) showed the canvas refitting as tasks appeared, the running task glowing with
+"Last: submit_result …, 3 tool calls" and tokens, and a finished planner as Finished
+(`docs/screenshots/goal-run-canvas.png`). Pruning was checked by hand on a throwaway repository
+(only the chosen run's refs deleted, branches untouched); the automatic trigger after a run ends
+was not seen live (it needs more than 20 runs in one workspace). Known cosmetic gap: an edge that
+skips a column can run behind the node in between.

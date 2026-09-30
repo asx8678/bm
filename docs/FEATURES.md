@@ -148,11 +148,11 @@ Each has a precondition; don't start one before it holds.
 
 | Feature | Size |
 |---|---|
-| Live **canvas** of planner, workers and tasks (Svelte Flow canvas exists on the chat page) | M |
+| Live **canvas** of planner, workers and tasks — **done 2026-09-30** (plan 10.1) | M |
 | Run history and search | M |
 | Short labels for runs and agents (`BM-12`) | S |
 | Transcript link per attempt (pi `export_html`) | S |
-| Pruning old `refs/bm/…` checkpoints | S |
+| Pruning old `refs/bm/…` checkpoints — **done 2026-09-30** (plan 10.3) | S |
 | CLI client attached to runs | M |
 | Front "questioning" agent that sharpens vague requests | M |
 

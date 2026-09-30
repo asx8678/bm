@@ -100,6 +100,13 @@ defmodule Bm.Runs do
     Repo.one(from r in Run, where: r.id == ^id, preload: :workspace)
   end
 
+  @doc "Ids of the workspace's runs, newest first."
+  def list_run_ids(%Workspace{id: workspace_id}) do
+    Repo.all(
+      from r in Run, where: r.workspace_id == ^workspace_id, order_by: [desc: r.id], select: r.id
+    )
+  end
+
   @doc "Every known workspace, most recently used first."
   def list_workspaces do
     Repo.all(from w in Workspace, order_by: [desc: w.updated_at, desc: w.id])
