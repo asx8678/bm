@@ -35,6 +35,9 @@ defmodule Bm.Prompts do
     - Do not use git to change the repository (no add, commit, checkout, stash, reset, ...).
       BM records, verifies and checkpoints your changes itself.
     - Do not start background processes that keep running after you finish.
+    - Don't install, update or remove dependencies or otherwise repair the environment. If a
+      command fails for environment reasons (missing or outdated packages, tools, services),
+      say so in your summary; use status blocked if that stops you from finishing.
     - Some files contain the user's uncommitted work and are protected. If a change is refused,
       don't work around it: report the task as blocked and say why.
     - If the task is genuinely ambiguous (two reasonable readings that lead to different code),
