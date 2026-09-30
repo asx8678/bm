@@ -71,9 +71,11 @@ defmodule Mix.Tasks.Bm.Goal do
           )
         end
 
+        # How often in a row the run was seen paused by a restart, still deciding (see report/3).
+        recovering = if run["status"] == "paused", do: Map.get(seen, :recovering, 0), else: 0
         seen = Map.new(lines, &{&1, true})
         seen = if waiting?, do: Map.put(seen, :waiting, true), else: seen
-        report(id, run, seen)
+        report(id, run, Map.put(seen, :recovering, recovering))
 
       {:unreachable, message} ->
         now = System.monotonic_time(:millisecond)
@@ -104,14 +106,27 @@ defmodule Mix.Tasks.Bm.Goal do
     )
   end
 
-  defp report(_id, %{"status" => "paused"} = run, _seen) do
-    Mix.shell().info(
-      @bell <> "#{run["label"]} paused: #{run["reason"]}\nResume or finish it at #{run["url"]}"
-    )
+  defp report(id, %{"status" => "paused"} = run, seen) do
+    if recovering?(run["reason"]) and seen.recovering < 5 do
+      Process.sleep(@poll)
+      follow(id, %{seen | recovering: seen.recovering + 1})
+    else
+      Mix.shell().info(
+        @bell <> "#{run["label"]} paused: #{run["reason"]}\nResume or finish it at #{run["url"]}"
+      )
+    end
   end
 
   defp report(id, _run, seen) do
     Process.sleep(@poll)
     follow(id, seen)
   end
+
+  # Right after a restart, BM's recovery pauses a run whose planner was lost, then resumes it by
+  # itself or adds why not ("; not resumed by itself: …", "; resuming failed: …"; both strings
+  # come from Bm.Workspace.Recovery). A pause without either may be that moment: look again.
+  defp recovering?("planner lost: BM stopped" <> rest),
+    do: not String.contains?(rest, ["not resumed", "resuming failed"])
+
+  defp recovering?(_reason), do: false
 end

@@ -1285,5 +1285,17 @@ queued the task, resumed planning, the task ran again and was accepted, review a
 the run; it printed "BM does not answer (restarting?)…", then "BM answers again." and the rest of
 the run through "done" ($0.040). Both runs' changes checked by hand (tests 50 and 56, own probes).
 
+Review fixes: recovery runs next to the web server's start, so `mix bm.goal` could see a run in
+its short "planner lost" pause before it resumes, and stop there. It now looks again (up to 5
+polls) at a pause whose reason is recovery's bare "planner lost: BM stopped…" without "; not
+resumed by itself" or "; resuming failed" (checked by reading and on those reason strings). The
+reason for a lane held before the restart no longer says "interrupted". Also changed: when an
+attempt turns out not to be orphaned (`:stale`), recovery leaves its task and run alone (it used
+to mark the task failed and could pause the run).
+
+Not seen live: a restart during the planner's first turn (no attempt yet; same path, lane free →
+resume) and during verification or review (the attempt has changes → paused for the user). Single-task
+runs are unchanged: an interrupted task fails and the user runs it again.
+
 **Status: Phase 21 done (2026-09-30).** Not done: a resumed run whose plan was already closed still
-spends one planner turn before its queued task runs (≈$0.014 here).
+spends one planner turn before its queued task runs (≈$0.014 in each of runs 104 and 105).
