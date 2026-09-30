@@ -1551,3 +1551,9 @@ Phase 8 numbers (the 9.4 re-run was stopped) without saying so.
 Waiting for the user: running the existing test suite (not run since Phase 15.2; the user's
 instruction is no tests unless approved), and deleting BM's own scratch runs from the dev
 database (125 of 131 runs point at temporary directories).
+
+**Status 27.1–27.3 (2026-09-30).** README.md rewritten (commands checked against `mix help`);
+ARCHITECTURE.md §12 has a summary of phases 9–26 and says how they were checked; BENCHMARK_GOALS.md
+says its numbers are from Phase 8 and how to refresh them; ten merged local branches deleted
+(`git branch -d`); the throwaway sandbox clones in /tmp removed (18, 18b, 20a, 20b, 21; their runs'
+pages still load). The two items that wait for the user are unchanged.
