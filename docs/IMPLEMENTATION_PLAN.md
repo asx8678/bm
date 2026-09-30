@@ -1316,8 +1316,8 @@ session knows the run. A plan that was still open resumes with its turn as befor
 **22.2 Scratch runs finished.** Runs 80, 83 and 100–103 (BM's own checks in temporary
 repositories, left paused) were finished as cancelled, with a reason saying so.
 
-**Status 22.1 (2026-09-30).** `Bm.Prompts.planner_resume/3` is now `planner_resumed/3` (goal,
-repository, tasks so far) plus the instruction to continue; a planner started with `resume: true`
+**Status 22.1 (2026-09-30).** `Bm.Prompts.planner_resume/3` (still used for an open plan) splits
+into `planner_resumed/3` (goal, repository, tasks so far) plus the instruction to continue; a planner started with `resume: true`
 on a closed plan logs a note, goes idle and schedules at once, and its first later turn sends
 `planner_resumed/3` ahead of its own text (the log keeps the turn's text and a note, since
 entries are cut at 2,000 characters). Checked with the fake pi across two BEAMs (run 107): no turn
@@ -1326,6 +1326,9 @@ first (the fake planner's echo starts with "You are the BM planner"), the remind
 without. Live (run 108, sandbox clone, dev server restarted while the worker ran): no planner turn
 after the resume, the task was accepted, review approved, run done by D22; planner spend $0.013
 (runs 104 and 105, before: $0.028 with the extra turn); total $0.052.
+Also affected: the run page's Resume planning on a closed plan now takes no turn either. Not
+seen with the real model: a later turn carrying the context (run 108 needed none; only the fake
+pi, which echoes, went through it).
 
 **Status 22.2 (2026-09-30).** Done (`Runs.finish_run/3`, reason "scratch run from BM's own checks
 (temporary repository); finished"); no unfinished runs are left.
