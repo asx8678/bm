@@ -1274,7 +1274,7 @@ run (an attempt with changes may have paused it), pauses it as before and then r
 `Coordinator.resume_planning/2` or records why not. Checked with the fake pi across two BEAMs (A
 starts a run and halts while the worker runs; B runs the startup recovery): no changes → resumed
 ("1 of 3" note, attempt failed "interrupted", task queued, new planner); worker had written →
-paused, "changes of an interrupted attempt wait for your decision"; budget spent → paused, "the
+paused, "changes wait for your decision (Keep or Revert)"; budget spent → paused, "the
 run's budget is spent"; `auto_resumes` 3 → paused, "already resumed by itself 3 times";
 `auto_resume: false` → paused, "turned off". Live on a sandbox clone (`/tmp/bm-sandbox-21`): run
 104, the dev server stopped (SIGTERM) as soon as the worker ran and started again; recovery

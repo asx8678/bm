@@ -123,7 +123,7 @@ defmodule Bm.Workspace.Recovery do
          %{lane: :free, phase: nil} <- Coordinator.state(root) do
       nil
     else
-      %{lane: {:held, _}} -> "changes of an interrupted attempt wait for your decision"
+      %{lane: {:held, _}} -> "changes wait for your decision (Keep or Revert)"
       %{} -> "the workspace is busy"
       {:error, reason} -> "the workspace did not start: #{inspect(reason)}"
     end
