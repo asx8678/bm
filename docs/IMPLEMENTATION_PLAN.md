@@ -29,6 +29,7 @@ Design reference: [ARCHITECTURE.md](ARCHITECTURE.md).
 | 8 | Plan UI and milestone C gate | 8.1–8.4 | **Milestone C exit gate** (live) + benchmark |
 | 9 | Optional: goal-run overhead | 9.0–9.4 | fewer planner round-trips; benchmark before/after |
 | 10 | Optional: seeing a run | 10.1–10.6 | live run canvas, live worker activity, checkpoint pruning, attempt transcripts, run search, failed checks re-planned |
+| 11 | Real repositories | 11.1–11.5 | supervised trial goals on real code, fixes, revert a whole run, refined limits |
 
 ---
 
@@ -791,3 +792,53 @@ Before merging `core-milestone-b` (phases 0–10, D1–D23) into `main`, at the 
 - Still not seen live: D23 with the real model (only the scripted planner), the planner prompt's
   new check guidance in effect, and `mix bm.bench --goals` stopping on a held attempt (read
   through; no more benchmarks were to be run).
+
+---
+
+## Phase 11: real repositories
+
+Scoped 2026-09-30 after merging phases 0–10 into `main` (branch `phase-11`). Every run so far
+used tiny scratch Python projects; this phase uses BM on real code and adds the two safety
+features real multi-task runs need. Per the user's standing instruction, no tests are written or
+run; each step is checked by compiling, in the browser, and with small live runs. Trial runs cost
+model money: an estimated $0.10–0.50 per goal on this repository.
+
+**11.1 Trial setup.** The target is a **clone** of a real repository in a scratch directory,
+never the checkout the dev server runs from (BM changing its own running code would be reloaded
+mid-run). Default target: this repository (124 files, under the planner's 150-path list; a
+snapshot takes 30–70 ms), verify command `mix compile --warnings-as-errors`, a budget per goal,
+with a dirty file left in the clone to exercise user-owned files. A project of the user's can
+replace it.
+
+**11.2 Supervised trial goals.** Two or three goals of real size, started from the Tasks page and
+watched on the run page, e.g. "add a `mix bm.runs` task that lists recent runs with status and
+spend" (3 files, one new module) and "show the run's short label BM-<id> in the run header and the
+runs list" (touches LiveViews and a component). Record in `docs/TRIALS.md` per goal: tasks
+proposed, waves, attempts accepted/held/failed, time, cost, checks written, flags, and every
+problem seen (wrong plan, wrong write set, stuck worker, confusing UI, anything unsafe).
+
+**11.3 Fix what the trial shows.** Scope decided by 11.2. Each finding is fixed or recorded as a
+decision; safety problems first.
+
+**11.4 Revert a whole run.** Today only the latest attempt can be reverted; undoing a four-task
+goal means reverting by hand. Design: one conditional restore over the union of the write sets
+of the run's accepted (non-reverted) attempts, from the earliest such attempt's `tree_before` to
+the latest one's `tree_after`, with `Git.restore/5` (all or nothing; refused with the changed
+paths if any file changed since). Allowed only while the workspace's lane is free and no newer
+run touched those files (the condition covers it). The run keeps its status and records
+`reverted_at` (migration); its attempts become `reverted`; checkpoints stay as the record. Run
+page: "Revert this run" on finished runs, with the refusal listing changed files.
+
+**11.5 Refined limits.** (a) **Repeat-call guard:** the coordinator counts identical guarded tool
+calls (tool + input) per attempt; the 4th identical call is refused with a reason and the 6th
+cancels the attempt ("repeating itself"). (b) **Tool timeout:** a single tool call running longer
+than `tool_timeout` (default 10 min) cancels the attempt; today the stall limit applies only
+between tools and `max_duration` (20 min) is the only bound on a hung command. (c) **Soft budget:**
+at 80 % of a run's budget the run page shows a warning, and the planner is told in its next turn
+to finish with the smallest plan.
+
+**Optional, if time allows:** short labels (`BM-<id>`) everywhere a run is named; `ask_planner`
+for workers; a question-sharpening step before planning built on the chat page.
+
+**Open before 11.2:** the user may name the repository, goals and verify command; otherwise the
+defaults above are used.
