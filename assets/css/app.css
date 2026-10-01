@@ -236,3 +236,6 @@ body {
 }
 .svelte-flow .svelte-flow__attribution a { color: var(--bm-muted); font-size: 9px; }
 
+/* A part of the page a canvas click brought into view (plan 30). */
+.bm-flash { outline: 2px solid var(--bm-run); outline-offset: 3px; border-radius: 12px; transition: outline-color 1.2s ease; }
+

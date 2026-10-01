@@ -395,6 +395,29 @@ defmodule BmWeb.RunLive do
   # The canvas reports drags; positions are not stored.
   def handle_event("flow_changed", _graph, socket), do: {:noreply, socket}
 
+  # A click on a canvas node (plan 30) brings its part of the page into view: the planner panel,
+  # or a task's latest attempt (its task card if it has none yet).
+  def handle_event("flow_node_clicked", %{"id" => "planner"}, socket),
+    do: {:noreply, push_event(socket, "bm:scroll_to", %{id: "planner"})}
+
+  def handle_event("flow_node_clicked", %{"id" => "task-" <> key}, socket) do
+    case Enum.find(Runs.latest_tasks(socket.assigns.run), &(&1.key == key)) do
+      nil ->
+        {:noreply, socket}
+
+      task ->
+        id =
+          case Runs.latest_attempt(task) do
+            nil -> "tasks-#{task.id}"
+            attempt -> "attempts-#{attempt.id}"
+          end
+
+        {:noreply, push_event(socket, "bm:scroll_to", %{id: id})}
+    end
+  end
+
+  def handle_event("flow_node_clicked", _params, socket), do: {:noreply, socket}
+
   def handle_event("commit_run", _params, socket) do
     case Coordinator.commit_run(socket.assigns.root, socket.assigns.run.id) do
       {:ok, run} ->

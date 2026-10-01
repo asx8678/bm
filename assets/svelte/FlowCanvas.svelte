@@ -3,11 +3,18 @@
   import "@xyflow/svelte/dist/style.css"
   import AgentNode from "./AgentNode.svelte"
   import TaskNode from "./TaskNode.svelte"
+  import ToolNode from "./ToolNode.svelte"
 
-  const nodeTypes = {agent: AgentNode, task: TaskNode}
+  const nodeTypes = {agent: AgentNode, task: TaskNode, tool: ToolNode}
 
-  // `nodes` and `edges` come from the LiveView; `onChange` reports edits back to it.
-  let {nodes: initialNodes = [], edges: initialEdges = [], onChange = () => {}} = $props()
+  // `nodes` and `edges` come from the LiveView; `onChange` reports edits back to it and
+  // `onNodeClick` a click on a node (its id).
+  let {
+    nodes: initialNodes = [],
+    edges: initialEdges = [],
+    onChange = () => {},
+    onNodeClick = () => {},
+  } = $props()
 
   // The graph is copied once; later server updates arrive through setGraph.
   // svelte-ignore state_referenced_locally
@@ -48,6 +55,7 @@
     onnodedragstop={report}
     onconnect={report}
     ondelete={report}
+    onnodeclick={({node}) => onNodeClick(node.id)}
   >
     <Background />
     <Controls showLock={false} />

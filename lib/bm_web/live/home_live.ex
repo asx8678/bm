@@ -33,9 +33,10 @@ defmodule BmWeb.HomeLive do
        more_runs?: more?,
        workspaces: workspaces,
        mode: if(params["mode"] == "task", do: :task, else: :goal),
-       form: default_form(workspaces, params["path"]),
+       form: default_form(workspaces, params["path"], params["goal"]),
        goal_form:
-         default_form(workspaces, params["path"]) |> then(&to_form(&1.params, as: :goal)),
+         default_form(workspaces, params["path"], params["goal"])
+         |> then(&to_form(&1.params, as: :goal)),
        # Goal review (plan 12.3): nil, :running, or %{questions, goal, cost}.
        review: nil
      )
@@ -83,7 +84,8 @@ defmodule BmWeb.HomeLive do
   end
 
   # Prefills the requested workspace (`?path=`) or the last used one, with its verify command.
-  defp default_form(workspaces, requested) do
+  # `goal`: a request handed over from the Chat page ("Run as a guarded goal").
+  defp default_form(workspaces, requested, goal) do
     # The last used workspace whose checkout still exists (a removed clone is no default).
     {path, verify} =
       case Enum.find(workspaces, &(&1.path == requested)) ||
@@ -95,7 +97,7 @@ defmodule BmWeb.HomeLive do
     to_form(
       %{
         "path" => path,
-        "goal" => "",
+        "goal" => goal || "",
         "writes" => "",
         "verify_command" => verify || "",
         "budget_usd" => ""

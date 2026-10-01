@@ -38,6 +38,15 @@ topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
+// A canvas node was clicked: bring its part of the page into view and mark it briefly.
+window.addEventListener("phx:bm:scroll_to", ({detail}) => {
+  const el = document.getElementById(detail.id)
+  if (!el) return
+  el.scrollIntoView({behavior: "smooth", block: "start"})
+  el.classList.add("bm-flash")
+  setTimeout(() => el.classList.remove("bm-flash"), 1400)
+})
+
 // connect if there are any LiveViews on the page
 liveSocket.connect()
 
