@@ -1872,3 +1872,30 @@ the older one dropped); archiving the current plan emptied the board and took it
 and the next start restored the latest remaining plan. Fixed during the check: a message sent
 while the agent was still starting was lost (the composer emptied it); it now stays in the box
 with the flash, and goes once sent again.
+
+## Review fixes (2026-10-02)
+
+A review after phase 35 (`Bm.Plans`, `Bm.Chat`, `Bm.Policy`, `Workspace.Git` restore, the chat
+page, the local API) found, and this fixes, with each case checked by a scratch script (37
+allow/deny cases) and against a server on a spare port:
+
+- **The local API answered web pages.** A page open in the user's browser connects from this
+  machine and may send a form-encoded POST without a CORS preflight: `POST /api/goals` started a
+  run (worker bash, `verify_command`) in any repository. `LocalOnly` now also refuses requests a
+  browser marks cross-site (`sec-fetch-site`) and POSTs that aren't `application/json`; the CLI
+  sends JSON. Checked: form, text/plain and cross-site JSON get 403; JSON from curl still works.
+- **`Policy.real_path/1` could hang or crash the coordinator.** A symlink loop looped forever (the
+  coordinator answers `authorize` itself, so pause and cancel were stuck too); a directory it
+  can't enter raised a MatchError. It now follows at most 40 links and never raises; such paths
+  resolve outside every workspace and are refused.
+- **git commands that change the repository were allowed:** `config` (writes `.git/config`, which
+  no snapshot covers), `read-tree`, `checkout-index`, `symbolic-ref`, `remote`, `submodule`,
+  `init`, `fetch`, `sparse-checkout`, `bisect` and others. Added to the refused list; `git config`
+  may still read (`--get`, `--list`, one key).
+- **User-owned files could be written in another case** (`NOTES.md` for `notes.md` on macOS); the
+  attempt failed afterwards but its changes stay until Revert. `.git` and user-owned files are now
+  compared without case.
+- **Smaller:** package-manager options with a value no longer hide the subcommand
+  (`npm --prefix x install`); shell-write targets are resolved against the workspace, not BM's
+  directory, and a workspace inside a temp directory follows the workspace rules (a target there
+  was taken for a temp file before).
