@@ -1793,3 +1793,29 @@ check: the page subscribed to the agent twice once it became ready (every event 
 Known: the current plan is held in memory, so after a restart the chat starts without one (the
 plans list comes in Phase 35). The chat LiveView test was cut to the render check (the old ones
 drove the shared `main` agent); tests not run, per the user's instruction.
+
+## Phase 33: the plan board
+
+**33.1 Board.** The chat page's right pane switches between Plan (default) and Activity (the
+live canvas, kept mounted underneath so it keeps its state). The board shows the current plan:
+title, status, goal, what the agent found in the code (folded), then the tasks as numbered cards
+(title, key, dependencies, revisions, open questions, why, files); a card opens to what exists,
+approach, done when, risks, open questions and the check. A task added or changed flashes and
+scrolls into view.
+
+**33.2 Card actions.** Refine opens a box on the card for what should change and sends it to the
+agent as "Refine task <key> …"; Dig deeper asks the agent to read the code for that task, make
+it concrete with `update_task` and propose real choices with `ask_user`; both wait while the agent
+works. Remove deletes the task directly (`Bm.Chat.remove_task/1`, refused with the reason while
+other tasks depend on it); the agent hears of board changes at the start of the next message
+("[On the plan board since your last turn: …]"), and its instructions say so.
+
+**Status: Phase 33 done (2026-10-01).** Checked live on `bm-sandbox` (served on another port,
+headless Chrome): the empty board, then a capitalize(text) plan filling in live (three cards);
+answering the agent's two questions revised task 1 and 2; Remove on task 1 was refused
+("test_capitalize, export_and_verify depend on it"), Remove on task 3 worked and the agent later
+said "the export task you removed stays removed"; a card opened to its full content; Refine
+("also test several spaces…") made the agent update the test task (and task 1's done-when to
+match); Dig deeper on task 1 read the code and proposed two choices as question cards. The
+checkout stayed clean. Known: the board shows from the md breakpoint up (phones see the chat
+and the plan line); a removal while the agent is mid-answer reaches it only with the next message.
