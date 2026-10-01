@@ -1899,3 +1899,32 @@ allow/deny cases) and against a server on a spare port:
   (`npm --prefix x install`); shell-write targets are resolved against the workspace, not BM's
   directory, and a workspace inside a temp directory follows the workspace rules (a target there
   was taken for a temp file before).
+
+**Second review (2026-10-02): coordinator, planner, recovery, pi agents.** Fixed, each checked
+by scripts that drive the real coordinator on scratch repositories and scratch rows (removed
+afterwards); the pause and resume checks were also run against the code before the fixes, where
+they failed:
+
+- **Revert run lost the user's edits** (D31). It checked every file against the last attempt's
+  tree, which already held a user's edit of a file an earlier attempt wrote, and put the file
+  back. Each file is now checked against the last attempt that changed it and restored from
+  before the first (`Git.restore_paths/3`); revert and commit share `stayed_attempts/1`.
+- **Reverts put back the user's own files** (D31): a change there is most likely the user's,
+  made while BM ran. Revert, Undo task and Revert run leave them, flag `user_files_left` and say
+  where the earlier version is.
+- **Agents outlived their owners.** A pi agent whose owner died kept running with every tool
+  failing, until the next restart; the chat counted agent ids from 1 again after a crash and
+  could get such an agent back; the goal reviewer's `review-<n>` could be an attempt reviewer's
+  id. Agents now stop when their owner stops, chat ids never repeat, goal reviews use
+  `goal-review-<n>`.
+- **Pause blocked for 5 s and could end the run.** `pause_by_user` stopped the planner from inside
+  the coordinator: with the planner calling it at that moment, the pause waited the shutdown
+  timeout, the planner was killed without ending its pi session, and its queued `end_run` then
+  ended the paused run as failed (5009 ms and a failed run before the fix). The planner is now
+  stopped in the background, `end_run` refuses a paused run, and a planner whose task is refused
+  as `run_paused` just stops.
+- **A paused goal run came back by itself.** Keep or Revert of an interrupted or failed attempt
+  resumed a paused run, also one the user had paused or whose planner was lost with BM: the run
+  sat "active" with no planner. It now resumes only a single-task run or one whose planner still
+  runs; otherwise it waits for Resume planning.
+

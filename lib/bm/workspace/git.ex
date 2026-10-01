@@ -334,11 +334,27 @@ defmodule Bm.Workspace.Git do
           keyword()
         ) :: :ok | {:error, term()}
   def restore(repo, entries, from_tree, expected_tree, opts \\ []) do
-    paths = entries |> Enum.map(&entry_path/1) |> Enum.uniq()
+    entries
+    |> Enum.map(&entry_path/1)
+    |> Enum.uniq()
+    |> Enum.map(&{&1, from_tree, expected_tree})
+    |> then(&restore_paths(repo, &1, opts))
+  end
+
+  @doc """
+  `restore/5` with each file's own trees: `{path, from_tree, expected_tree}` puts `path` back to
+  its content in `from_tree` if it still has exactly its content in `expected_tree`. All or
+  nothing, as `restore/5`. Reverting several attempts at once needs this: a file goes back to
+  what it was before the first attempt that changed it, and must still hold what the last one
+  that changed it left (a later attempt's tree may hold someone else's later edit of it).
+  """
+  def restore_paths(repo, triples, opts \\ []) do
+    triples = Enum.uniq_by(triples, &elem(&1, 0))
+    paths = Enum.map(triples, &elem(&1, 0))
 
     with {:ok, git_dir} <- git_dir(repo),
-         {:ok, expected} <- ls_tree(repo, expected_tree, paths),
-         {:ok, from} <- ls_tree(repo, from_tree, paths),
+         {:ok, expected} <- objects_in_trees(repo, triples, 2),
+         {:ok, from} <- objects_in_trees(repo, triples, 1),
          {:ok, current} <- current_objects(repo, paths),
          deletes = Enum.filter(paths, &(from[&1] == nil and current[&1] != :directory)),
          [] <- changed_paths(repo, paths, current, expected, MapSet.new(deletes)),
@@ -376,6 +392,18 @@ defmodule Bm.Workspace.Git do
   # As stored in `attempts.actual_writes` (JSON: string keys).
   defp entry_path(%{"path" => path}), do: path
   defp entry_path(path) when is_binary(path), do: path
+
+  # %{path => {mode, blob}}: each path as it is in its own tree (element `at` of its triple).
+  defp objects_in_trees(repo, triples, at) do
+    triples
+    |> Enum.group_by(&elem(&1, at), &elem(&1, 0))
+    |> Enum.reduce_while({:ok, %{}}, fn {tree, paths}, {:ok, acc} ->
+      case ls_tree(repo, tree, paths) do
+        {:ok, objects} -> {:cont, {:ok, Map.merge(acc, objects)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
 
   # %{path => {mode, blob}} for the paths present in `tree`.
   defp ls_tree(_repo, _tree, []), do: {:ok, %{}}

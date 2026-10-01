@@ -232,8 +232,10 @@ defmodule Bm.Chat do
 
   defp ensure_started(state), do: start_agent(state)
 
+  # Ids never repeat while BM runs: counting from 1 again after this process restarted would
+  # name an agent of the crashed chat (still stopping, or never stopped).
   defp start_agent(state) do
-    generation = state.generation + 1
+    generation = System.unique_integer([:positive, :monotonic])
     id = "chat-#{generation}"
     chat = self()
     root = state.root
