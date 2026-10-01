@@ -237,6 +237,12 @@ defmodule Bm.Chat do
     end
   end
 
+  defp answer("update_plan", payload, %{plan_id: id} = state) when is_integer(id) do
+    # The model changes what the plan says, never its status.
+    attrs = Map.take(payload, ~w(title goal findings scope))
+    {result(Plans.update_plan(Plans.get_plan!(id), attrs), id), state}
+  end
+
   defp answer("ask_user", %{"questions" => [_ | _] = questions}, state) do
     questions =
       for q <- Enum.take(questions, 5), is_binary(q["question"]) do
@@ -250,7 +256,7 @@ defmodule Bm.Chat do
     do: {%{"ok" => false, "error" => "give one to five questions"}, state}
 
   defp answer(op, payload, %{plan_id: nil} = state)
-       when op in ~w(add_task update_task remove_task get_plan) do
+       when op in ~w(update_plan add_task update_task remove_task get_plan) do
     _ = payload
     {%{"ok" => false, "error" => "there is no current plan: call create_plan first"}, state}
   end
@@ -318,7 +324,9 @@ defmodule Bm.Chat do
       end)
 
     tasks = if tasks == "", do: "(no tasks yet)", else: tasks
-    "Current plan \"#{plan.title}\" (#{plan.status}). Goal: #{plan.goal}\nTasks:\n#{tasks}"
+    scope = if plan.scope in [nil, ""], do: "", else: "\nScope:\n#{plan.scope}"
+
+    "Current plan \"#{plan.title}\" (#{plan.status}). Goal: #{plan.goal}#{scope}\nTasks:\n#{tasks}"
   end
 
   defp with_notes(text, []), do: text

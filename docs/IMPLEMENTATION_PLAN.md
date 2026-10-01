@@ -1819,3 +1819,30 @@ said "the export task you removed stays removed"; a card opened to its full cont
 match); Dig deeper on task 1 read the code and proposed two choices as question cards. The
 checkout stayed clean. Known: the board shows from the md breakpoint up (phones see the chat
 and the plan line); a removal while the agent is mid-answer reaches it only with the next message.
+
+## Phase 34: questioning on request
+
+**34.1 Grilling.** Only when the user asks ("grill this", the board's Grill this plan button):
+the chat agent checks the plan against the code (missing or too-big tasks, hidden dependencies,
+files or functions that don't exist as assumed, callers and tests that break, undecided edge
+cases, drift beyond the goal), asks what only the user can decide with `ask_user` (up to five
+questions a round, concrete options, its recommendation in the option text), then changes the
+tasks, clears settled open questions and writes the scope; another round, or a short summary
+when nothing important is open. Standing instructions in `priv/pi/prompts/chat.md`.
+
+**34.2 Scope.** `plans.scope` (migration `add_scope_to_plans`): in scope, out of scope,
+assumptions. A new chat tool `update_plan` changes title, goal, findings and scope (never the
+status); the board shows the scope under the plan's header; `get_plan` and every tool reply
+include it.
+
+**34.3 Answer form.** The question cards are one form: per question option pills (radio) and an
+own answer (which wins over a pick); Send answers sends all of them as one message; questions left
+unanswered say "(no answer: your call)".
+
+**Status: Phase 34 done (2026-10-01).** Checked live on `bm-sandbox` (served on another port,
+headless Chrome): a two-task countVowels plan; Grill this plan made the agent read the CLI and its
+tests and ask three questions with recommendations, among them a real scope gap (every utility is
+also a textkit command); answered with one pick, one own answer and one left open, it revised
+tasks 1 and 2, added `add_vowels_cli`, wrote the scope (in / out / assumptions, shown on the
+board) and said the plan was settled. The checkout stayed clean. Fixed during the check: picking
+an option scrolled the whole layout (the hidden radio was positioned outside its pill).

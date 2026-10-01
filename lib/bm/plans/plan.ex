@@ -14,6 +14,8 @@ defmodule Bm.Plans.Plan do
     field :title, :string
     field :goal, :string
     field :findings, :string
+    # In scope, out of scope and assumptions, settled with the user (plan 34).
+    field :scope, :string
     field :status, Ecto.Enum, values: @statuses, default: :drafting
     belongs_to :run, Bm.Runs.Run
 
@@ -35,7 +37,7 @@ defmodule Bm.Plans.Plan do
   @doc "Changes the model or the user may make to a plan."
   def update_changeset(plan, attrs) do
     plan
-    |> cast(attrs, [:title, :goal, :findings, :status])
+    |> cast(attrs, [:title, :goal, :findings, :scope, :status])
     |> validate_required([:title, :goal])
     |> validate_length(:title, max: 200)
   end

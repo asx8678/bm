@@ -53,6 +53,28 @@ const createPlan = defineTool({
 	},
 });
 
+const updatePlan = defineTool({
+	name: "update_plan",
+	label: "Update plan",
+	description:
+		"Change what the current plan says (only the fields you pass change). Use `scope` to write down the scope of " +
+		"work you settled with the user: in scope, out of scope, assumptions.",
+	parameters: Type.Object({
+		title: Type.Optional(Type.String({ description: "Short name of the plan." })),
+		goal: Type.Optional(Type.String({ description: "The user's goal, made precise." })),
+		findings: Type.Optional(Type.String({ description: "What you found in the code that matters for this plan." })),
+		scope: Type.Optional(
+			Type.String({
+				description: "Short lines under the headings 'In scope:', 'Out of scope:' and 'Assumptions:'.",
+			}),
+		),
+	}),
+	async execute(_id, params, _signal, _onUpdate, ctx) {
+		const r = await bmRequest(ctx, "update_plan", params);
+		return reply(outcome(r, "Plan updated."), r);
+	},
+});
+
 const addTask = defineTool({
 	name: "add_task",
 	label: "Add task",
@@ -127,6 +149,6 @@ const askUser = defineTool({
 
 export default function (pi: ExtensionAPI) {
 	registerShutdown(pi);
-	for (const tool of [createPlan, addTask, updateTask, removeTask, getPlan, askUser]) pi.registerTool(tool);
+	for (const tool of [createPlan, updatePlan, addTask, updateTask, removeTask, getPlan, askUser]) pi.registerTool(tool);
 	pi.on("session_start", (_event, ctx) => report(ctx, "profile", { role: "chat", tools: pi.getActiveTools() }));
 }

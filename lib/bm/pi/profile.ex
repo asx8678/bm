@@ -50,8 +50,9 @@ defmodule Bm.Pi.Profile do
       extensions: ~w(bm_chat bm_guard),
       tools:
         @read_tools ++
-          ~w(bash create_plan add_task update_task remove_task get_plan ask_user),
-      required: ~w(bash create_plan add_task update_task remove_task get_plan ask_user),
+          ~w(bash create_plan update_plan add_task update_task remove_task get_plan ask_user),
+      required:
+        ~w(bash create_plan update_plan add_task update_task remove_task get_plan ask_user),
       reports: ~w(profile guard),
       system_prompt: "chat.md"
     },
