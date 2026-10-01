@@ -20,7 +20,6 @@ defmodule BmWeb.Router do
     live "/", HomeLive
     live "/runs/:id", RunLive
     live "/chat", ChatLive
-    live "/flow", FlowLive
   end
 
   # BM's local JSON API for the terminal client (plan 14.2); only answers this machine.

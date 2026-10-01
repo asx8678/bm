@@ -1697,3 +1697,33 @@ Not done (decisions for the user): workspace settings that the code reads but no
 
 **Status: Phase 29 done (2026-10-01).**
 
+---
+
+## Phase 30: the flow merged into Chat
+
+Asked by the user 2026-10-01: the /flow page was a canvas connected to nothing, and the Chat
+page's canvas showed a single static agent node; merge the flow into Chat and wire it, and list
+any other pages that are not linked.
+
+- **/flow removed** (FlowLive, its route and its test). The only other unlinked pages are Phoenix's
+  development tools, `/dev/dashboard` and `/dev/mailbox` (dev environment only).
+- **Chat canvas is live:** the agent and its 12 most recent tool calls, one node each (running,
+  done, failed), linked to the agent, updated as calls start and end; a click on a node opens a
+  details panel (tool, status, its arguments as pi reports them, cut at 80 characters; for the
+  agent: status, model, folder, tokens, and that BM does not guard it); a second click or ✕
+  closes it.
+- **Chat actions** (above the messages, so also on phones): "Run as a guarded goal" opens the Tasks
+  page with the last request and the chat's folder filled in (`/?goal=…&path=…`, which the Tasks
+  page now reads); "New conversation" (pi's new_session; asks first).
+- **Run page canvas:** a click on the planner node scrolls to the planner panel, on a task node to
+  its latest attempt (or its task card), outlined for a moment.
+- Svelte Flow default nodes follow the theme (the white boxes of the old /flow page).
+
+Checked in headless Chrome against the dev server: /flow → 404; a read-only chat request made two
+tool calls, which appeared as two "Done" nodes linked to the agent; clicking the second opened
+"Tool call #2 · fabric_exec · Done" with its arguments; the "Run as a guarded goal" link carried
+the request and folder, and the Tasks page filled the goal in from `?goal=`; on run 139 a click on
+a task node scrolled from the top to `attempts-197` and outlined it.
+
+**Status: Phase 30 done (2026-10-01).**
+
