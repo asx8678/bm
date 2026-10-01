@@ -214,6 +214,13 @@ body {
   --xy-controls-button-color-hover: var(--bm-text);
   --xy-controls-button-border-color: var(--bm-line);
   --xy-attribution-background-color: transparent;
+  /* Default nodes (the /flow page) follow the theme instead of Svelte Flow's white boxes. */
+  --xy-node-background-color: var(--bm-surface);
+  --xy-node-color: var(--bm-text);
+  --xy-node-border: 1px solid var(--bm-line);
+  --xy-node-border-radius: 8px;
+  --xy-node-boxshadow-hover: 0 0 0 1px var(--bm-muted);
+  --xy-node-boxshadow-selected: 0 0 0 1.5px var(--bm-text);
   font-family: var(--font-sans);
 }
 .svelte-flow .svelte-flow__controls {
