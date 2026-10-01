@@ -1762,3 +1762,34 @@ depending on itself, files outside the checkout (`../secret`, `/etc/passwd`), re
 another depends on, a reorder that leaves a key out; an update bumped the revision to 2; insert
 before and reorder worked; every change was broadcast; deleting the plan removed its tasks.
 
+
+## Phase 32: planning tools in the chat
+
+**32.1 The chat agent.** `Bm.Chat` (one process in the supervision tree) owns one pi agent in a
+new `:chat` profile: read tools and `bash`, under `bm_guard` in read-only mode (`Bm.Policy`), plus
+the `bm_chat` extension and standing instructions (`priv/pi/prompts/chat.md`, passed with
+`--append-system-prompt`). It keeps the repository, the current plan and the agent's open
+questions, broadcasts them on `chat`, and starts the agent lazily (and again after the repository
+changes). The repository is chosen on first use, not at boot.
+
+**32.2 Plan tools.** `create_plan`, `add_task`, `update_task`, `remove_task`, `get_plan` and
+`ask_user` are `bm:` dialogs answered by `Bm.Chat` through `Bm.Plans`: every change is checked and
+stored by the BEAM, the model hears the plan as it now stands, and a refusal comes back as a tool
+error with the reason (also logged).
+
+**32.3 The page.** `/chat` uses `Bm.Chat` instead of the unguarded shared pi session: a
+repository picker (existing workspaces as suggestions), the current plan's line (title, task
+count), question cards whose answers go back together as one message, the read-only note and
+planning suggestions. The live canvas, details panel, New conversation and Run as a guarded goal
+stay.
+
+**Status: Phase 32 done (2026-10-01).** Checked live on `bm-sandbox` (served on another port,
+headless Chrome): "Prepare a plan to add reverse(text) … with a test" made plan 2 with three
+filled tasks (`implement_reverse` → `export_reverse` → `test_reverse`, files, done-when, a check);
+one `add_task` was refused and the model corrected it. Asked to write `NOTE.txt`, the agent was
+blocked ("This task is read-only") and the checkout stayed clean. `ask_user` showed two question
+cards; picking an answer for each sent them as one message and the model went on. Fixed during the
+check: the page subscribed to the agent twice once it became ready (every event showed twice); an agent replaced while still starting is now stopped instead of left running.
+Known: the current plan is held in memory, so after a restart the chat starts without one (the
+plans list comes in Phase 35). The chat LiveView test was cut to the render check (the old ones
+drove the shared `main` agent); tests not run, per the user's instruction.

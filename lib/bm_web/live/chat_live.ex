@@ -1,41 +1,74 @@
 defmodule BmWeb.ChatLive do
   @moduledoc """
-  Direct chat with a pi agent (the early prototype). This agent runs with the user's own pi setup
-  and is **not** controlled by BM: no profile, policy, snapshots or checkpoints. BM's guarded work
-  starts from the Tasks page; "Run as a guarded goal" hands the last request over to it.
+  The chat (plan 32): BM's planning assistant, a pi agent in the `:chat` profile owned by
+  `Bm.Chat`. It works read-only in the chosen repository and makes plans through its tools
+  (`Bm.Plans`); the current plan shows above the messages (the plan board comes in plan 33) and
+  its questions as cards to answer.
 
-  The canvas (plan 30, which replaced the separate /flow demo page) shows the agent and its recent
-  tool calls live; a click on a node shows its details.
+  The canvas (plan 30) shows the agent and its recent tool calls live; a click on a node shows
+  its details.
   """
 
   use BmWeb, :live_view
 
   alias Bm.Pi.Transcript
 
-  @agent_id "main"
   @agent_node "agent"
+  @no_summary %{status: :starting, model: nil, tool: nil, usage: nil, cwd: nil}
 
   @impl true
   def mount(_params, _session, socket) do
-    {transcript, summary} =
+    chat =
       if connected?(socket) do
-        Bm.Pi.subscribe(@agent_id)
-        {:ok, _pid} = Bm.Pi.ensure_agent(@agent_id)
-        %{transcript: transcript, summary: summary} = Bm.Pi.snapshot(@agent_id)
-        {transcript, summary}
+        Bm.Chat.subscribe()
+        Bm.Plans.subscribe_list()
+        Bm.Chat.ensure_agent()
       else
-        {[], %{status: :starting, model: nil, tool: nil, usage: nil, cwd: nil}}
+        Bm.Chat.state()
       end
+
+    {transcript, summary} = watch(socket, chat.agent_id)
 
     {:ok,
      assign(socket,
+       chat: chat,
+       agent_id: chat.agent_id,
+       plan: load_plan(chat.plan_id),
        transcript: transcript,
        agent: summary,
        selected: nil,
        graph: graph(summary, transcript, nil),
-       form: to_form(%{"text" => ""})
+       form: to_form(%{"text" => ""}),
+       answers: %{},
+       root_form: to_form(%{"path" => chat.root}, as: :root),
+       repos: repos()
      )}
   end
+
+  # Follows the agent's pi events (subscribed once per agent; a second subscription would
+  # deliver every event twice).
+  defp watch(socket, agent_id) do
+    if connected?(socket) and is_binary(agent_id) do
+      Bm.Pi.subscribe(agent_id)
+      snapshot(agent_id)
+    else
+      {[], @no_summary}
+    end
+  end
+
+  # An agent that is still starting has nothing to show yet.
+  defp snapshot(agent_id) do
+    %{transcript: transcript, summary: summary} = Bm.Pi.snapshot(agent_id)
+    {transcript, summary}
+  catch
+    :exit, _ -> {[], @no_summary}
+  end
+
+  defp load_plan(nil), do: nil
+  defp load_plan(id), do: Bm.Plans.get_plan!(id)
+
+  # Repositories BM knows that still exist, for the picker.
+  defp repos, do: for(w <- Bm.Runs.list_workspaces(), File.dir?(w.path), do: w.path)
 
   @impl true
   def handle_event("send", %{"text" => text}, socket) do
@@ -46,16 +79,50 @@ defmodule BmWeb.ChatLive do
       text ->
         socket = assign(socket, form: to_form(%{"text" => ""}))
 
-        case Bm.Pi.prompt(@agent_id, text) do
-          :ok -> {:noreply, socket}
-          {:error, _} -> {:noreply, put_flash(socket, :error, "pi is not running.")}
+        case Bm.Chat.prompt(text) do
+          :ok ->
+            {:noreply, socket}
+
+          {:error, {:not_ready, _}} ->
+            {:noreply,
+             put_flash(socket, :error, "The agent is still starting; try again in a moment.")}
+
+          {:error, _} ->
+            {:noreply, put_flash(socket, :error, "The agent is not running.")}
         end
     end
   end
 
+  # An option of a question card: once every question has an answer they go as one message.
+  def handle_event("pick", %{"question" => i, "option" => option}, socket) do
+    questions = socket.assigns.chat.questions
+    answers = Map.put(socket.assigns.answers, String.to_integer(i), option)
+
+    if map_size(answers) == length(questions) do
+      text =
+        questions
+        |> Enum.with_index()
+        |> Enum.map_join("\n\n", fn {q, i} -> "#{q.question}\n→ #{answers[i]}" end)
+
+      handle_event("send", %{"text" => text}, assign(socket, answers: %{}))
+    else
+      {:noreply, assign(socket, answers: answers)}
+    end
+  end
+
   def handle_event("stop", _params, socket) do
-    Bm.Pi.abort(@agent_id)
+    Bm.Chat.stop_turn()
     {:noreply, socket}
+  end
+
+  def handle_event("set_root", %{"root" => %{"path" => path}}, socket) do
+    case Bm.Chat.set_root(String.trim(path)) do
+      :ok ->
+        {:noreply, socket}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not a repository BM can use: #{inspect(reason)}")}
+    end
   end
 
   # Node drags on the canvas are not persisted.
@@ -71,14 +138,45 @@ defmodule BmWeb.ChatLive do
     do: {:noreply, socket |> assign(selected: nil) |> push_graph()}
 
   def handle_event("new_conversation", _params, socket) do
-    case Bm.Pi.new_session(@agent_id) do
+    case Bm.Chat.new_conversation() do
       :ok -> {:noreply, assign(socket, selected: nil)}
       {:error, _} -> {:noreply, put_flash(socket, :error, "pi did not start a new conversation.")}
     end
   end
 
   @impl true
-  def handle_info({:pi, @agent_id, event, summary}, socket) do
+  # The chat's state changed: another agent (new repository), a plan, questions, readiness.
+  def handle_info({:chat, chat}, socket) do
+    socket =
+      if chat.agent_id != socket.assigns.agent_id do
+        if socket.assigns.agent_id, do: Bm.Pi.unsubscribe(socket.assigns.agent_id)
+        {transcript, summary} = watch(socket, chat.agent_id)
+
+        socket
+        |> assign(agent_id: chat.agent_id, transcript: transcript, agent: summary, selected: nil)
+        |> assign(root_form: to_form(%{"path" => chat.root}, as: :root), repos: repos())
+        |> push_graph()
+      else
+        socket
+      end
+
+    socket =
+      if chat.status == :ready and socket.assigns.chat.status != :ready,
+        do: refresh_agent(socket),
+        else: socket
+
+    answers =
+      if chat.questions == socket.assigns.chat.questions, do: socket.assigns.answers, else: %{}
+
+    {:noreply, assign(socket, chat: chat, answers: answers, plan: load_plan(chat.plan_id))}
+  end
+
+  def handle_info({:plan, plan_id, _event}, %{assigns: %{chat: %{plan_id: plan_id}}} = socket),
+    do: {:noreply, assign(socket, plan: load_plan(plan_id))}
+
+  def handle_info({:plan, _plan_id, _event}, socket), do: {:noreply, socket}
+
+  def handle_info({:pi, id, event, summary}, %{assigns: %{agent_id: id}} = socket) do
     socket = assign(socket, transcript: Transcript.apply(socket.assigns.transcript, event))
 
     cond do
@@ -90,6 +188,17 @@ defmodule BmWeb.ChatLive do
       true ->
         agent_update(socket, summary)
     end
+  end
+
+  def handle_info({:pi, _other, _event, _summary}, socket), do: {:noreply, socket}
+
+  # The agent became ready: its model and status come from its snapshot.
+  defp refresh_agent(socket) do
+    {_transcript, summary} = snapshot(socket.assigns.agent_id)
+
+    socket
+    |> assign(agent: summary)
+    |> push_event("flow:update_node", %{id: @agent_node, data: node_data(summary)})
   end
 
   defp graph_event?({:tool_start, _id, _name, _detail}), do: true
@@ -176,8 +285,8 @@ defmodule BmWeb.ChatLive do
 
   @suggestions [
     "Explain how this project is structured",
-    "List the LiveView pages and what each one does",
-    "Run the tests and summarize the result"
+    "Prepare a plan to add a small feature you think is missing",
+    "What would you improve first in this code?"
   ]
 
   @status_labels %{starting: "Starting", idle: "Ready", running: "Working", exited: "Stopped"}
@@ -187,7 +296,11 @@ defmodule BmWeb.ChatLive do
     assigns =
       assign(assigns,
         suggestions: @suggestions,
-        status_label: @status_labels[assigns.agent.status]
+        status_label:
+          case assigns.chat.status do
+            {:error, _} -> "Did not start"
+            _ -> @status_labels[assigns.agent.status]
+          end
       )
 
     ~H"""
@@ -200,6 +313,47 @@ defmodule BmWeb.ChatLive do
         </div>
       </:status>
       <section class="flex w-full min-w-0 flex-col border-bm-line bg-bm-surface md:w-[24rem] md:flex-none md:border-r">
+        <.form
+          for={@root_form}
+          id="repo-form"
+          phx-submit="set_root"
+          class="flex flex-none items-center gap-1.5 border-b border-bm-line px-3 py-2"
+        >
+          <label for="repo-input" class="flex-none text-[11px] font-medium text-bm-muted">Repo</label>
+          <input
+            type="text"
+            name={@root_form[:path].name}
+            id="repo-input"
+            value={@root_form[:path].value}
+            list="repo-options"
+            spellcheck="false"
+            class="min-w-0 flex-1 rounded-md border border-bm-line bg-bm-bg px-2 py-1 font-mono text-[11px] outline-none transition-colors focus:border-bm-muted"
+          />
+          <datalist id="repo-options">
+            <option :for={repo <- @repos} value={repo}></option>
+          </datalist>
+          <button
+            type="submit"
+            id="repo-submit"
+            title="Plan in this repository: the agent restarts there with a new conversation"
+            class="flex-none rounded-md border border-bm-line px-2 py-1 text-[11px] font-medium transition-colors hover:bg-bm-raised"
+          >
+            Use
+          </button>
+        </.form>
+        <div
+          :if={@plan}
+          id="current-plan"
+          class="flex flex-none items-center gap-2 border-b border-bm-line px-3 py-2 text-xs"
+        >
+          <span class="flex-none rounded bg-bm-raised px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
+            Plan
+          </span>
+          <span class="min-w-0 flex-1 truncate font-medium" title={@plan.goal}>{@plan.title}</span>
+          <span class="flex-none text-bm-muted">
+            {length(@plan.tasks)} {if length(@plan.tasks) == 1, do: "task", else: "tasks"}
+          </span>
+        </div>
         <div
           :if={@transcript != []}
           id="chat-actions"
@@ -208,7 +362,7 @@ defmodule BmWeb.ChatLive do
           <.link
             :if={request = last_request(@transcript)}
             id="run-as-goal"
-            navigate={~p"/?#{%{goal: request, path: @agent[:cwd] || ""}}"}
+            navigate={~p"/?#{%{goal: request, path: @chat.root}}"}
             title="Open this request on the Tasks page as a guarded goal: planned, checked, reviewed, undoable"
             class="rounded-md bg-bm-text px-2.5 py-1 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
           >
@@ -226,15 +380,11 @@ defmodule BmWeb.ChatLive do
         </div>
         <div id="messages" phx-hook=".StickToBottom" class="flex-1 overflow-y-auto px-4 py-4">
           <div :if={@transcript == []} class="flex h-full flex-col justify-center">
-            <h1 class="text-base font-semibold">Chat with pi</h1>
-            <p id="unguarded-note" class="mt-1.5 text-xs leading-relaxed text-bm-muted">
-              A direct pi session with your own pi setup. BM does not guard, record or
-              checkpoint it; use
-              <.link navigate={~p"/"} class="underline underline-offset-2">Tasks</.link>
-              for that.
-            </p>
-            <p :if={@agent[:cwd]} class="mt-1.5 text-xs leading-relaxed text-bm-muted">
-              The agent reads, runs and edits code in <code class="font-mono text-[11px] text-bm-text">{@agent.cwd}</code>.
+            <h1 class="text-base font-semibold">Plan with BM</h1>
+            <p id="planning-note" class="mt-1.5 text-xs leading-relaxed text-bm-muted">
+              Ask questions about the code or ask for a plan. The agent reads
+              <code class="font-mono text-[11px] text-bm-text">{@chat.root}</code>
+              but can't change it: plans and their tasks are drafts you review before anything runs.
             </p>
             <div class="mt-4 flex flex-col items-start gap-1.5">
               <button
@@ -258,6 +408,39 @@ defmodule BmWeb.ChatLive do
               <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
               Working
             </div>
+            <div :if={@chat.questions != []} id="questions" class="space-y-2">
+              <div
+                :for={{q, i} <- Enum.with_index(@chat.questions)}
+                id={"question-#{i}"}
+                class="rounded-lg border border-bm-line bg-bm-bg p-2.5"
+              >
+                <p class="text-xs font-medium leading-relaxed">{q.question}</p>
+                <div :if={q.options != []} class="mt-2 flex flex-wrap gap-1.5">
+                  <button
+                    :for={option <- q.options}
+                    type="button"
+                    phx-click="pick"
+                    phx-value-question={i}
+                    phx-value-option={option}
+                    aria-pressed={to_string(@answers[i] == option)}
+                    class={[
+                      "rounded-md border px-2 py-0.5 text-left text-xs transition-colors",
+                      if(@answers[i] == option,
+                        do: "border-bm-text bg-bm-text text-bm-surface",
+                        else: "border-bm-line hover:bg-bm-raised"
+                      )
+                    ]}
+                  >
+                    {option}
+                  </button>
+                </div>
+              </div>
+              <p class="text-[11px] text-bm-muted">
+                {if length(@chat.questions) > 1,
+                  do: "Pick an answer to each; they are sent together. Or write your own below.",
+                  else: "Pick an answer or write your own below."}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -268,7 +451,7 @@ defmodule BmWeb.ChatLive do
               name={@form[:text].name}
               id="chat-input"
               rows="1"
-              placeholder="Ask the agent to read, change or explain code"
+              placeholder="Ask about the code or for a plan"
               class="block max-h-48 w-full resize-none bg-transparent px-3 pt-2 text-[13px] leading-relaxed outline-none placeholder:text-bm-muted"
               phx-hook=".Composer"
             >{@form[:text].value}</textarea>

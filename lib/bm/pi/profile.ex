@@ -43,6 +43,18 @@ defmodule Bm.Pi.Profile do
       required: ~w(bash submit_result ask_planner),
       reports: ~w(profile guard)
     },
+    # The chat (plan 32): read-only like the planner, with tools that make and change a plan
+    # (Bm.Plans) and standing instructions (priv/pi/prompts/chat.md).
+    chat: %{
+      fabric?: false,
+      extensions: ~w(bm_chat bm_guard),
+      tools:
+        @read_tools ++
+          ~w(bash create_plan add_task update_task remove_task get_plan ask_user),
+      required: ~w(bash create_plan add_task update_task remove_task get_plan ask_user),
+      reports: ~w(profile guard),
+      system_prompt: "chat.md"
+    },
     writer: %{
       fabric?: false,
       extensions: ~w(bm_worker bm_guard),
@@ -70,7 +82,11 @@ defmodule Bm.Pi.Profile do
       Keyword.get(config, :pi_command, ["pi"]) ++
         ~w(--mode rpc --no-session --no-extensions) ++
         Enum.flat_map(Enum.reject(extension_paths, &is_nil/1), &["-e", &1]) ++
-        ["--tools", Enum.join(spec.tools, ","), "--model", config[:model]]
+        ["--tools", Enum.join(spec.tools, ","), "--model", config[:model]] ++
+        case spec[:system_prompt] do
+          nil -> []
+          file -> ["--append-system-prompt", Path.join(prompts_dir(), file)]
+        end
 
     # Fabric's own agent spawning must be off through configuration (agents.maxDepth); this
     # internal variable is only an additional guard.
@@ -212,5 +228,6 @@ defmodule Bm.Pi.Profile do
   defp nonempty(list), do: list
 
   defp extensions_dir, do: Application.app_dir(:bm, "priv/pi/extensions")
+  defp prompts_dir, do: Application.app_dir(:bm, "priv/pi/prompts")
   defp config, do: Application.get_env(:bm, __MODULE__, [])
 end
