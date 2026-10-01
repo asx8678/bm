@@ -1752,3 +1752,13 @@ goal run.
 task others depend on is refused unless they drop it; files are relative paths inside the
 checkout); list plans and tasks. Every change is broadcast (`plan:<id>`, and `plans` for the
 list), for the board in Phase 33.
+
+**Status: Phase 31 done (2026-10-01).** Migration `create_plans` (tables `plans`, `plan_tasks`),
+schemas `Bm.Plans.Plan` and `Bm.Plans.Task`, context `Bm.Plans` (create/update a plan; add, insert
+before, update, remove and reorder tasks; checks; broadcasts on `plan:<id>` and `plans`). Checked
+with a scratch script on the dev database (plan deleted afterwards): three tasks in order;
+refused: a key that is not snake_case, a duplicate key, an unknown dependency, a cycle, a task
+depending on itself, files outside the checkout (`../secret`, `/etc/passwd`), removing a task
+another depends on, a reorder that leaves a key out; an update bumped the revision to 2; insert
+before and reorder worked; every change was broadcast; deleting the plan removed its tasks.
+
