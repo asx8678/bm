@@ -39,6 +39,12 @@ defmodule Bm.Chat do
   @doc "Works in another repository from now on: a new agent and conversation there."
   def set_root(path), do: GenServer.call(@name, {:set_root, path})
 
+  @doc """
+  Removes task `key` of the current plan for the user (the board's Remove). The agent hears of it
+  with the next message.
+  """
+  def remove_task(key), do: GenServer.call(@name, {:remove_task, key})
+
   @doc "Makes plan `id` the current one (or none with nil)."
   def select_plan(id), do: GenServer.call(@name, {:select_plan, id})
 
@@ -55,7 +61,9 @@ defmodule Bm.Chat do
        agent_id: nil,
        status: :stopped,
        plan_id: nil,
-       questions: []
+       questions: [],
+       # Changes the user made on the board since the agent's last turn.
+       notes: []
      }}
   end
 
@@ -78,7 +86,9 @@ defmodule Bm.Chat do
     case state.status do
       :ready ->
         state = broadcast(%{state | questions: []})
-        {:reply, Bm.Pi.prompt(state.agent_id, text), state}
+
+        {:reply, Bm.Pi.prompt(state.agent_id, with_notes(text, state.notes)),
+         %{state | notes: []}}
 
       status ->
         {:reply, {:error, {:not_ready, status}}, state}
@@ -92,7 +102,7 @@ defmodule Bm.Chat do
 
   def handle_call(:new_conversation, _from, %{status: :ready} = state) do
     reply = Bm.Pi.new_session(state.agent_id)
-    {:reply, reply, broadcast(%{state | plan_id: nil, questions: []})}
+    {:reply, reply, broadcast(%{state | plan_id: nil, questions: [], notes: []})}
   end
 
   def handle_call(:new_conversation, _from, state), do: {:reply, {:error, :not_ready}, state}
@@ -102,11 +112,25 @@ defmodule Bm.Chat do
          :ok <- Bm.Workspace.Git.check_root(root),
          {:ok, workspace} <- Runs.ensure_workspace(root) do
       state = stop_agent(state)
-      state = %{state | root: root, workspace: workspace, plan_id: nil, questions: []}
+      state = %{state | root: root, workspace: workspace, plan_id: nil, questions: [], notes: []}
       state = ensure_started(state)
       {:reply, :ok, state}
     else
       error -> {:reply, error, state}
+    end
+  end
+
+  def handle_call({:remove_task, _key}, _from, %{plan_id: nil} = state),
+    do: {:reply, {:error, :no_plan}, state}
+
+  def handle_call({:remove_task, key}, _from, state) do
+    case Plans.remove_task(Plans.get_plan!(state.plan_id), key) do
+      {:ok, task} ->
+        note = "the user removed task #{key} (\"#{task.title}\")"
+        {:reply, :ok, %{state | notes: state.notes ++ [note]}}
+
+      {:error, reason} ->
+        {:reply, {:error, explain(reason)}, state}
     end
   end
 
@@ -296,6 +320,11 @@ defmodule Bm.Chat do
     tasks = if tasks == "", do: "(no tasks yet)", else: tasks
     "Current plan \"#{plan.title}\" (#{plan.status}). Goal: #{plan.goal}\nTasks:\n#{tasks}"
   end
+
+  defp with_notes(text, []), do: text
+
+  defp with_notes(text, notes),
+    do: "[On the plan board since your last turn: #{Enum.join(notes, "; ")}.]\n\n#{text}"
 
   ## State
 

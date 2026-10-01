@@ -40,6 +40,10 @@ defmodule BmWeb.ChatLive do
        graph: graph(summary, transcript, nil),
        form: to_form(%{"text" => ""}),
        answers: %{},
+       pane: :plan,
+       open: MapSet.new(),
+       refining: nil,
+       refine_form: to_form(%{"text" => ""}, as: :refine),
        root_form: to_form(%{"path" => chat.root}, as: :root),
        repos: repos()
      )}
@@ -63,6 +67,9 @@ defmodule BmWeb.ChatLive do
   catch
     :exit, _ -> {[], @no_summary}
   end
+
+  defp task(%{assigns: %{plan: %{tasks: tasks}}}, key), do: Enum.find(tasks, &(&1.key == key))
+  defp task(_socket, _key), do: nil
 
   defp load_plan(nil), do: nil
   defp load_plan(id), do: Bm.Plans.get_plan!(id)
@@ -107,6 +114,75 @@ defmodule BmWeb.ChatLive do
       handle_event("send", %{"text" => text}, assign(socket, answers: %{}))
     else
       {:noreply, assign(socket, answers: answers)}
+    end
+  end
+
+  def handle_event("pane", %{"pane" => pane}, socket) when pane in ~w(plan activity),
+    do: {:noreply, assign(socket, pane: String.to_existing_atom(pane))}
+
+  def handle_event("toggle_task", %{"key" => key}, socket) do
+    open = socket.assigns.open
+    open = if key in open, do: MapSet.delete(open, key), else: MapSet.put(open, key)
+    {:noreply, assign(socket, open: open)}
+  end
+
+  # Refine: the user says what should change; the agent changes the task.
+  def handle_event("refine", %{"key" => key}, socket),
+    do:
+      {:noreply,
+       assign(socket, refining: key, refine_form: to_form(%{"text" => ""}, as: :refine))}
+
+  def handle_event("cancel_refine", _params, socket),
+    do: {:noreply, assign(socket, refining: nil)}
+
+  def handle_event("send_refine", %{"refine" => %{"text" => text}}, socket) do
+    case {String.trim(text), task(socket, socket.assigns.refining)} do
+      {"", _} ->
+        {:noreply, socket}
+
+      {_, nil} ->
+        {:noreply, assign(socket, refining: nil)}
+
+      {text, task} ->
+        message =
+          "Refine task #{task.key} (\"#{task.title}\"): #{text}\n\n" <>
+            "Change it with update_task; look at the code again if that is needed."
+
+        handle_event("send", %{"text" => message}, assign(socket, refining: nil))
+    end
+  end
+
+  # Dig deeper: the agent reads more of the code for one task and proposes choices.
+  def handle_event("dig_deeper", %{"key" => key}, socket) do
+    case task(socket, key) do
+      nil ->
+        {:noreply, socket}
+
+      task ->
+        message =
+          "Dig deeper into task #{task.key} (\"#{task.title}\"). Read the code it touches more " <>
+            "closely and make the task concrete with update_task: what exists, the approach, the " <>
+            "files, done_when with edge cases and the risks. Where there is a real choice to " <>
+            "make, propose the options with ask_user and let me decide."
+
+        handle_event(
+          "send",
+          %{"text" => message},
+          assign(socket, open: MapSet.put(socket.assigns.open, key))
+        )
+    end
+  end
+
+  def handle_event("remove_task", %{"key" => key}, socket) do
+    case Bm.Chat.remove_task(key) do
+      :ok ->
+        {:noreply, assign(socket, open: MapSet.delete(socket.assigns.open, key))}
+
+      {:error, :no_plan} ->
+        {:noreply, socket}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not removed: #{reason}.")}
     end
   end
 
@@ -171,8 +247,18 @@ defmodule BmWeb.ChatLive do
     {:noreply, assign(socket, chat: chat, answers: answers, plan: load_plan(chat.plan_id))}
   end
 
-  def handle_info({:plan, plan_id, _event}, %{assigns: %{chat: %{plan_id: plan_id}}} = socket),
-    do: {:noreply, assign(socket, plan: load_plan(plan_id))}
+  # A task added or changed (by the agent or the board) flashes on the board.
+  def handle_info({:plan, plan_id, event}, %{assigns: %{chat: %{plan_id: plan_id}}} = socket) do
+    socket = assign(socket, plan: load_plan(plan_id))
+
+    case event do
+      {:task, key} when socket.assigns.pane == :plan ->
+        {:noreply, push_event(socket, "bm:scroll_to", %{id: "task-#{key}"})}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
 
   def handle_info({:plan, _plan_id, _event}, socket), do: {:noreply, socket}
 
@@ -478,27 +564,82 @@ defmodule BmWeb.ChatLive do
         </.form>
       </section>
 
-      <div class="relative hidden min-w-0 flex-1 md:block">
-        <section
-          id="agent-flow"
-          phx-hook="FlowCanvas"
-          phx-update="ignore"
-          data-graph={JSON.encode!(@graph)}
-          class="h-full w-full"
+      <div class="relative hidden min-w-0 flex-1 flex-col md:flex">
+        <div
+          id="pane-switch"
+          role="tablist"
+          class="flex flex-none items-center gap-1 border-b border-bm-line px-3 py-2"
         >
-        </section>
-        <p
-          :if={@selected == nil}
-          class="pointer-events-none absolute left-3 top-3 text-[11px] text-bm-muted"
-        >
-          The agent and its recent tool calls, live. Click a node for its details.
-        </p>
-        <.details
-          :if={@selected}
-          selected={@selected}
-          agent={@agent}
-          tool={selected_tool(@transcript, @selected)}
-        />
+          <button
+            :for={{pane, label} <- [plan: "Plan", activity: "Activity"]}
+            id={"pane-#{pane}"}
+            type="button"
+            role="tab"
+            aria-selected={to_string(@pane == pane)}
+            phx-click="pane"
+            phx-value-pane={pane}
+            class={[
+              "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+              if(@pane == pane,
+                do: "bg-bm-raised text-bm-text",
+                else: "text-bm-muted hover:text-bm-text"
+              )
+            ]}
+          >
+            {label}
+            <span
+              :if={pane == :plan and @plan}
+              class="ml-1 rounded bg-bm-bg px-1 text-[10px] tabular-nums text-bm-muted"
+            >
+              {length(@plan.tasks)}
+            </span>
+            <span
+              :if={pane == :activity and @agent.status == :running}
+              class="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-bm-run align-middle motion-reduce:animate-none"
+            ></span>
+          </button>
+        </div>
+        <div class="relative min-h-0 flex-1">
+          <%!-- The canvas stays mounted (and sized) while the board shows. --%>
+          <div class={[
+            "absolute inset-0",
+            @pane != :activity && "invisible pointer-events-none"
+          ]}>
+            <section
+              id="agent-flow"
+              phx-hook="FlowCanvas"
+              phx-update="ignore"
+              data-graph={JSON.encode!(@graph)}
+              class="h-full w-full"
+            >
+            </section>
+            <p
+              :if={@selected == nil}
+              class="pointer-events-none absolute left-3 top-3 text-[11px] text-bm-muted"
+            >
+              The agent and its recent tool calls, live. Click a node for its details.
+            </p>
+            <.details
+              :if={@selected}
+              selected={@selected}
+              agent={@agent}
+              tool={selected_tool(@transcript, @selected)}
+            />
+          </div>
+          <div
+            :if={@pane == :plan}
+            id="plan-board"
+            class="absolute inset-0 overflow-y-auto bg-bm-bg px-6 py-5"
+          >
+            <.board
+              plan={@plan}
+              open={@open}
+              refining={@refining}
+              refine_form={@refine_form}
+              busy={@agent.status == :running or @chat.status != :ready}
+            />
+          </div>
+        </div>
       </div>
     </Layouts.app>
 
@@ -540,11 +681,277 @@ defmodule BmWeb.ChatLive do
     """
   end
 
+  # The clicked node's details, over the canvas.
+  attr :plan, :any, required: true
+  attr :open, :any, required: true
+  attr :refining, :string, default: nil
+  attr :refine_form, :any, required: true
+  attr :busy, :boolean, default: false
+
+  defp board(%{plan: nil} = assigns) do
+    ~H"""
+    <div id="board-empty" class="mx-auto flex h-full max-w-md flex-col justify-center text-center">
+      <p class="text-sm font-semibold">No plan yet</p>
+      <p class="mt-1.5 text-xs leading-relaxed text-bm-muted">
+        Ask in the chat, e.g. <span class="text-bm-text">“Prepare a plan to add CSV export”</span>.
+        The agent reads the code first; its plan and tasks appear here, and you refine them
+        before anything runs.
+      </p>
+    </div>
+    """
+  end
+
+  defp board(assigns) do
+    ~H"""
+    <div class="mx-auto max-w-3xl">
+      <header id="plan-header" class="mb-5">
+        <div class="flex items-center gap-2">
+          <h2 class="min-w-0 flex-1 truncate text-lg font-semibold tracking-tight">{@plan.title}</h2>
+          <span class="flex-none rounded-full border border-bm-line px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-bm-muted">
+            {@plan.status}
+          </span>
+        </div>
+        <p class="mt-1.5 text-[13px] leading-relaxed">{@plan.goal}</p>
+        <details :if={@plan.findings not in [nil, ""]} id="plan-findings" class="group mt-2">
+          <summary class="cursor-pointer select-none text-xs text-bm-muted transition-colors hover:text-bm-text">
+            What the agent found in the code
+          </summary>
+          <p class="mt-1.5 whitespace-pre-line text-xs leading-relaxed text-bm-muted">
+            {@plan.findings}
+          </p>
+        </details>
+      </header>
+
+      <p
+        :if={@plan.tasks == []}
+        class="rounded-lg border border-dashed border-bm-line p-4 text-xs text-bm-muted"
+      >
+        No tasks yet; the agent adds them as it plans.
+      </p>
+
+      <ol id="plan-tasks" class="space-y-2.5">
+        <.task_card
+          :for={{task, i} <- Enum.with_index(@plan.tasks, 1)}
+          task={task}
+          index={i}
+          open={task.key in @open}
+          refining={@refining == task.key}
+          refine_form={@refine_form}
+          busy={@busy}
+        />
+      </ol>
+    </div>
+    """
+  end
+
+  attr :task, :any, required: true
+  attr :index, :integer, required: true
+  attr :open, :boolean, default: false
+  attr :refining, :boolean, default: false
+  attr :refine_form, :any, required: true
+  attr :busy, :boolean, default: false
+
+  defp task_card(assigns) do
+    ~H"""
+    <li
+      id={"task-#{@task.key}"}
+      class="group rounded-xl border border-bm-line bg-bm-surface transition-[border-color,box-shadow] hover:border-bm-muted/60 hover:shadow-sm"
+    >
+      <button
+        type="button"
+        phx-click="toggle_task"
+        phx-value-key={@task.key}
+        aria-expanded={to_string(@open)}
+        class="flex w-full items-start gap-3 px-4 pt-3 text-left"
+      >
+        <span class="mt-0.5 flex size-5 flex-none items-center justify-center rounded-full bg-bm-raised text-[11px] font-semibold tabular-nums text-bm-muted">
+          {@index}
+        </span>
+        <span class="min-w-0 flex-1">
+          <span class="block text-[13px] font-semibold leading-snug">{@task.title}</span>
+          <span class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-bm-muted">
+            <code class="font-mono">{@task.key}</code>
+            <span :if={@task.depends_on != []}>after {Enum.join(@task.depends_on, ", ")}</span>
+            <span :if={@task.revision > 1}>revised {@task.revision - 1}×</span>
+            <span :if={@task.open_questions != []} class="text-bm-run">
+              {length(@task.open_questions)} open {if length(@task.open_questions) == 1,
+                do: "question",
+                else: "questions"}
+            </span>
+          </span>
+        </span>
+        <.icon
+          name="hero-chevron-down"
+          class={[
+            "mt-1 size-3.5 flex-none text-bm-muted transition-transform duration-200",
+            @open && "rotate-180"
+          ]}
+        />
+      </button>
+
+      <div class="px-4 pb-3 pl-12">
+        <p :if={@task.why} class={["mt-1.5 text-xs leading-relaxed", !@open && "line-clamp-2"]}>
+          {@task.why}
+        </p>
+        <div :if={@task.files != []} class="mt-2 flex flex-wrap gap-1">
+          <code
+            :for={file <- @task.files}
+            class="rounded bg-bm-raised px-1.5 py-0.5 font-mono text-[10px] text-bm-muted"
+          >
+            {file}
+          </code>
+        </div>
+
+        <dl :if={@open} id={"task-#{@task.key}-details"} class="mt-3 space-y-2.5 text-xs">
+          <.field label="What exists" text={@task.existing} />
+          <.field label="Approach" text={@task.approach} />
+          <.field label="Done when" text={@task.done_when} />
+          <.field label="Risks" text={@task.risks} />
+          <div :if={@task.open_questions != []}>
+            <dt class="text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
+              Open questions
+            </dt>
+            <dd>
+              <ul class="mt-1 list-disc space-y-0.5 pl-4 leading-relaxed">
+                <li :for={q <- @task.open_questions}>{q}</li>
+              </ul>
+            </dd>
+          </div>
+          <div :if={@task.check not in [nil, ""]}>
+            <dt class="text-[10px] font-semibold uppercase tracking-wide text-bm-muted">Check</dt>
+            <dd>
+              <code class="mt-1 inline-block rounded bg-bm-raised px-1.5 py-0.5 font-mono text-[11px]">
+                {@task.check}
+              </code>
+            </dd>
+          </div>
+        </dl>
+
+        <.form
+          :if={@refining}
+          for={@refine_form}
+          id={"refine-#{@task.key}"}
+          phx-submit="send_refine"
+          class="mt-3"
+        >
+          <label for={"refine-#{@task.key}-text"} class="sr-only">What should change?</label>
+          <textarea
+            name={@refine_form[:text].name}
+            id={"refine-#{@task.key}-text"}
+            rows="2"
+            placeholder="What should change? e.g. split it in two, use the existing helper…"
+            phx-mounted={JS.focus()}
+            class="block w-full resize-y rounded-lg border border-bm-line bg-bm-bg px-2.5 py-1.5 text-xs leading-relaxed outline-none transition-colors placeholder:text-bm-muted focus:border-bm-muted"
+          >{@refine_form[:text].value}</textarea>
+          <div class="mt-1.5 flex justify-end gap-1.5">
+            <button
+              type="button"
+              phx-click="cancel_refine"
+              class="rounded-md px-2 py-0.5 text-xs text-bm-muted transition-colors hover:text-bm-text"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={@busy}
+              class="rounded-md bg-bm-text px-2.5 py-0.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85 disabled:opacity-40"
+            >
+              Send to the agent
+            </button>
+          </div>
+        </.form>
+
+        <div
+          :if={!@refining}
+          class="mt-2.5 flex items-center gap-1 opacity-70 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+        >
+          <.card_action
+            id={"refine-btn-#{@task.key}"}
+            icon="hero-pencil-square"
+            click="refine"
+            key={@task.key}
+            disabled={@busy}
+            title="Say what should change; the agent updates the task"
+          >
+            Refine
+          </.card_action>
+          <.card_action
+            id={"dig-btn-#{@task.key}"}
+            icon="hero-magnifying-glass"
+            click="dig_deeper"
+            key={@task.key}
+            disabled={@busy}
+            title="The agent reads the code for this task more closely and proposes choices"
+          >
+            Dig deeper
+          </.card_action>
+          <.card_action
+            id={"remove-btn-#{@task.key}"}
+            icon="hero-trash"
+            click="remove_task"
+            key={@task.key}
+            confirm={"Remove task “#{@task.title}”?"}
+            title="Remove this task from the plan"
+            danger
+          >
+            Remove
+          </.card_action>
+        </div>
+      </div>
+    </li>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :text, :string, default: nil
+
+  defp field(assigns) do
+    ~H"""
+    <div :if={@text not in [nil, ""]}>
+      <dt class="text-[10px] font-semibold uppercase tracking-wide text-bm-muted">{@label}</dt>
+      <dd class="mt-0.5 whitespace-pre-line leading-relaxed">{@text}</dd>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :icon, :string, required: true
+  attr :click, :string, required: true
+  attr :key, :string, required: true
+  attr :title, :string, default: nil
+  attr :confirm, :string, default: nil
+  attr :disabled, :boolean, default: false
+  attr :danger, :boolean, default: false
+  slot :inner_block, required: true
+
+  defp card_action(assigns) do
+    ~H"""
+    <button
+      id={@id}
+      type="button"
+      phx-click={@click}
+      phx-value-key={@key}
+      data-confirm={@confirm}
+      disabled={@disabled}
+      title={if @disabled, do: "The agent is busy", else: @title}
+      class={[
+        "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+        if(@danger,
+          do: "text-bm-muted hover:bg-bm-error/10 hover:text-bm-error",
+          else: "text-bm-muted hover:bg-bm-raised hover:text-bm-text"
+        )
+      ]}
+    >
+      <.icon name={@icon} class="size-3.5" />
+      {render_slot(@inner_block)}
+    </button>
+    """
+  end
+
   attr :selected, :string, required: true
   attr :agent, :map, required: true
   attr :tool, :any, default: nil
 
-  # The clicked node's details, over the canvas.
   defp details(assigns) do
     ~H"""
     <aside
