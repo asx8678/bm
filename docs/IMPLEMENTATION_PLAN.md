@@ -1727,3 +1727,28 @@ a task node scrolled from the top to `attempts-197` and outlined it.
 
 **Status: Phase 30 done (2026-10-01).**
 
+
+---
+
+## Phases 31–35: plans in the chat
+
+Asked by the user 2026-10-01: drop the Tasks page; in the chat the model makes a plan through a
+tool, the plan holds tasks with much more content, visible next to the chat; refine them by chat
+or by clicking (Refine, Dig deeper); question the request (look at the code, check the scope,
+ask) when the user asks for it. The user chose a plan board beside the chat and questioning
+only on request. Running a plan comes after these phases.
+
+## Phase 31: plans and tasks as drafts
+
+**31.1 Tables.** `plans` (workspace, title, goal, findings in the code, status drafting / ready /
+archived, the run it became, later) and `plan_tasks` (key, position, title, why, what exists,
+approach, files, done when, depends on, risks, open questions, check, revision). Separate from
+runs and tasks on purpose: a plan is a draft that changes while it is discussed; a run is an
+execution with checkpoints, recovery and budgets. Running a plan later copies its tasks into a
+goal run.
+
+**31.2 `Bm.Plans`.** Create a plan; add, update (revision + 1), remove and reorder tasks; checks
+(a key per plan, `snake_case`; dependencies name tasks of the plan and make no cycle; removing a
+task others depend on is refused unless they drop it; files are relative paths inside the
+checkout); list plans and tasks. Every change is broadcast (`plan:<id>`, and `plans` for the
+list), for the board in Phase 33.
