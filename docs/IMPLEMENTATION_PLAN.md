@@ -1925,6 +1925,9 @@ they failed:
   as `run_paused` just stops.
 - **A paused goal run came back by itself.** Keep or Revert of an interrupted or failed attempt
   resumed a paused run, also one the user had paused or whose planner was lost with BM: the run
-  sat "active" with no planner. It now resumes only a single-task run or one whose planner still
-  runs; otherwise it waits for Resume planning.
+  sat "active" with no planner. It now resumes only a single-task run or one whose planner this
+  coordinator still watches (Pause unwatches at once; the planner itself may take seconds to stop,
+  and a Revert in that window resumed the paused run before: checked with a real planner whose pi
+  stand-in ignores the shutdown); otherwise it waits for Resume planning. Resume planning in that
+  window is safe: the supervisor starts the new planner only after the old one is gone.
 

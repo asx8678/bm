@@ -2351,10 +2351,11 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   # A run paused by recovery resumes once no interrupted attempt waits for the user. A goal run
-  # only while its planner still runs (just the coordinator restarted): a planner the user paused,
-  # or one lost with BM, is gone, and the run waits for Resume planning, which starts a new one.
-  # Resumed without it, the run sat "active" with nothing to schedule its tasks, and a run the
-  # user had paused came back by itself.
+  # only while this coordinator still watches its planner (just the coordinator restarted): a
+  # planner the user paused (unwatched at once, though it may take seconds to stop) or one lost
+  # with BM is not, and the run waits for Resume planning, which starts a new one. Resumed
+  # without it, the run sat "active" with nothing to schedule its tasks, and a run the user had
+  # paused came back by itself.
   defp resume_if_reconciled(%{run: %{id: id}} = state) do
     run = Runs.get_run!(id)
 
@@ -2363,7 +2364,9 @@ defmodule Bm.Workspace.Coordinator do
       |> Runs.list_run_attempts()
       |> Enum.any?(&(&1.status == :needs_reconciliation and "kept" not in &1.flags))
 
-    planner_gone? = run.planner != nil and Bm.Workspace.Planner.whereis(id) == nil
+    planner_gone? =
+      run.planner != nil and
+        (state.planner_ref == nil or Bm.Workspace.Planner.whereis(id) == nil)
 
     case run do
       %{status: :paused} when not waiting? and not planner_gone? ->
