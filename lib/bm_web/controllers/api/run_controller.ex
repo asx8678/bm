@@ -1,7 +1,7 @@
 defmodule BmWeb.Api.RunController do
   @moduledoc """
   BM's local JSON API (plan 14.2), used by the `mix bm.*` terminal client. Goals start through
-  the running server's workspace coordinator, the same path as the Tasks page, so the web page
+  the running server's workspace coordinator, the same path as the Runs page, so the web page
   shows them live.
 
     * `POST /api/goals` — `repo`, `goal`, optional `verify_command`, `budget_usd` → the run

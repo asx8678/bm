@@ -20,6 +20,8 @@ defmodule Bm.Plans.Plan do
     belongs_to :run, Bm.Runs.Run
 
     has_many :tasks, Bm.Plans.Task, preload_order: [asc: :position]
+    # Filled by `Bm.Plans.list_plans/2`.
+    field :task_count, :integer, virtual: true
 
     timestamps(type: :utc_datetime_usec)
   end

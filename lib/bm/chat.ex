@@ -17,6 +17,14 @@ defmodule Bm.Chat do
 
   @name __MODULE__
 
+  # Notes saying which plan is current (`plan_note/2` keeps only the newest).
+  @plan_notes [
+    "the current plan is",
+    "the user switched to plan",
+    "the user put the current plan aside",
+    "the user archived the current plan"
+  ]
+
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: @name)
 
   def topic, do: "chat"
@@ -45,8 +53,11 @@ defmodule Bm.Chat do
   """
   def remove_task(key), do: GenServer.call(@name, {:remove_task, key})
 
-  @doc "Makes plan `id` the current one (or none with nil)."
+  @doc "Makes plan `id` of the current repository the current one (or none with nil)."
   def select_plan(id), do: GenServer.call(@name, {:select_plan, id})
+
+  @doc "Archives plan `id` of the current repository (it leaves the plans list)."
+  def archive_plan(id), do: GenServer.call(@name, {:archive_plan, id})
 
   ## Server
 
@@ -70,7 +81,7 @@ defmodule Bm.Chat do
   @impl true
   def handle_call(request, from, %{root: nil} = state) do
     {root, workspace} = default_root()
-    handle_call(request, from, %{state | root: root, workspace: workspace})
+    handle_call(request, from, restore_plan(%{state | root: root, workspace: workspace}))
   end
 
   def handle_call(:state, _from, state), do: {:reply, public(state), state}
@@ -112,7 +123,10 @@ defmodule Bm.Chat do
          :ok <- Bm.Workspace.Git.check_root(root),
          {:ok, workspace} <- Runs.ensure_workspace(root) do
       state = stop_agent(state)
-      state = %{state | root: root, workspace: workspace, plan_id: nil, questions: [], notes: []}
+
+      state =
+        restore_plan(%{state | root: root, workspace: workspace, questions: [], notes: []})
+
       state = ensure_started(state)
       {:reply, :ok, state}
     else
@@ -134,12 +148,39 @@ defmodule Bm.Chat do
     end
   end
 
-  def handle_call({:select_plan, nil}, _from, state),
-    do: {:reply, :ok, broadcast(%{state | plan_id: nil})}
+  def handle_call({:select_plan, nil}, _from, state) do
+    state = plan_note(state, "the user put the current plan aside; there is no current plan now")
+    {:reply, :ok, broadcast(%{state | plan_id: nil, questions: []})}
+  end
 
   def handle_call({:select_plan, id}, _from, state) do
+    case Plans.get_plan!(id) do
+      %{workspace_id: workspace_id} = plan when workspace_id == state.workspace.id ->
+        state =
+          plan_note(state, "the user switched to plan \"#{plan.title}\"; call get_plan to see it")
+
+        {:reply, :ok, broadcast(%{state | plan_id: plan.id, questions: []})}
+
+      _other ->
+        {:reply, {:error, :other_repository}, state}
+    end
+  end
+
+  def handle_call({:archive_plan, id}, _from, state) do
     plan = Plans.get_plan!(id)
-    {:reply, :ok, broadcast(%{state | plan_id: plan.id})}
+
+    if plan.workspace_id == state.workspace.id do
+      {:ok, _} = Plans.update_plan(plan, %{status: :archived})
+
+      state =
+        if state.plan_id == plan.id,
+          do: broadcast(plan_note(%{state | plan_id: nil}, "the user archived the current plan")),
+          else: state
+
+      {:reply, :ok, state}
+    else
+      {:reply, {:error, :other_repository}, state}
+    end
   end
 
   @impl true
@@ -327,6 +368,29 @@ defmodule Bm.Chat do
     scope = if plan.scope in [nil, ""], do: "", else: "\nScope:\n#{plan.scope}"
 
     "Current plan \"#{plan.title}\" (#{plan.status}). Goal: #{plan.goal}#{scope}\nTasks:\n#{tasks}"
+  end
+
+  # The repository's latest plan becomes current again (after a restart or a repository change);
+  # the agent's conversation is new, so it is told.
+  defp restore_plan(state) do
+    case Plans.latest_plan(state.workspace.id) do
+      nil ->
+        %{state | plan_id: nil}
+
+      plan ->
+        plan_note(
+          %{state | plan_id: plan.id},
+          "the current plan is \"#{plan.title}\"; call get_plan to see it"
+        )
+    end
+  end
+
+  defp note(state, text), do: %{state | notes: state.notes ++ [text]}
+
+  # A newer word on which plan is current replaces the older ones.
+  defp plan_note(state, text) do
+    notes = Enum.reject(state.notes, &String.starts_with?(&1, @plan_notes))
+    note(%{state | notes: notes}, text)
   end
 
   defp with_notes(text, []), do: text

@@ -49,7 +49,14 @@ at `BM_URL`.
 
 ## Use it
 
-**In the browser.** On the Tasks page, choose *Goal* (the planner splits it) or *Single task*,
+**Plan in the chat.** The home page is a chat with a read-only planning agent in the repository
+you pick. Ask for a plan: it reads the code and builds the plan on the board beside the chat,
+tasks with why, what exists, approach, files, done-when, risks and a check. Refine a task, ask it
+to dig deeper, remove one, or press *Grill this plan* to have it question the plan and the scope
+of work with you. Plans are kept per repository (the *Plan* menu, which also lists recent runs).
+
+**Run in the browser.** On the Runs page (`/runs`, from the Plan menu or *Run as a guarded goal*),
+choose *Goal* (the planner splits it) or *Single task*,
 give the repository path, its verify command and optionally a budget. The run page shows the plan
 as a live canvas, each attempt with its diff, verification, review and activity, and the actions
 of the moment: Pause, Stop, Keep, Revert, Undo this task, Resume planning, Commit these changes.

@@ -366,7 +366,9 @@ repository and tasks so far go ahead of the new session's first turn instead (pl
 - Extensions: `bm_common` (dialog and notify helpers, `/bm-shutdown`), `bm_planner`
   (`propose_task`, `close_plan`), `bm_worker` (`submit_result`), `bm_guard` (asks the BEAM before
   every edit, write and bash call; fails closed).
-- Chat page (`/chat`, not guarded by BM) with a Svelte Flow canvas showing the agent node.
+- Chat page (home `/`, also `/chat`; Phases 32–35): `Bm.Chat` owns one read-only pi agent (`:chat`
+  profile, `bm_chat` plan tools, `bm_guard`) whose plans are stored by `Bm.Plans` and shown on the
+  plan board; a Svelte Flow canvas (Activity) shows the agent and its tool calls. Runs: `/runs`.
 - Process groups (Phase 1, D18): `priv/pi/setsid.pl`, `Bm.Proc`; pi starts as a group leader,
   `bm_guard` records every bash command's group in `BM_PGID_FILE`, and all groups are ended when
   pi exits or the agent stops.
@@ -389,7 +391,7 @@ repository and tasks so far go ahead of the new session's first turn instead (pl
   attempt time limit and stall timeout, revert of the latest attempt, and minimal recovery at
   application start and coordinator start (`Bm.Workspace.Recovery`).
 
-- UI (Phase 6): Tasks page and run page (live attempts, diffs, verification, Stop / Keep /
+- UI (Phase 6): Runs page and run page (live attempts, diffs, verification, Stop / Keep /
   Revert / Finish), checked in a browser (docs/screenshots); the chat page at `/chat` is not
   guarded by BM. Milestone B exit gate passed live;
   `mix bm.bench` compares plain pi with BM (docs/BENCHMARK.md).
@@ -523,7 +525,7 @@ supervisor agents before the basic system is reliable.
 | `lib/bm/policy.ex` | Decides the worker's edit/write paths and bash commands |
 | `lib/bm/prompts.ex` | Worker prompt |
 | `lib/bm/workspace/verify.ex` | Runs the verify command as its own process group |
-| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Tasks page, run page, status badges and diffs |
+| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Runs page, run page, status badges and diffs |
 | `lib/mix/tasks/bm.bench.ex` | Benchmark: plain pi vs BM |
 | `test/live/milestone_b_test.exs` | Milestone B exit gate (live) |
 | `lib/bm/runs.ex`, `lib/bm/runs/` | Workspaces, runs, tasks, attempts (Postgres) and the attempt state machine |
@@ -532,8 +534,8 @@ supervisor agents before the basic system is reliable.
 | `priv/pi/extensions/bm_planner.ts` | `propose_task`, `close_plan` |
 | `priv/pi/extensions/bm_worker.ts` | `submit_result` |
 | `priv/pi/extensions/bm_guard.ts` | Asks the BEAM before edit, write and bash |
-| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Tasks page, run page, badges / diffs / time helpers |
-| `lib/bm_web/live/chat_live.ex`, `lib/bm_web/live/flow_live.ex`, `assets/svelte/` | Chat with pi (not guarded) and the agent canvas |
+| `lib/bm_web/live/home_live.ex`, `lib/bm_web/live/run_live.ex`, `lib/bm_web/components/run_components.ex` | Runs page, run page, badges / diffs / time helpers |
+| `lib/bm/chat.ex`, `lib/bm/plans.ex`, `lib/bm_web/live/chat_live.ex`, `priv/pi/extensions/bm_chat.ts`, `assets/svelte/` | Planning chat, plans, plan board and the agent canvas |
 | `test/support/fake_pi.mjs` | Scripted pi stand-in |
 | `test/live/qualification_test.exs` | Live qualification suite (`mix test --only live`) |
 

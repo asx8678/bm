@@ -48,6 +48,29 @@ defmodule Bm.Plans do
     )
   end
 
+  @doc "The plans of one checkout (not archived), most recently changed first, with task counts."
+  def list_plans(workspace_id, limit) do
+    counts = from t in Task, group_by: t.plan_id, select: %{plan_id: t.plan_id, n: count(t.id)}
+
+    Repo.all(
+      from p in Plan,
+        left_join: c in subquery(counts),
+        on: c.plan_id == p.id,
+        where: p.workspace_id == ^workspace_id and p.status != :archived,
+        order_by: [desc: p.updated_at, desc: p.id],
+        limit: ^limit,
+        select_merge: %{task_count: coalesce(c.n, 0)}
+    )
+  end
+
+  @doc "The checkout's most recently changed plan that is not archived, or nil."
+  def latest_plan(workspace_id) do
+    case list_plans(workspace_id, 1) do
+      [plan] -> plan
+      [] -> nil
+    end
+  end
+
   def list_tasks(%Plan{id: plan_id}), do: Repo.all(where(tasks_query(), plan_id: ^plan_id))
 
   defp tasks_query, do: from(t in Task, order_by: [asc: t.position, asc: t.id])

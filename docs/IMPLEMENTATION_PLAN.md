@@ -1846,3 +1846,29 @@ also a textkit command); answered with one pick, one own answer and one left ope
 tasks 1 and 2, added `add_vowels_cli`, wrote the scope (in / out / assumptions, shown on the
 board) and said the plan was settled. The checkout stayed clean. Fixed during the check: picking
 an option scrolled the whole layout (the hidden radio was positioned outside its pill).
+
+## Phase 35: one screen
+
+**35.1 Chat is home.** `/` is the chat with the plan board (`/chat` stays as an alias); the
+Tasks tab is gone. The former Tasks page (start a run, the runs list) is the Runs page at `/runs`,
+reached from the Plan menu and from Run as a guarded goal; runs pages show a Chat · Runs nav.
+
+**35.2 Plan menu.** The plan line in the chat column opens a menu: this repository's plans (task
+count, last change; switch, archive), New plan (puts the current one aside), the five latest runs
+and All runs. `Bm.Plans.list_plans/2` (per checkout, with task counts) and `latest_plan/1`;
+`Bm.Chat.select_plan/1` and `archive_plan/1` refuse plans of another repository.
+
+**35.3 The plan survives restarts.** When `Bm.Chat` picks its repository (first use after a
+start, or a repository change), the repository's latest plan becomes current again. The agent's
+conversation is new, so it is told with the next message, as for every switch or archive; a newer
+note on which plan is current replaces the older ones. Board notes show apart from the user's
+message ("Told the agent: …").
+
+**Status: Phase 35 done (2026-10-01).** Checked live on `bm-sandbox` (served on another port,
+headless Chrome): `/`, `/chat`, `/runs`, `/runs/77` answer; after a restart the chat opened with
+the latest plan (countVowels) and the agent, asked, called `get_plan` and named it; the Plan menu
+listed three plans and five runs; switching to capitalize made the agent name that plan (one note,
+the older one dropped); archiving the current plan emptied the board and took it off the list,
+and the next start restored the latest remaining plan. Fixed during the check: a message sent
+while the agent was still starting was lost (the composer emptied it); it now stays in the box
+with the flash, and goes once sent again.

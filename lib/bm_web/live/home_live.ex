@@ -1,6 +1,6 @@
 defmodule BmWeb.HomeLive do
   @moduledoc """
-  Tasks page: start work in a checkout and see the recent runs. Two ways to start:
+  Runs page (plan 35: /runs, reached from the chat): start work in a checkout and see the recent runs. Two ways to start:
 
     * **Goal** (milestone C, plan 8.1): a planner splits the goal into tasks that guarded
       workers run one at a time (`Coordinator.start_goal/3`);
@@ -26,7 +26,7 @@ defmodule BmWeb.HomeLive do
     {:ok,
      socket
      |> assign(
-       page_title: "Tasks",
+       page_title: "Runs",
        runs_empty?: runs == [],
        search: to_form(%{"text" => "", "status" => ""}, as: :search),
        runs_limit: @page,
@@ -357,7 +357,7 @@ defmodule BmWeb.HomeLive do
       )
 
     ~H"""
-    <Layouts.app flash={@flash} active={:tasks}>
+    <Layouts.app flash={@flash} active={:runs}>
       <div class="mx-auto grid max-w-5xl grid-cols-[minmax(0,1fr)] gap-8 px-4 py-8 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <section aria-labelledby="new-task-title" class="min-w-0">
           <div class="flex flex-wrap items-center justify-between gap-3">
