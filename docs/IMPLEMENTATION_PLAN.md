@@ -1666,3 +1666,34 @@ benchmark was not re-run). Same three goals, three runs per mode, zro/glm-5.3:
   never reuse a leftover folder (`System.unique_integer` restarts in each new BEAM, and a stopped
   run leaves its folder behind; one from the stopped Phase 9 run was still there).
 
+---
+
+## Phase 29: is the UI wired?
+
+Asked by the user 2026-10-01: much was built, little changed in the UI; check that everything
+is wired. Checked every LiveView event against its handler and template (all wired; `phx-click="go"`
+is only a doc example; `/flow` is an unlinked Svelte Flow demo page from the prototype), each
+feature since Phase 9 for a place in the UI, and the pages in headless Chrome at desktop and phone
+width. Found and fixed:
+
+- **Run page header on a phone:** the title block could shrink to a sliver next to the cost (one
+  word per line; a long goal filled a whole screen). It now takes the full row on small screens;
+  long goals show three lines and expand on a click.
+- **Tasks page pre-filled a removed checkout** (the last used workspace, a deleted clone). It now
+  pre-fills the last used workspace that still exists.
+- **The runs list never updated and could not show that a run waits for the user.** While it
+  shows an unfinished run it reloads every 5 s, and a run whose lane is held (Keep or Revert) or
+  whose worker asks a question gets a "Needs you" badge (from running coordinators only).
+- **An attempt's Activity hid BM's notes** (a steer, an approval, a stop) inside a closed fold; the
+  summary now counts them ("1 note from BM").
+
+Checked: run 89 on a phone (header wraps, title clamped; page 3,263 → 1,680 px); the Tasks page
+pre-fills the sandbox; run 136's Activity reads "16 tool calls, 5 failed · 1 note from BM"; a
+staged held run on a scratch server (fake pi) showed "Needs you", and after a revert through the
+API the badge went away within the refresh, without a reload.
+
+Not done (decisions for the user): workspace settings that the code reads but no page sets
+(review on or off, how many runs' checkpoints to keep); whether to remove the `/flow` demo page.
+
+**Status: Phase 29 done (2026-10-01).**
+

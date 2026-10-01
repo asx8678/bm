@@ -39,13 +39,55 @@ defmodule BmWeb.HomeLive do
        # Goal review (plan 12.3): nil, :running, or %{questions, goal, cost}.
        review: nil
      )
-     |> stream(:runs, runs)}
+     |> assign(waiting: waiting(runs), live_runs?: unfinished?(runs))
+     |> stream(:runs, runs)
+     |> then(&if(connected?(&1), do: schedule_refresh(&1), else: &1))}
+  end
+
+  # While the list shows an unfinished run, it is reloaded every few seconds: statuses change and
+  # a run may start waiting for the user (plan 29).
+  @refresh 5_000
+
+  defp schedule_refresh(socket) do
+    Process.send_after(self(), :refresh, @refresh)
+    socket
+  end
+
+  @impl true
+  def handle_info(:refresh, socket) do
+    socket = if socket.assigns.live_runs?, do: load_runs(socket), else: socket
+    {:noreply, schedule_refresh(socket)}
+  end
+
+  defp unfinished?(runs), do: Enum.any?(runs, &(&1.status in [:active, :paused]))
+
+  # Unfinished runs that wait for the user: changes for Keep or Revert, or a worker's question.
+  # Asks only coordinators that are running; it never starts one.
+  defp waiting(runs) do
+    for %{status: status} = run <- runs,
+        status in [:active, :paused],
+        waits?(run),
+        into: MapSet.new() do
+      run.id
+    end
+  end
+
+  defp waits?(%{id: id, workspace: workspace}) do
+    case Coordinator.state(workspace.path) do
+      %{run_id: ^id, lane: {:held, _}} -> true
+      %{run_id: ^id, approvals: [_ | _]} -> true
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
   end
 
   # Prefills the requested workspace (`?path=`) or the last used one, with its verify command.
   defp default_form(workspaces, requested) do
+    # The last used workspace whose checkout still exists (a removed clone is no default).
     {path, verify} =
-      case Enum.find(workspaces, &(&1.path == requested)) || List.first(workspaces) do
+      case Enum.find(workspaces, &(&1.path == requested)) ||
+             Enum.find(workspaces, &File.dir?(&1.path)) do
         %{path: path, verify_command: verify} -> {path, verify}
         nil -> {requested || File.cwd!(), nil}
       end
@@ -194,6 +236,7 @@ defmodule BmWeb.HomeLive do
 
     socket
     |> assign(more_runs?: more?, runs_empty?: runs == [])
+    |> assign(waiting: waiting(runs), live_runs?: unfinished?(runs))
     |> stream(:runs, runs, reset: true)
   end
 
@@ -619,6 +662,13 @@ defmodule BmWeb.HomeLive do
               >
                 <div class="flex items-center gap-2">
                   <.run_status status={run.status} />
+                  <span
+                    :if={MapSet.member?(@waiting, run.id)}
+                    id={"run-#{run.id}-waits"}
+                    class="flex-none rounded-full bg-bm-run/15 px-2 py-0.5 text-[10px] font-semibold text-bm-run"
+                  >
+                    Needs you
+                  </span>
                   <span class="min-w-0 flex-1 truncate text-[13px] font-medium">{run.goal}</span>
                 </div>
                 <div class="mt-1 flex items-center gap-2 text-[11px] text-bm-muted">

@@ -601,7 +601,8 @@ defmodule BmWeb.RunLive do
     <Layouts.app flash={@flash} active={:tasks}>
       <div class="mx-auto max-w-4xl px-4 py-6">
         <header class="flex flex-wrap items-start gap-x-4 gap-y-2">
-          <div class="min-w-0 flex-1">
+          <%!-- Full width on a phone (it wraps under the cost), sharing the row from sm up --%>
+          <div class="min-w-0 flex-[1_1_100%] sm:flex-1">
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-bm-muted">
               <.run_status id="run-status" status={@run.status} />
               <div class="bm-meta flex flex-wrap items-center gap-y-1">
@@ -612,7 +613,15 @@ defmodule BmWeb.RunLive do
                 </span>
               </div>
             </div>
-            <h1 id="run-goal" class="mt-1.5 text-lg font-semibold leading-snug">{@run.goal}</h1>
+            <%!-- Long goals show three lines; a click shows the whole goal --%>
+            <h1
+              id="run-goal"
+              phx-click={JS.toggle_class("line-clamp-3", to: "#run-goal")}
+              title="Click to show or hide the whole goal"
+              class="mt-1.5 line-clamp-3 cursor-pointer text-lg font-semibold leading-snug"
+            >
+              {@run.goal}
+            </h1>
             <p class="mt-1 flex min-w-0 items-baseline gap-1.5 text-[11px]" title={@root}>
               <span class="flex-none font-mono font-medium">{Path.basename(@root)}</span>
               <span class="min-w-0 truncate font-mono text-bm-muted">{@root}</span>
@@ -1504,8 +1513,13 @@ defmodule BmWeb.RunLive do
   defp activity_summary(transcript) do
     tools = Enum.count(transcript, &(&1["t"] == "tool"))
     failed = Enum.count(transcript, &(&1["t"] == "tool" and &1["status"] == "error"))
+    notes = Enum.count(transcript, &(&1["t"] == "notice"))
     base = "#{tools} tool #{if tools == 1, do: "call", else: "calls"}"
-    if failed > 0, do: base <> ", #{failed} failed", else: base
+    base = if failed > 0, do: base <> ", #{failed} failed", else: base
+    # BM's notes (a steer, an approval, a stop) are worth opening the fold for.
+    if notes > 0,
+      do: base <> " · #{notes} #{if notes == 1, do: "note", else: "notes"} from BM",
+      else: base
   end
 
   defp tool_mark("ok"), do: "✓"
