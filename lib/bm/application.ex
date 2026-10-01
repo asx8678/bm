@@ -20,6 +20,7 @@ defmodule Bm.Application do
       {DynamicSupervisor, name: Bm.Workspace.Supervisor, strategy: :one_for_one},
       # Blocking work of coordinators (starting/stopping pi, verification)
       {Task.Supervisor, name: Bm.TaskSupervisor},
+      Bm.Chat,
       # Attempts left in flight by the previous run of the app (docs/ARCHITECTURE.md §11)
       recovery(),
       # Start to serve requests, typically the last entry

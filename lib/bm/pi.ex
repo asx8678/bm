@@ -84,5 +84,8 @@ defmodule Bm.Pi do
   @doc false
   def via(id), do: {:via, Registry, {Bm.Pi.Registry, id}}
 
+  @doc "Whether an agent with this id is running."
+  def alive?(id), do: Registry.lookup(Bm.Pi.Registry, id) != []
+
   defp topic(id), do: "pi_agent:#{id}"
 end
