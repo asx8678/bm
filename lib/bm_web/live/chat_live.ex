@@ -68,6 +68,16 @@ defmodule BmWeb.ChatLive do
     :exit, _ -> {[], @no_summary}
   end
 
+  defp answer(%{"own" => own} = answer) when own != "" do
+    case String.trim(own) do
+      "" -> answer(Map.delete(answer, "own"))
+      own -> own
+    end
+  end
+
+  defp answer(%{"pick" => pick}) when pick != "", do: pick
+  defp answer(_), do: "(no answer: your call)"
+
   defp task(%{assigns: %{plan: %{tasks: tasks}}}, key), do: Enum.find(tasks, &(&1.key == key))
   defp task(_socket, _key), do: nil
 
@@ -100,21 +110,33 @@ defmodule BmWeb.ChatLive do
     end
   end
 
-  # An option of a question card: once every question has an answer they go as one message.
-  def handle_event("pick", %{"question" => i, "option" => option}, socket) do
-    questions = socket.assigns.chat.questions
-    answers = Map.put(socket.assigns.answers, String.to_integer(i), option)
+  # The question cards are one form: per question a picked option and/or the user's own answer.
+  def handle_event("answers_changed", %{"answers" => answers}, socket),
+    do: {:noreply, assign(socket, answers: answers)}
 
-    if map_size(answers) == length(questions) do
-      text =
-        questions
-        |> Enum.with_index()
-        |> Enum.map_join("\n\n", fn {q, i} -> "#{q.question}\n→ #{answers[i]}" end)
+  def handle_event("send_answers", params, socket) do
+    answers = Map.get(params, "answers", %{})
 
-      handle_event("send", %{"text" => text}, assign(socket, answers: %{}))
-    else
-      {:noreply, assign(socket, answers: answers)}
-    end
+    text =
+      socket.assigns.chat.questions
+      |> Enum.with_index()
+      |> Enum.map_join("\n\n", fn {q, i} ->
+        "#{q.question}\n→ #{answer(answers[to_string(i)])}"
+      end)
+
+    handle_event("send", %{"text" => text}, assign(socket, answers: %{}))
+  end
+
+  # Plan 34: the agent questions the plan against the code, round by round.
+  def handle_event("grill", _params, socket) do
+    handle_event(
+      "send",
+      %{
+        "text" =>
+          "Grill this plan: check it against the code and the scope of work, and ask me what only I can decide."
+      },
+      socket
+    )
   end
 
   def handle_event("pane", %{"pane" => pane}, socket) when pane in ~w(plan activity),
@@ -494,39 +516,58 @@ defmodule BmWeb.ChatLive do
               <span class="size-1.5 animate-pulse rounded-full bg-bm-run motion-reduce:animate-none"></span>
               Working
             </div>
-            <div :if={@chat.questions != []} id="questions" class="space-y-2">
-              <div
+            <.form
+              :if={@chat.questions != []}
+              for={to_form(@answers, as: :answers)}
+              id="questions"
+              phx-change="answers_changed"
+              phx-submit="send_answers"
+              class="space-y-2"
+            >
+              <fieldset
                 :for={{q, i} <- Enum.with_index(@chat.questions)}
                 id={"question-#{i}"}
                 class="rounded-lg border border-bm-line bg-bm-bg p-2.5"
               >
+                <legend class="sr-only">Question {i + 1}</legend>
                 <p class="text-xs font-medium leading-relaxed">{q.question}</p>
                 <div :if={q.options != []} class="mt-2 flex flex-wrap gap-1.5">
-                  <button
+                  <label
                     :for={option <- q.options}
-                    type="button"
-                    phx-click="pick"
-                    phx-value-question={i}
-                    phx-value-option={option}
-                    aria-pressed={to_string(@answers[i] == option)}
-                    class={[
-                      "rounded-md border px-2 py-0.5 text-left text-xs transition-colors",
-                      if(@answers[i] == option,
-                        do: "border-bm-text bg-bm-text text-bm-surface",
-                        else: "border-bm-line hover:bg-bm-raised"
-                      )
-                    ]}
+                    class="relative cursor-pointer rounded-md border border-bm-line px-2 py-0.5 text-xs transition-colors hover:bg-bm-raised has-checked:border-bm-text has-checked:bg-bm-text has-checked:text-bm-surface has-focus-visible:outline-2 has-focus-visible:outline-bm-text"
                   >
+                    <input
+                      type="radio"
+                      name={"answers[#{i}][pick]"}
+                      value={option}
+                      checked={get_in(@answers, [to_string(i), "pick"]) == option}
+                      class="sr-only"
+                    />
                     {option}
-                  </button>
+                  </label>
                 </div>
+                <input
+                  type="text"
+                  name={"answers[#{i}][own]"}
+                  value={get_in(@answers, [to_string(i), "own"])}
+                  placeholder={if q.options == [], do: "Your answer", else: "Or your own answer"}
+                  aria-label={"Your own answer to: #{q.question}"}
+                  class="mt-2 block w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-xs outline-none transition-colors placeholder:text-bm-muted hover:border-bm-line focus:border-bm-muted"
+                />
+              </fieldset>
+              <div class="flex items-center justify-between gap-2">
+                <p class="text-[11px] text-bm-muted">
+                  Unanswered questions are left to the agent.
+                </p>
+                <button
+                  id="send-answers"
+                  type="submit"
+                  class="flex-none rounded-md bg-bm-text px-2.5 py-1 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
+                >
+                  Send answers
+                </button>
               </div>
-              <p class="text-[11px] text-bm-muted">
-                {if length(@chat.questions) > 1,
-                  do: "Pick an answer to each; they are sent together. Or write your own below.",
-                  else: "Pick an answer or write your own below."}
-              </p>
-            </div>
+            </.form>
           </div>
         </div>
 
@@ -710,6 +751,22 @@ defmodule BmWeb.ChatLive do
           <span class="flex-none rounded-full border border-bm-line px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-bm-muted">
             {@plan.status}
           </span>
+          <button
+            :if={@plan.tasks != []}
+            id="grill-plan"
+            type="button"
+            phx-click="grill"
+            disabled={@busy}
+            title={
+              if @busy,
+                do: "The agent is busy",
+                else:
+                  "The agent checks the plan against the code and the scope, and asks you what only you can decide"
+            }
+            class="inline-flex flex-none items-center gap-1 rounded-md border border-bm-line px-2.5 py-1 text-xs font-medium transition-colors hover:bg-bm-raised disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <.icon name="hero-chat-bubble-left-right" class="size-3.5" /> Grill this plan
+          </button>
         </div>
         <p class="mt-1.5 text-[13px] leading-relaxed">{@plan.goal}</p>
         <details :if={@plan.findings not in [nil, ""]} id="plan-findings" class="group mt-2">
@@ -721,6 +778,15 @@ defmodule BmWeb.ChatLive do
           </p>
         </details>
       </header>
+
+      <section
+        :if={@plan.scope not in [nil, ""]}
+        id="plan-scope"
+        class="mb-5 rounded-xl border border-bm-line bg-bm-surface px-4 py-3"
+      >
+        <h3 class="text-[10px] font-semibold uppercase tracking-wide text-bm-muted">Scope of work</h3>
+        <p class="mt-1.5 whitespace-pre-line text-xs leading-relaxed">{@plan.scope}</p>
+      </section>
 
       <p
         :if={@plan.tasks == []}
