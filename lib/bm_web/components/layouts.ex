@@ -29,7 +29,7 @@ defmodule BmWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
-  attr :active, :atom, default: nil, doc: "the current section: :tasks or :chat"
+  attr :active, :atom, default: nil, doc: "the current section: :chat or :runs"
   attr :full, :boolean, default: false, doc: "fill the viewport height (no window scrolling)"
 
   slot :inner_block, required: true
@@ -47,9 +47,10 @@ defmodule BmWeb.Layouts do
           <span class="text-sm font-bold tracking-wide">BM</span>
           <span class="hidden text-[11px] text-bm-muted sm:inline">guarded coding runs</span>
         </.link>
-        <nav class="flex items-center gap-0.5 text-xs" aria-label="Sections">
-          <.nav_link navigate={~p"/"} active={@active == :tasks} id="nav-tasks">Tasks</.nav_link>
-          <.nav_link navigate={~p"/chat"} active={@active == :chat} id="nav-chat">Chat</.nav_link>
+        <%!-- One screen (plan 35): the chat is home; runs pages show the way back. --%>
+        <nav :if={@active == :runs} class="flex items-center gap-0.5 text-xs" aria-label="Sections">
+          <.nav_link navigate={~p"/"} id="nav-chat">Chat</.nav_link>
+          <.nav_link navigate={~p"/runs"} active id="nav-runs">Runs</.nav_link>
         </nav>
         <div class="ml-auto flex min-w-0 items-center gap-3">
           {render_slot(@status)}

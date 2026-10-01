@@ -40,6 +40,9 @@ defmodule BmWeb.ChatLive do
        graph: graph(summary, transcript, nil),
        form: to_form(%{"text" => ""}),
        answers: %{},
+       plans_open: false,
+       plans: [],
+       runs: [],
        pane: :plan,
        open: MapSet.new(),
        refining: nil,
@@ -68,6 +71,27 @@ defmodule BmWeb.ChatLive do
     :exit, _ -> {[], @no_summary}
   end
 
+  # A message that didn't go goes back into the box: the hook refills it (the composer emptied it
+  # on submit) and the form holds it for later renders.
+  defp keep_in_composer(socket, text) do
+    socket
+    |> assign(form: to_form(%{"text" => text}))
+    |> push_event("composer:restore", %{text: text})
+  end
+
+  defp ago(%DateTime{} = at) do
+    case DateTime.diff(DateTime.utc_now(), at) do
+      s when s < 60 -> "just now"
+      s when s < 3600 -> "#{div(s, 60)} min ago"
+      s when s < 86_400 -> "#{div(s, 3600)} h ago"
+      s -> "#{div(s, 86_400)} d ago"
+    end
+  end
+
+  defp run_dot(status) when status in [:done], do: "bg-bm-idle"
+  defp run_dot(status) when status in [:failed, :cancelled], do: "bg-bm-error"
+  defp run_dot(_status), do: "bg-bm-run"
+
   defp answer(%{"own" => own} = answer) when own != "" do
     case String.trim(own) do
       "" -> answer(Map.delete(answer, "own"))
@@ -94,18 +118,19 @@ defmodule BmWeb.ChatLive do
         {:noreply, socket}
 
       text ->
-        socket = assign(socket, form: to_form(%{"text" => ""}))
-
         case Bm.Chat.prompt(text) do
           :ok ->
-            {:noreply, socket}
+            {:noreply, assign(socket, form: to_form(%{"text" => ""}))}
 
           {:error, {:not_ready, _}} ->
             {:noreply,
-             put_flash(socket, :error, "The agent is still starting; try again in a moment.")}
+             socket
+             |> keep_in_composer(text)
+             |> put_flash(:error, "The agent is still starting; send again in a moment.")}
 
           {:error, _} ->
-            {:noreply, put_flash(socket, :error, "The agent is not running.")}
+            {:noreply,
+             socket |> keep_in_composer(text) |> put_flash(:error, "The agent is not running.")}
         end
     end
   end
@@ -137,6 +162,44 @@ defmodule BmWeb.ChatLive do
       },
       socket
     )
+  end
+
+  # The Plans menu: this repository's plans (switch, archive, start anew) and the recent runs.
+  def handle_event("toggle_plans", _params, %{assigns: %{plans_open: true}} = socket),
+    do: {:noreply, assign(socket, plans_open: false)}
+
+  def handle_event("toggle_plans", _params, socket) do
+    chat = socket.assigns.chat
+    plans = if chat.workspace_id, do: Bm.Plans.list_plans(chat.workspace_id, 20), else: []
+    runs = Bm.Runs.list_recent_runs(5)
+    {:noreply, assign(socket, plans_open: true, plans: plans, runs: runs)}
+  end
+
+  def handle_event("close_plans", _params, socket),
+    do: {:noreply, assign(socket, plans_open: false)}
+
+  def handle_event("select_plan", %{"id" => id}, socket) do
+    id = if id == "", do: nil, else: String.to_integer(id)
+
+    case Bm.Chat.select_plan(id) do
+      :ok ->
+        {:noreply,
+         assign(socket, plans_open: false, open: MapSet.new(), refining: nil, pane: :plan)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
+    end
+  end
+
+  def handle_event("archive_plan", %{"id" => id}, socket) do
+    case Bm.Chat.archive_plan(String.to_integer(id)) do
+      :ok ->
+        plans = Enum.reject(socket.assigns.plans, &(&1.id == String.to_integer(id)))
+        {:noreply, assign(socket, plans: plans)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
+    end
   end
 
   def handle_event("pane", %{"pane" => pane}, socket) when pane in ~w(plan activity),
@@ -386,7 +449,7 @@ defmodule BmWeb.ChatLive do
 
   defp selected_tool(_transcript, _id), do: nil
 
-  # The last thing the user asked: what "Run as a guarded goal" hands to the Tasks page.
+  # The last thing the user asked: what "Run as a guarded goal" hands to the Runs page.
   defp last_request(transcript) do
     transcript |> Enum.reverse() |> Enum.find_value(&(&1.role == :user && &1.text))
   end
@@ -450,17 +513,122 @@ defmodule BmWeb.ChatLive do
           </button>
         </.form>
         <div
-          :if={@plan}
-          id="current-plan"
-          class="flex flex-none items-center gap-2 border-b border-bm-line px-3 py-2 text-xs"
+          id="plans-menu"
+          class="relative flex-none border-b border-bm-line"
+          phx-click-away={@plans_open && "close_plans"}
         >
-          <span class="flex-none rounded bg-bm-raised px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
-            Plan
-          </span>
-          <span class="min-w-0 flex-1 truncate font-medium" title={@plan.goal}>{@plan.title}</span>
-          <span class="flex-none text-bm-muted">
-            {length(@plan.tasks)} {if length(@plan.tasks) == 1, do: "task", else: "tasks"}
-          </span>
+          <button
+            id="plans-toggle"
+            type="button"
+            phx-click="toggle_plans"
+            aria-expanded={to_string(@plans_open)}
+            aria-controls="plans-list"
+            class="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-bm-raised/60"
+          >
+            <span class="flex-none rounded bg-bm-raised px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
+              Plan
+            </span>
+            <span :if={@plan} class="min-w-0 flex-1 truncate font-medium" title={@plan.goal}>
+              {@plan.title}
+            </span>
+            <span :if={!@plan} class="min-w-0 flex-1 truncate text-bm-muted">
+              No plan yet: ask for one in the chat
+            </span>
+            <span :if={@plan} class="flex-none text-bm-muted">
+              {length(@plan.tasks)} {if length(@plan.tasks) == 1, do: "task", else: "tasks"}
+            </span>
+            <.icon
+              name="hero-chevron-down"
+              class={[
+                "size-3.5 flex-none text-bm-muted transition-transform duration-200",
+                @plans_open && "rotate-180"
+              ]}
+            />
+          </button>
+          <div
+            :if={@plans_open}
+            id="plans-list"
+            class="absolute inset-x-2 top-full z-30 mt-1 max-h-[70vh] overflow-y-auto rounded-xl border border-bm-line bg-bm-surface p-1.5 shadow-xl"
+          >
+            <p class="px-2 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
+              Plans in this repository
+            </p>
+            <p :if={@plans == []} class="px-2 py-1.5 text-xs text-bm-muted">None yet.</p>
+            <div
+              :for={plan <- @plans}
+              id={"plans-item-#{plan.id}"}
+              class={[
+                "group flex items-center gap-1 rounded-lg transition-colors hover:bg-bm-raised",
+                @plan && @plan.id == plan.id && "bg-bm-raised"
+              ]}
+            >
+              <button
+                type="button"
+                phx-click="select_plan"
+                phx-value-id={plan.id}
+                class="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+              >
+                <.icon
+                  name="hero-check"
+                  class={[
+                    "size-3.5 flex-none",
+                    if(@plan && @plan.id == plan.id, do: "text-bm-run", else: "invisible")
+                  ]}
+                />
+                <span class="min-w-0 flex-1">
+                  <span class="block truncate text-xs font-medium">{plan.title}</span>
+                  <span class="block text-[10px] text-bm-muted">
+                    {plan.task_count} {if plan.task_count == 1, do: "task", else: "tasks"} · {ago(
+                      plan.updated_at
+                    )}
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                phx-click="archive_plan"
+                phx-value-id={plan.id}
+                data-confirm={"Archive the plan “#{plan.title}”? It leaves this list."}
+                title="Archive this plan"
+                class="mr-1 flex-none rounded-md p-1 text-bm-muted opacity-0 transition-opacity hover:text-bm-text focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <.icon name="hero-archive-box" class="size-3.5" />
+              </button>
+            </div>
+            <button
+              :if={@plan}
+              id="new-plan"
+              type="button"
+              phx-click="select_plan"
+              phx-value-id=""
+              class="mt-0.5 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-bm-muted transition-colors hover:bg-bm-raised hover:text-bm-text"
+            >
+              <.icon name="hero-plus" class="size-3.5" /> New plan (put this one aside)
+            </button>
+
+            <div class="mx-2 my-1.5 border-t border-bm-line"></div>
+            <p class="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wide text-bm-muted">
+              Recent runs
+            </p>
+            <p :if={@runs == []} class="px-2 py-1.5 text-xs text-bm-muted">No runs yet.</p>
+            <.link
+              :for={run <- @runs}
+              navigate={~p"/runs/#{run.id}"}
+              id={"plans-run-#{run.id}"}
+              class="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-bm-raised"
+            >
+              <span class={["size-1.5 flex-none rounded-full", run_dot(run.status)]}></span>
+              <span class="min-w-0 flex-1 truncate text-xs">{run.goal}</span>
+              <span class="flex-none text-[10px] text-bm-muted">{ago(run.updated_at)}</span>
+            </.link>
+            <.link
+              navigate={~p"/runs?#{%{path: @chat.root}}"}
+              id="all-runs"
+              class="mt-0.5 flex items-center justify-between rounded-lg px-2 py-1.5 text-xs font-medium transition-colors hover:bg-bm-raised"
+            >
+              All runs, start a run <.icon name="hero-arrow-right" class="size-3.5" />
+            </.link>
+          </div>
         </div>
         <div
           :if={@transcript != []}
@@ -470,8 +638,8 @@ defmodule BmWeb.ChatLive do
           <.link
             :if={request = last_request(@transcript)}
             id="run-as-goal"
-            navigate={~p"/?#{%{goal: request, path: @chat.root}}"}
-            title="Open this request on the Tasks page as a guarded goal: planned, checked, reviewed, undoable"
+            navigate={~p"/runs?#{%{goal: request, path: @chat.root}}"}
+            title="Open this request on the Runs page as a guarded goal: planned, checked, reviewed, undoable"
             class="rounded-md bg-bm-text px-2.5 py-1 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
           >
             Run as a guarded goal
@@ -698,6 +866,11 @@ defmodule BmWeb.ChatLive do
               this.el.form.requestSubmit()
             }
           })
+          // After LiveView has finished the submit (it puts the locked form back first).
+          this.handleEvent("composer:restore", ({text}) => setTimeout(() => {
+            if (this.el.value === "") this.el.value = text
+            this.resize()
+          }, 50))
           // LiveView reads the form while the submit event bubbles; clear the box after that.
           this.el.form.addEventListener("submit", () => setTimeout(() => {
             this.el.value = ""
@@ -1076,6 +1249,32 @@ defmodule BmWeb.ChatLive do
   defp tokens(_usage), do: "–"
 
   attr :entry, :map, required: true
+
+  # Board notes BM put in front of the user's message (`Bm.Chat`) show apart from it.
+  defp entry(
+         %{entry: %{role: :user, text: "[On the plan board since your last turn: " <> rest}} =
+           assigns
+       ) do
+    {note, text} =
+      case String.split(rest, ".]\n\n", parts: 2) do
+        [note, text] -> {note, text}
+        [_] -> {nil, assigns.entry.text}
+      end
+
+    assigns = assign(assigns, note: note, text: text)
+
+    ~H"""
+    <div class="ml-auto w-fit max-w-[85%]">
+      <p :if={@note} class="mb-1 text-right text-[10px] leading-snug text-bm-muted">
+        <.icon name="hero-information-circle" class="size-3 align-[-2px]" /> Told the agent: {@note}
+      </p>
+      <div
+        class="whitespace-pre-wrap rounded-xl rounded-br-sm bg-bm-raised px-3 py-1.5 text-[13px] leading-relaxed"
+        phx-no-format
+      >{@text}</div>
+    </div>
+    """
+  end
 
   defp entry(%{entry: %{role: :user}} = assigns) do
     ~H"""

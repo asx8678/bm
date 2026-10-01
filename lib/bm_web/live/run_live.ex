@@ -27,7 +27,7 @@ defmodule BmWeb.RunLive do
   end
 
   defp mount_run(nil, socket) do
-    {:ok, socket |> put_flash(:error, "No such run.") |> push_navigate(to: ~p"/")}
+    {:ok, socket |> put_flash(:error, "No such run.") |> push_navigate(to: ~p"/runs")}
   end
 
   defp mount_run(run, socket) do
@@ -621,7 +621,7 @@ defmodule BmWeb.RunLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:tasks}>
+    <Layouts.app flash={@flash} active={:runs}>
       <div class="mx-auto max-w-4xl px-4 py-6">
         <header class="flex flex-wrap items-start gap-x-4 gap-y-2">
           <%!-- Full width on a phone (it wraps under the cost), sharing the row from sm up --%>
@@ -1077,7 +1077,7 @@ defmodule BmWeb.RunLive do
             </.action>
             <.link
               id="new-task-link"
-              navigate={~p"/?#{%{path: @root, mode: if(@goal_run?, do: "goal", else: "task")}}"}
+              navigate={~p"/runs?#{%{path: @root, mode: if(@goal_run?, do: "goal", else: "task")}}"}
               class="rounded-md bg-bm-text px-3 py-1.5 text-xs font-semibold text-bm-surface transition-opacity hover:opacity-85"
             >
               {if @goal_run?, do: "New goal here", else: "New task here"}

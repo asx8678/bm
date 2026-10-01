@@ -7,7 +7,7 @@ defmodule BmWeb.HomeLiveTest do
   @moduletag :tmp_dir
 
   test "shows the task form and the empty run list", %{conn: conn} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/runs")
     assert has_element?(view, "#task-form textarea[name='task[goal]']")
     assert has_element?(view, "#start-task-btn")
     assert has_element?(view, "#runs", "No runs yet.")
@@ -19,14 +19,14 @@ defmodule BmWeb.HomeLiveTest do
     repo = repo!(dir)
     {:ok, workspace} = Bm.Runs.ensure_workspace(repo, %{verify_command: "true"})
 
-    {:ok, view, _html} = live(conn, ~p"/?path=#{repo}")
+    {:ok, view, _html} = live(conn, ~p"/runs?path=#{repo}")
     assert has_element?(view, "#task-form input[name='task[path]'][value='#{workspace.path}']")
     assert has_element?(view, "#task-form input[name='task[verify_command]'][value='true']")
     assert has_element?(view, "#workspaces option[value='#{workspace.path}']")
   end
 
   test "explains what is missing", %{conn: conn, tmp_dir: dir} do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/runs")
 
     view |> form("#task-form", task: %{goal: "", path: dir}) |> render_submit()
     assert has_element?(view, "#task-form", "Describe the task.")
@@ -58,7 +58,7 @@ defmodule BmWeb.HomeLiveTest do
 
   test "starting a task opens its run", %{conn: conn, tmp_dir: dir} do
     repo = dir |> repo!() |> start_coordinator!()
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/runs")
 
     steps =
       JSON.encode!([%{write: ["a.txt", "a\n"]}, %{submit: %{status: "done", summary: "ok"}}])

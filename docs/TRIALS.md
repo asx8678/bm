@@ -1,6 +1,6 @@
 # BM trials on real code (plan phase 11)
 
-Supervised goal runs on a real repository, started from the Tasks page and watched on the run
+Supervised goal runs on a real repository, started from the Runs page and watched on the run
 page. Findings and fixes are recorded here and in IMPLEMENTATION_PLAN.md (Phase 11 status).
 
 ## Setup (11.1)

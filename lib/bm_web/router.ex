@@ -17,9 +17,11 @@ defmodule BmWeb.Router do
   scope "/", BmWeb do
     pipe_through :browser
 
-    live "/", HomeLive
-    live "/runs/:id", RunLive
+    # The chat is home (plan 35); runs are started and listed on /runs.
+    live "/", ChatLive
     live "/chat", ChatLive
+    live "/runs", HomeLive
+    live "/runs/:id", RunLive
   end
 
   # BM's local JSON API for the terminal client (plan 14.2); only answers this machine.
