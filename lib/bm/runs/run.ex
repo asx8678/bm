@@ -42,10 +42,16 @@ defmodule Bm.Runs.Run do
   def unfinished_statuses, do: @unfinished
   def finished_statuses, do: @finished
 
-  @doc "Changeset for a new run; `workspace_id` is set by the caller, not cast."
+  @doc """
+  Changeset for a new run. The goal and budget come from the user; `workspace_id`, `plan_open`,
+  `baseline` and `planner` are BM's and are set, not cast.
+  """
   def create_changeset(run, attrs) do
+    attrs = Map.new(attrs)
+
     run
-    |> cast(attrs, [:goal, :plan_open, :budget_usd, :baseline, :planner])
+    |> cast(attrs, [:goal, :budget_usd])
+    |> change(Map.take(attrs, [:plan_open, :baseline, :planner]))
     |> validate_required([:goal])
     |> validate_number(:budget_usd, greater_than: 0)
     |> unique_constraint(:workspace_id, name: :runs_one_unfinished_per_workspace)

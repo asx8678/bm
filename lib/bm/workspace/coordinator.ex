@@ -419,7 +419,7 @@ defmodule Bm.Workspace.Coordinator do
           Runs.update_task_status(task, :cancelled)
         end
 
-        {:ok, run} = Runs.finish_run(run, status, reason)
+        run = stored(Runs.finish_run(run, status, reason), run)
         if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
         broadcast_run(state, run)
         state = prune_checkpoints(state)
@@ -436,7 +436,7 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:pause_run, run_id, reason}, _from, %{run: %{id: run_id}} = state) do
     case Runs.get_run!(run_id) do
       %{status: :active} = run ->
-        {:ok, run} = Runs.pause_run(run, reason)
+        run = stored(Runs.pause_run(run, reason), run)
         broadcast_run(state, run)
         {:reply, {:ok, run}, %{state | run: run}}
 
@@ -463,7 +463,7 @@ defmodule Bm.Workspace.Coordinator do
         # here would wait out its shutdown timeout and then kill it before it ends its pi
         # session. The run is paused first, so whatever it asks meanwhile is refused.
         if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
-        {:ok, run} = Runs.pause_run(run, "paused by the user")
+        run = stored(Runs.pause_run(run, "paused by the user"), run)
         Task.start(fn -> Bm.Workspace.Planner.stop(run_id) end)
         broadcast_run(state, run)
         {:reply, {:ok, run}, %{state | run: run, planner_ref: nil}}
@@ -490,7 +490,7 @@ defmodule Bm.Workspace.Coordinator do
         {:reply, {:error, :planner_stopping}, state}
 
       true ->
-        {:ok, run} = Runs.resume_run(run)
+        run = stored(Runs.resume_run(run), run)
 
         case start_planner(state, run, Keyword.put(opts, :resume, true)) do
           {:ok, pid} ->
@@ -498,7 +498,9 @@ defmodule Bm.Workspace.Coordinator do
             {:reply, {:ok, run}, %{state | run: run, planner_ref: Process.monitor(pid)}}
 
           {:error, reason} ->
-            {:ok, run} = Runs.pause_run(run, "the planner did not start: #{inspect(reason)}")
+            run =
+              stored(Runs.pause_run(run, "the planner did not start: #{inspect(reason)}"), run)
+
             {:reply, {:error, reason}, %{state | run: run}}
         end
     end
@@ -623,7 +625,7 @@ defmodule Bm.Workspace.Coordinator do
       end
     end
 
-    {:ok, run} = Runs.finish_run(run, status, reason)
+    run = stored(Runs.finish_run(run, status, reason), run)
     broadcast_run(state, run)
     state = prune_checkpoints(state)
     {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
@@ -828,6 +830,11 @@ defmodule Bm.Workspace.Coordinator do
       do: {:done, "finished by the user"},
       else: {:cancelled, "finished by the user before the plan was complete"}
   end
+
+  # A run status write that lost a race (another process changed the run first): what is
+  # stored now counts.
+  defp stored({:ok, run}, _run), do: run
+  defp stored({:error, :stale}, run), do: Runs.get_run!(run.id)
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
@@ -1189,7 +1196,12 @@ defmodule Bm.Workspace.Coordinator do
 
     case state.run && Runs.get_run!(state.run.id) do
       %{status: :active} = run ->
-        {:ok, run} = Runs.pause_run(run, "the planner stopped unexpectedly (#{inspect(reason)})")
+        run =
+          stored(
+            Runs.pause_run(run, "the planner stopped unexpectedly (#{inspect(reason)})"),
+            run
+          )
+
         broadcast_run(state, run)
         {:noreply, %{state | run: run}}
 
@@ -2360,22 +2372,25 @@ defmodule Bm.Workspace.Coordinator do
         {:ok, attempt} ->
           attempt
 
+        # Someone else moved it first: the task follows what is stored, not this outcome
+        # (plan 36.13: a task could read "accepted" while its attempt was not).
         {:error, reason} ->
           Logger.error(
             "attempt #{attempt.id}: #{attempt.status} -> #{status}: #{inspect(reason)}"
           )
 
-          attempt
+          Runs.get_attempt!(attempt.id)
       end
 
-    task_status =
-      case status do
-        :accepted -> :accepted
-        :cancelled -> :cancelled
-        _ -> :failed
-      end
+    task =
+      case task_status(attempt.status) do
+        nil ->
+          state.task
 
-    {:ok, task} = Runs.update_task_status(state.task, task_status)
+        task_status ->
+          {:ok, task} = Runs.update_task_status(state.task, task_status)
+          task
+      end
 
     lane =
       if status != :accepted and attempt.actual_writes != [],
@@ -2394,6 +2409,12 @@ defmodule Bm.Workspace.Coordinator do
         cancel_reason: nil
     })
   end
+
+  defp task_status(:accepted), do: :accepted
+  defp task_status(:cancelled), do: :cancelled
+  defp task_status(status) when status in [:failed, :held, :needs_reconciliation], do: :failed
+  # Still in flight (a move that failed): the task stays as it is.
+  defp task_status(_status), do: nil
 
   ## Keep (4.8)
 
@@ -2496,7 +2517,7 @@ defmodule Bm.Workspace.Coordinator do
 
     case run do
       %{status: :paused} when not waiting? and not planner_gone? ->
-        {:ok, run} = Runs.resume_run(run)
+        run = stored(Runs.resume_run(run), run)
         %{state | run: run}
 
       run ->

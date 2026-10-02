@@ -149,10 +149,25 @@ defmodule Bm.Runs do
   """
   def finish_run(%Run{} = run, status, reason \\ nil)
       when status in [:done, :failed, :cancelled] do
-    run
-    |> Run.status_changeset(status)
-    |> Ecto.Changeset.change(status_reason: reason)
-    |> Repo.update()
+    transition_run(run, [:active, :paused],
+      status: status,
+      finished_at: DateTime.utc_now(),
+      status_reason: reason
+    )
+  end
+
+  # Status changes are compare-and-set, like attempts' (plan 36.13): the write applies only if
+  # the run is still in one of `from`, else `{:error, :stale}`. A blind write could revive a run
+  # another process had just finished, or pause one that had ended.
+  defp transition_run(%Run{id: id} = run, from, changes) do
+    query = from r in Run, where: r.id == ^id and r.status in ^from, select: r
+    changes = Keyword.put(changes, :updated_at, DateTime.utc_now())
+
+    case Repo.update_all(query, set: changes) do
+      # Associations the caller had loaded stay loaded, as with Repo.update.
+      {1, [updated]} -> {:ok, %{updated | workspace: run.workspace, tasks: run.tasks}}
+      {0, []} -> {:error, :stale}
+    end
   end
 
   @doc "Sets fields BM manages on a run: `plan_open`, `planner`, `status_reason`, `reverted_at`."
@@ -175,17 +190,11 @@ defmodule Bm.Runs do
 
   @doc "Pauses a run (e.g. after recovery); it keeps the workspace until finished."
   def pause_run(%Run{status: :active} = run, reason \\ nil) do
-    run
-    |> Run.status_changeset(:paused)
-    |> Ecto.Changeset.change(status_reason: reason || run.status_reason)
-    |> Repo.update()
+    transition_run(run, [:active], status: :paused, status_reason: reason || run.status_reason)
   end
 
   def resume_run(%Run{status: :paused} = run) do
-    run
-    |> Run.status_changeset(:active)
-    |> Ecto.Changeset.change(status_reason: nil)
-    |> Repo.update()
+    transition_run(run, [:paused], status: :active, status_reason: nil)
   end
 
   @doc "Active runs driven by a planner (goal runs), with their workspaces."
@@ -213,8 +222,12 @@ defmodule Bm.Runs do
     Repo.all(from t in Task, where: t.run_id == ^run_id, order_by: [t.inserted_at, t.id])
   end
 
+  # Forced: a struct read earlier may already hold `status` while the row doesn't.
   def update_task_status(%Task{} = task, status) do
-    task |> Ecto.Changeset.change(status: status) |> Repo.update()
+    task
+    |> Ecto.Changeset.change()
+    |> Ecto.Changeset.force_change(:status, status)
+    |> Repo.update()
   end
 
   @doc "The latest revision of every task key in `run`, oldest key first."
@@ -394,13 +407,19 @@ defmodule Bm.Runs do
     )
   end
 
-  @doc "The attempts of a run, newest first."
+  # Bookkeeping reads every attempt of a run on each admission and scheduling step; the
+  # transcript (up to 300 entries each) is left out (plan 36.13). The run page reads it with
+  # `list_run_attempts_with_tasks/1`.
+  @attempt_heads Attempt.__schema__(:fields) -- [:transcript]
+
+  @doc "The attempts of a run, newest first, without their transcripts."
   def list_run_attempts(%Run{id: run_id}) do
     Repo.all(
       from a in Attempt,
         join: t in assoc(a, :task),
         where: t.run_id == ^run_id,
-        order_by: [desc: a.inserted_at, desc: a.id]
+        order_by: [desc: a.inserted_at, desc: a.id],
+        select: struct(a, ^@attempt_heads)
     )
   end
 

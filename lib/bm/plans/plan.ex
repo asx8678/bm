@@ -39,7 +39,7 @@ defmodule Bm.Plans.Plan do
   @doc "Changes the model or the user may make to a plan."
   def update_changeset(plan, attrs) do
     plan
-    |> cast(attrs, [:title, :goal, :findings, :scope, :status])
+    |> cast(attrs, [:title, :goal, :findings, :scope])
     |> validate_required([:title, :goal])
     |> validate_length(:title, max: 200, count: :codepoints)
   end

@@ -2418,3 +2418,21 @@ Verify: as each step above.
     render and not in the static HTML;
   - the CSP header is present; `/`, `/runs`, `/runs/79` and `/runs/90` answer 200.
 - Not exercised: Stop during a pending dialog, and forged bad ids (read only).
+
+**Status 36.13 (2026-10-02).**
+- Run status writes (`finish_run`, `pause_run`, `resume_run`) are compare-and-set
+  (`transition_run/3`, `{:error, :stale}` otherwise). The coordinator then uses what is stored
+  (`stored/2`) instead of crashing or overwriting.
+- Task status writes are forced. `finish/3` sets the task from the attempt's stored status when
+  its own transition lost.
+- The planner's task and run broadcasts made inside a bridge request wait for the commit
+  (`Bm.Bridge.after_commit/1`) and are dropped on a rollback or duplicate.
+- `Runs.list_run_attempts/1` leaves transcripts out.
+- `Run`, `Runs.Task`, `Plans.Plan` and `Bridge.Request` changesets no longer cast BM's own
+  fields (`plan_open`, `baseline`, `planner`, `revision`, `status`, `attempt_id`). Archiving uses
+  `Plans.set_status/2`.
+- A delivery is marked delivered only once the planner took the turn.
+- Tests: none written or run (the user's decision).
+- Checked by re-running the scripts of 36.5, 36.6 and 36.8 (all as before) and a goal run to
+  completion with the fake pi: a flagged attempt (`undeclared_writes`) is delivered, the
+  delivery is marked delivered, the planner closes the plan in wave 2, and the run is `done`.

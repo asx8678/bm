@@ -34,6 +34,11 @@ defmodule Bm.Plans do
     plan |> Plan.update_changeset(Map.new(attrs)) |> Repo.update() |> broadcast(:plan)
   end
 
+  @doc "Sets a plan's status (BM's, not the model's: `:archived` from the Plan menu)."
+  def set_status(%Plan{} = plan, status) do
+    plan |> Ecto.Changeset.change(status: status) |> Repo.update() |> broadcast(:plan)
+  end
+
   @doc "A plan with its workspace and its tasks in order."
   def get_plan!(id), do: Plan |> Repo.get!(id) |> Repo.preload([:workspace, tasks: tasks_query()])
 

@@ -117,7 +117,35 @@ defmodule Bm.Bridge do
       }
   end
 
+  @after_commit :bm_bridge_after_commit
+
+  @doc """
+  Runs `fun` once the bridge request being persisted commits (dropped if it rolls back), or at
+  once outside one. For broadcasts made by a request's handler.
+  """
+  def after_commit(fun) do
+    case Process.get(@after_commit) do
+      nil -> fun.()
+      queue -> Process.put(@after_commit, [fun | queue])
+    end
+
+    :ok
+  end
+
   defp do_persist(role, agent_id, request, assignment, fun) do
+    Process.put(@after_commit, [])
+
+    try do
+      {committed?, outcome} = do_persist_transaction(role, agent_id, request, assignment, fun)
+      queued = Process.delete(@after_commit) || []
+      if committed?, do: queued |> Enum.reverse() |> Enum.each(& &1.())
+      outcome
+    after
+      Process.delete(@after_commit)
+    end
+  end
+
+  defp do_persist_transaction(role, agent_id, request, assignment, fun) do
     Repo.transaction(fn ->
       outcome = fun.(request)
 
@@ -140,9 +168,14 @@ defmodule Bm.Bridge do
       end
     end)
     |> case do
-      {:ok, outcome} -> outcome
-      {:error, :duplicate} -> stored_outcome(request.request_id, agent_id)
-      {:error, reason} -> %{"ok" => false, "error" => "not_persisted: #{inspect(reason)}"}
+      {:ok, outcome} ->
+        {true, outcome}
+
+      {:error, :duplicate} ->
+        {false, stored_outcome(request.request_id, agent_id)}
+
+      {:error, reason} ->
+        {false, %{"ok" => false, "error" => "not_persisted: #{inspect(reason)}"}}
     end
   end
 

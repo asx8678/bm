@@ -34,9 +34,10 @@ defmodule Bm.Runs.Task do
   @doc "Changeset for a new task; `run_id` is set by the caller, not cast."
   def create_changeset(task, attrs) do
     task
+    # `revision` is BM's (the one allowed re-plan), set rather than cast.
+    |> change(Map.take(Map.new(attrs), [:revision]))
     |> cast(attrs, [
       :key,
-      :revision,
       :title,
       :goal,
       :done_when,

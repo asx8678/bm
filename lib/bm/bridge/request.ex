@@ -22,7 +22,9 @@ defmodule Bm.Bridge.Request do
 
   def changeset(request, attrs) do
     request
-    |> cast(attrs, [:attempt_id | @fields])
+    |> cast(attrs, @fields)
+    # The attempt is BM's own record of who asked, not part of the request.
+    |> change(Map.take(Map.new(attrs), [:attempt_id]))
     |> validate_required(@fields)
     |> unique_constraint(:request_id)
   end

@@ -935,7 +935,6 @@ defmodule Bm.Workspace.Planner do
       true ->
         results = Enum.map(pending, &result/1)
         queued = Enum.filter(tasks, &(&1.status == :queued))
-        Runs.mark_delivered(pending)
 
         {:ok, run} =
           Runs.update_run(run, %{
@@ -946,7 +945,17 @@ defmodule Bm.Workspace.Planner do
         broadcast_run(state, run)
         state = %{state | rejections: 0, reminded?: false}
         text = Bm.Prompts.planner_delivery(results, queued) <> budget_note(run)
-        begin_turn(state, :delivery, text)
+
+        # Delivered only once the planner has the turn (plan 36.13): a prompt pi didn't take
+        # pauses the run, and the results go again after Resume planning.
+        case begin_turn(state, :delivery, text) do
+          {:noreply, %{phase: :busy}} = reply ->
+            Runs.mark_delivered(pending)
+            reply
+
+          other ->
+            other
+        end
     end
   end
 
@@ -1146,19 +1155,27 @@ defmodule Bm.Workspace.Planner do
     state
   end
 
+  # Inside a bridge request the event waits for the commit (plan 36.13): a page that reloads on
+  # it must see the row, and a rolled-back proposal must not show.
   defp broadcast_run(state, run) do
-    Phoenix.PubSub.broadcast(
-      Bm.PubSub,
-      Coordinator.topic(state.root),
-      {:workspace, state.root, {:run, run}}
-    )
+    Bm.Bridge.after_commit(fn ->
+      Phoenix.PubSub.broadcast(
+        Bm.PubSub,
+        Coordinator.topic(state.root),
+        {:workspace, state.root, {:run, run}}
+      )
+    end)
   end
 
+  # Inside a bridge request the event waits for the commit (plan 36.13): a page that reloads on
+  # it must see the row, and a rolled-back proposal must not show.
   defp broadcast_task(state, task) do
-    Phoenix.PubSub.broadcast(
-      Bm.PubSub,
-      Coordinator.topic(state.root),
-      {:workspace, state.root, {:task, task}}
-    )
+    Bm.Bridge.after_commit(fn ->
+      Phoenix.PubSub.broadcast(
+        Bm.PubSub,
+        Coordinator.topic(state.root),
+        {:workspace, state.root, {:task, task}}
+      )
+    end)
   end
 end

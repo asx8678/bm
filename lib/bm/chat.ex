@@ -178,7 +178,7 @@ defmodule Bm.Chat do
     plan = Plans.get_plan(id)
 
     if plan && plan.workspace_id == state.workspace.id do
-      {:ok, _} = Plans.update_plan(plan, %{status: :archived})
+      {:ok, _} = Plans.set_status(plan, :archived)
 
       state =
         if state.plan_id == plan.id,
