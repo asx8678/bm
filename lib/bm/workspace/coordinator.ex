@@ -1073,9 +1073,16 @@ defmodule Bm.Workspace.Coordinator do
 
   defp maybe_set_verify_command(workspace, _attrs), do: {:ok, workspace}
 
+  # Reloaded: recovery or another process may have paused or ended it since this state was read.
   defp ensure_run(%{run: %{status: :active} = run}, _attrs) do
     run = Runs.get_run!(run.id)
-    if Runs.budget_exhausted?(run), do: {:error, :budget_exhausted}, else: {:ok, run}
+
+    cond do
+      run.status == :paused -> {:error, :run_paused}
+      run.status != :active -> {:error, :run_not_active}
+      Runs.budget_exhausted?(run) -> {:error, :budget_exhausted}
+      true -> {:ok, run}
+    end
   end
 
   defp ensure_run(%{run: %{status: :paused}}, _attrs), do: {:error, :run_paused}

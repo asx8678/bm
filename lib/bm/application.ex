@@ -33,10 +33,15 @@ defmodule Bm.Application do
     Supervisor.start_link(children, opts)
   end
 
+  # Recovery finishes before the Endpoint starts (docs/ARCHITECTURE.md §11): a page or API call
+  # during recovery would start a coordinator that recovers the same attempts a second time.
   defp recovery do
-    if Application.get_env(:bm, :recover_on_start, true),
-      do: {Task, &Bm.Workspace.Recovery.run/0},
-      else: {Task, fn -> :ok end}
+    %{
+      id: Bm.Workspace.Recovery,
+      start:
+        {Bm.Workspace.Recovery, :start_link, [Application.get_env(:bm, :recover_on_start, true)]},
+      restart: :temporary
+    }
   end
 
   # Tell Phoenix to update the endpoint configuration

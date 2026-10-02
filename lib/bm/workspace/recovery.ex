@@ -20,7 +20,7 @@ defmodule Bm.Workspace.Recovery do
   times; otherwise the reason says why, and the user chooses Resume planning or Finish on the run
   page. When only a coordinator restarts, the run just pauses.
 
-  Runs at application start (`run/0`) and when a workspace coordinator starts
+  Runs at application start (`run/0`, before the Endpoint serves) and when a workspace coordinator starts
   (`recover_workspace/1`).
   """
 
@@ -41,6 +41,27 @@ defmodule Bm.Workspace.Recovery do
     attempts = Runs.list_in_flight_attempts() |> Enum.map(&recover/1)
     Enum.each(runs, &recover_planner(&1, auto_resume: true))
     attempts
+  end
+
+  @doc """
+  Runs `run/0` inside the application's start-up, before the Endpoint serves, and returns
+  `:ignore`. A failure is logged and doesn't stop BM from starting.
+  """
+  def start_link(recover? \\ true) do
+    if recover? do
+      try do
+        run()
+      rescue
+        error ->
+          Logger.error(
+            "recovery at start failed: " <> Exception.format(:error, error, __STACKTRACE__)
+          )
+      catch
+        kind, reason -> Logger.error("recovery at start failed: #{inspect({kind, reason})}")
+      end
+    end
+
+    :ignore
   end
 
   @doc "Recovers the in-flight attempts of one workspace."
@@ -130,6 +151,9 @@ defmodule Bm.Workspace.Recovery do
   end
 
   defp resume(run, root, count, lost) do
+    # Reloaded: the planner map is written back whole.
+    run = %{Runs.get_run!(run.id) | workspace: run.workspace}
+
     note = %{
       "at" => DateTime.to_iso8601(DateTime.utc_now()),
       "kind" => "note",

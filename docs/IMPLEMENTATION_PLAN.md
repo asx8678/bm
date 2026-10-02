@@ -2193,3 +2193,14 @@ Verify: as each step above.
 - Checked: the review's race script gave 0 mismatches against a serial snapshot in 300 rounds of
   3 overlapping snapshots (before the fix, 28–31 of 900 were the empty tree). A 61-s-old lock is
   cleared; a fresh one gives an error after about 2 s with the index kept.
+
+**Status 36.2 (2026-10-02).**
+- Recovery is a start-up child (`Recovery.start_link/1`) that runs `run/0` and returns `:ignore`,
+  so the Endpoint starts after it. A failure is logged and BM still starts.
+- `ensure_run` reloads the run and refuses one that is paused (`:run_paused`) or has ended
+  (`:run_not_active`, explained on the page).
+- `Recovery.resume/4` reloads the run before writing its planner map.
+- Checked on bm_test with a scratch repository: an in-flight attempt with a live process group
+  was `failed "interrupted (no changes)"` with a `tree_after` by the time the application had
+  started (563 ms). An immediate `ensure_started` left it unchanged, and the group was gone.
+  Scratch rows were deleted.

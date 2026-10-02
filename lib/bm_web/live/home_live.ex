@@ -339,6 +339,9 @@ defmodule BmWeb.HomeLive do
   def explain(:run_paused, _path),
     do: {:path, "This workspace's run is paused after an interruption; resolve it first."}
 
+  def explain(:run_not_active, _path),
+    do: {:path, "This run has ended meanwhile. Reload the page to start a new one."}
+
   def explain(:budget_exhausted, _path),
     do: {:budget_usd, "The run's budget is spent. Finish the run to start a new one."}
 
