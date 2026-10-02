@@ -2262,3 +2262,17 @@ Verify: as each step above.
     names it); Revert in an active goal run → `:run_not_paused`, and once paused → `:ok` with
     `known_tree` equal to the workspace.
 - Scratch rows were deleted.
+
+**Status 36.6 (2026-10-02).**
+- `revert_for_replan` (failed check, D23; reviewer rejection, D25) restores only the worker's
+  known paths. Those are the declared `writes`, its edit/write calls, and the files its allowed
+  bash commands name as written (`Bm.Policy.write_targets/2`: redirections, `tee`, `sed -i`,
+  `cp`/`mv`/`install`/`ln` targets, `rm`, `touch`, `mkdir`, `truncate`, also inside wrappers).
+- Other changed files stay. The attempt is flagged `files_left`, and its note names them and the
+  tree with their earlier version.
+- New decision row D33.
+- Checked through the real coordinator and planner with the fake pi on bm_test. The worker
+  writes `a.txt` (declared) and runs `echo b > b.txt`; the user edits `u.txt` meanwhile; the
+  task check `false` fails. Result: `a.txt` restored, `b.txt` removed, `u.txt` kept with the
+  user's edit, attempt `reverted` with `auto_reverted` and `files_left` and the note naming
+  `u.txt`. Scratch rows were deleted.

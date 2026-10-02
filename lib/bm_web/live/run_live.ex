@@ -1678,5 +1678,9 @@ defmodule BmWeb.RunLive do
   defp flag_help("auto_reverted"),
     do: "The planner's check failed; BM reverted the changes and asked the planner to re-plan"
 
+  defp flag_help("files_left"),
+    do:
+      "BM reverted only the worker's own changes; other files that changed during the attempt (maybe yours) were left as they are"
+
   defp flag_help(_flag), do: nil
 end

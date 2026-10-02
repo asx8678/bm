@@ -121,6 +121,59 @@ defmodule Bm.Policy do
   def authorize("bash", _input, _ctx), do: {:deny, "bash needs a command."}
   def authorize(tool, _input, _ctx), do: {:deny, "BM does not allow the #{tool} tool here."}
 
+  @doc """
+  The files a bash command names as ones it writes or deletes (redirections, `tee`, `sed -i`,
+  `cp`/`mv`/`install`/`ln` targets, `rm`, `touch`, `mkdir`, `truncate`), as paths relative to
+  `root`; those outside it are left out. The coordinator counts them as the worker's own writes
+  (plan 36.6). Rough, like the rest of this module: a script or interpreter may write others.
+  """
+  def write_targets(command, root) when is_binary(command) do
+    {command, _shell_inputs} = heredocs(command)
+
+    (redirect_targets(command) ++ Enum.flat_map(segments(command), &segment_targets(&1, 8)))
+    |> Enum.reject(
+      &(&1 in ~w(/dev/null /dev/stdout /dev/stderr /dev/tty) or String.starts_with?(&1, "$"))
+    )
+    |> Enum.map(&(&1 |> pi_path() |> Path.expand(root)))
+    |> Enum.filter(&inside?(&1, Path.expand(root)))
+    |> Enum.map(&Path.relative_to(&1, Path.expand(root)))
+    |> Enum.uniq()
+  end
+
+  defp segment_targets(_tokens, 0), do: []
+
+  defp segment_targets(tokens, depth) do
+    case Enum.drop_while(tokens, &prefix_word?/1) do
+      [] ->
+        []
+
+      [cmd | args] ->
+        name = Path.basename(cmd)
+        inner = name |> inner_commands(args) |> Enum.flat_map(&segment_targets(&1, depth - 1))
+        inner ++ command_targets(name, args)
+    end
+  end
+
+  defp command_targets(name, args) when name in ~w(rm tee touch mkdir mv truncate rmdir),
+    do: operands(args)
+
+  defp command_targets(name, args) when name in ~w(cp install ln) do
+    case operands(args) do
+      [_ | _] = operands -> [List.last(operands)]
+      [] -> []
+    end
+  end
+
+  defp command_targets("sed", args) do
+    cond do
+      not in_place?(args) -> []
+      Enum.any?(args, &(&1 in ["-e", "--expression"])) -> operands(args)
+      true -> Enum.drop(operands(args), 1)
+    end
+  end
+
+  defp command_targets(_name, _args), do: []
+
   defp denied(:allow), do: nil
   defp denied(deny), do: deny
 

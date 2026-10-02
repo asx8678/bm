@@ -1523,6 +1523,11 @@ defmodule Bm.Workspace.Coordinator do
   # What the worker was allowed to do so far, for the freshness check (13.2).
   defp note_allowed(state, %{op: "authorize", payload: payload}, %{"allow" => true}) do
     case payload do
+      # The files the command names as written count as the worker's own (plan 36.6).
+      %{"tool" => "bash", "input" => %{"command" => command}} when is_binary(command) ->
+        touched = command |> Bm.Policy.write_targets(state.root) |> MapSet.new()
+        %{state | bash_ran?: true, touched: MapSet.union(state.touched, touched)}
+
       %{"tool" => "bash"} ->
         %{state | bash_ran?: true}
 
@@ -1993,17 +1998,22 @@ defmodule Bm.Workspace.Coordinator do
         true -> "the task's check `#{command}` exited #{check["exit"]}"
       end
 
+    known = workers_paths(state)
     state = finish(state, :failed, Map.merge(changes, %{verify: verify, error: reason}))
     attempt = Runs.get_attempt!(state.attempt.id)
+    # Only the worker's own writes go back (D33): another changed file may be the user's edit
+    # made meanwhile, which a revert would lose with nobody asked. It stays and is named.
+    {revert, left} = Enum.split_with(attempt.actual_writes, &(&1["path"] in known))
+    left = Enum.map(left, & &1["path"])
 
-    with [_ | _] <- attempt.actual_writes,
-         :ok <-
-           Git.restore(state.root, attempt.actual_writes, attempt.tree_before, attempt.tree_after),
+    with [_ | _] <- revert,
+         :ok <- Git.restore(state.root, revert, attempt.tree_before, attempt.tree_after),
          {:ok, attempt} <-
-           Runs.transition_attempt(attempt, :reverted, %{
-             flags: attempt.flags ++ ["auto_reverted"],
-             error: reason <> "; BM reverted its changes for a re-plan"
-           }) do
+           Runs.transition_attempt(
+             attempt,
+             :reverted,
+             auto_revert_note(attempt, reason, left)
+           ) do
       broadcast_attempt(%{state | attempt: attempt, lane: :free})
     else
       # Nothing to revert: the lane is already free.
@@ -2022,6 +2032,30 @@ defmodule Bm.Workspace.Coordinator do
 
         broadcast_attempt(%{state | attempt: attempt})
     end
+  end
+
+  # Paths the worker is known to have written: its declared writes, its edit/write calls and the
+  # files its bash commands named (plan 36.6, D33).
+  defp workers_paths(state),
+    do: MapSet.union(MapSet.new(state.task.writes || []), state.touched)
+
+  defp auto_revert_note(attempt, reason, []) do
+    %{
+      flags: attempt.flags ++ ["auto_reverted"],
+      error: reason <> "; BM reverted its changes for a re-plan"
+    }
+  end
+
+  defp auto_revert_note(attempt, reason, left) do
+    %{
+      flags: attempt.flags ++ ["auto_reverted", "files_left"],
+      error:
+        reason <>
+          "; BM reverted the worker's changes for a re-plan and left #{Enum.join(left, ", ")} " <>
+          "as #{if length(left) == 1, do: "it is", else: "they are"} (not known to be the " <>
+          "worker's; maybe yours). Versions from before the attempt: " <>
+          "git show #{String.slice(attempt.tree_before, 0, 12)}:<path>"
+    }
   end
 
   ## Review (14.1, D25)
