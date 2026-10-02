@@ -834,7 +834,7 @@ defmodule Bm.Workspace.Coordinator do
   # A run status write that lost a race (another process changed the run first): what is
   # stored now counts.
   defp stored({:ok, run}, _run), do: run
-  defp stored({:error, :stale}, run), do: Runs.get_run!(run.id)
+  defp stored({:error, :stale}, run), do: %{Runs.get_run!(run.id) | workspace: run.workspace}
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
