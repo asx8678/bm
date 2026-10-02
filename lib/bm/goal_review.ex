@@ -19,7 +19,8 @@ defmodule Bm.GoalReview do
     with {:ok, root} <- Bm.Runs.canonical_path(path),
          :ok <- Git.check_root(root),
          {:ok, baseline} <- Git.baseline(root) do
-      id = "review-#{System.unique_integer([:positive])}"
+      # Not "review-<n>": that is the reviewer of attempt n (Bm.Review).
+      id = "goal-review-#{System.unique_integer([:positive])}"
 
       case Profile.start(id, :planner, owner: self(), cwd: root) do
         {:ok, _report} ->

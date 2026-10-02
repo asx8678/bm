@@ -1872,3 +1872,313 @@ the older one dropped); archiving the current plan emptied the board and took it
 and the next start restored the latest remaining plan. Fixed during the check: a message sent
 while the agent was still starting was lost (the composer emptied it); it now stays in the box
 with the flash, and goes once sent again.
+
+## Review fixes (2026-10-02)
+
+A review after phase 35 (`Bm.Plans`, `Bm.Chat`, `Bm.Policy`, `Workspace.Git` restore, the chat
+page, the local API) found, and this fixes, with each case checked by a scratch script (37
+allow/deny cases) and against a server on a spare port:
+
+- **The local API answered web pages.** A page open in the user's browser connects from this
+  machine and may send a form-encoded POST without a CORS preflight: `POST /api/goals` started a
+  run (worker bash, `verify_command`) in any repository. `LocalOnly` now also refuses requests a
+  browser marks cross-site (`sec-fetch-site`) and POSTs that aren't `application/json`; the CLI
+  sends JSON. Checked: form, text/plain and cross-site JSON get 403; JSON from curl still works.
+- **`Policy.real_path/1` could hang or crash the coordinator.** A symlink loop looped forever (the
+  coordinator answers `authorize` itself, so pause and cancel were stuck too); a directory it
+  can't enter raised a MatchError. It now follows at most 40 links and never raises; such paths
+  resolve outside every workspace and are refused.
+- **git commands that change the repository were allowed:** `config` (writes `.git/config`, which
+  no snapshot covers), `read-tree`, `checkout-index`, `symbolic-ref`, `remote`, `submodule`,
+  `init`, `fetch`, `sparse-checkout`, `bisect` and others. Added to the refused list; `git config`
+  may still read (`--get`, `--list`, one key).
+- **User-owned files could be written in another case** (`NOTES.md` for `notes.md` on macOS); the
+  attempt failed afterwards but its changes stay until Revert. `.git` and user-owned files are now
+  compared without case.
+- **Smaller:** package-manager options with a value no longer hide the subcommand
+  (`npm --prefix x install`); shell-write targets are resolved against the workspace, not BM's
+  directory, and a workspace inside a temp directory follows the workspace rules (a target there
+  was taken for a temp file before).
+
+**Second review (2026-10-02): coordinator, planner, recovery, pi agents.** Fixed, each checked
+by scripts that drive the real coordinator on scratch repositories and scratch rows (removed
+afterwards); the pause and resume checks were also run against the code before the fixes, where
+they failed:
+
+- **Revert run lost the user's edits** (D31). It checked every file against the last attempt's
+  tree, which already held a user's edit of a file an earlier attempt wrote, and put the file
+  back. Each file is now checked against the last attempt that changed it and restored from
+  before the first (`Git.restore_paths/3`); revert and commit share `stayed_attempts/1`.
+- **Reverts put back the user's own files** (D31): a change there is most likely the user's,
+  made while BM ran. Revert, Undo task and Revert run leave them, flag `user_files_left` and say
+  where the earlier version is.
+- **Agents outlived their owners.** A pi agent whose owner died kept running with every tool
+  failing, until the next restart; the chat counted agent ids from 1 again after a crash and
+  could get such an agent back; the goal reviewer's `review-<n>` could be an attempt reviewer's
+  id. Agents now stop when their owner stops, chat ids never repeat, goal reviews use
+  `goal-review-<n>`.
+- **Pause blocked for 5 s and could end the run.** `pause_by_user` stopped the planner from inside
+  the coordinator: with the planner calling it at that moment, the pause waited the shutdown
+  timeout, the planner was killed without ending its pi session, and its queued `end_run` then
+  ended the paused run as failed (5009 ms and a failed run before the fix). The planner is now
+  stopped in the background, `end_run` refuses a paused run, and a planner whose task is refused
+  as `run_paused` just stops.
+- **A paused goal run came back by itself.** Keep or Revert of an interrupted or failed attempt
+  resumed a paused run, also one the user had paused or whose planner was lost with BM: the run
+  sat "active" with no planner. It now resumes only a single-task run or one whose planner this
+  coordinator still watches (Pause unwatches at once; the planner itself may take seconds to stop,
+  and a Revert in that window resumed the paused run before: checked with a real planner whose pi
+  stand-in ignores the shutdown); otherwise it waits for Resume planning. Resume planning in that
+  window is safe: the supervisor starts the new planner only after the old one is gone.
+
+
+## Phase 36: third review fixes (planned 2026-10-02)
+
+A third review of `review-fixes` (4f19f37), done by six parallel reviewers (coordinator,
+planner, git/processes, security, web, data/tests), found 3 critical, 11 high and about 20
+medium/low defects. Each step below fixes one group. Finding ids: S = security,
+P = concurrency/performance, A = guarantees and design, R = resilience. Each step's **Verify**
+uses scratch repositories in a temporary directory, `MIX_ENV=test mix run --no-start` scripts
+that drive the real modules, `mix compile --warnings-as-errors` and `mix format
+--check-formatted`; where a step needs the app, it runs a server on a spare port. No new tests
+and no test runs (the user's decision, 2026-10-02).
+The user's choices for 36.6, 36.7, 36.11 and tests were made on 2026-10-02.
+
+Order: data safety first (36.1–36.4), then guarantees (36.5–36.7), then resilience and the UI
+(36.8–36.12).
+
+**36.1 One snapshot at a time per repository (P1, high).** `Git.snapshot/1` runs
+`add -A` and then `write-tree` on the shared `<git-dir>/bm/index`, and nothing serializes callers.
+When a second `add` fails on `index.lock`, `add_all` deletes the index, and the first caller's
+`write-tree` returns the empty tree with exit 0. That happened in 149 of 150 overlapping rounds.
+The coordinator then reads every file as the user's, or as deleted. The overlapping callers are
+GoalReview, a planner turn, start-up recovery and coordinator init.
+- Take a per-git-dir lock around snapshot and baseline (`:global.trans` on `{:bm_index, git_dir}`).
+- On an `index.lock` error, retry with backoff. Never delete the index for a lock error.
+  Rebuild it only on a read error, while holding the lock.
+- Remove a `bm/index.lock` older than 60 s.
+- Don't snapshot on `:question` turns (D24 already says answer turns get no check).
+- `GoalReview` needs only `user_owned`: give it a `git status`-only function.
+
+Verify: 3 concurrent snapshots × 300 rounds on a 2,000-file scratch repo all equal the serial
+tree; a stale lock left 61 s is cleared; the race scripts from the review give 0 empty trees.
+
+**36.2 Recovery before serving (P2, high).** `{Task, &Recovery.run/0}` returns at once, so the
+Endpoint serves while recovery runs. A run page (even its static render) or an API call then
+starts a coordinator whose init recovers the same attempts a second time. Fixes:
+- `Recovery.run/0` runs inside a child's `start_link`, which returns `:ignore` after it is done,
+  so the Endpoint starts only afterwards.
+- `Coordinator.ensure_run` checks that the run is still `:active`.
+- `Recovery.resume/4` reloads `runs.planner` before writing it.
+- Update ARCHITECTURE §11 to match.
+
+Verify: with a scratch row for an in-flight attempt and a live recorded group, start-up and an
+immediate `ensure_started` give one outcome, `failed "interrupted (no changes)"` with a
+`tree_after`; start-up time is noted.
+
+**36.3 Only this machine's pages (S1 critical, S8).** `check_origin: false` (dev) and no Host
+check anywhere: a DNS-rebinding page is same-origin. Through the LiveView socket it can start a
+run whose `verify_command` runs at once as `sh -c`; through `/api` it can commit or revert.
+- An endpoint plug before `Plug.Session` allows only Host `localhost`, `127.0.0.1` and `::1`.
+- `check_origin` is set to those hosts in every environment.
+- `LocalOnly` keeps its checks.
+- Prod binds loopback unless `BM_BIND_ALL=1` is set.
+- New decision row D32.
+
+Verify: against a spare-port server, `curl -H 'Host: evil.example'` on `/runs` and
+`/api/runs` gets 403; a websocket upgrade with a foreign Origin is refused; the UI and
+`mix bm.runs` still work.
+
+**36.4 Policy sees the real command (S2 critical, S3 high, S6 part).** `check_segment` inspects
+only the first word after the prefixes, so these are all `:allow`:
+- `timeout 60 git push`
+- `nice -n 10 git reset --hard`
+- `find . -exec git reset --hard \;` in read-only mode
+- `xargs git push`
+- `git -c alias.x='!…' x`
+
+These are HEAD and ref changes that snapshots can't undo, and the chat agent has bash. Fixes:
+- Unwrap `timeout`, `nice`, `stdbuf`, `ionice`, `command -p` and `doas` together with their
+  options, then check the real command.
+- Recurse into `find -exec/-execdir/-ok … \;|+`, `xargs [opts] cmd` and `sh|bash|zsh -c '…'`.
+- Refuse `git -c` with an `alias.*`, `core.*` or `include.*` key, and `git --exec-path`.
+- Deny edit and write under `.pi/` (project pi settings change the next agent's shell).
+- The planner's `check` (S3) runs as an unpoliced `sh -c`, in the `:check_only` path even
+  without a verify command. `Plan.validate` and `Plans.Task` now run it through
+  `Policy.authorize("bash", …, :read_only)` and refuse it with the policy's sentence.
+
+Verify: the review's probe table (6 wrapper rows plus the 16 rows from `scratchpad/sec`) and the
+37 cases from the first review fixes give the expected allow/deny; a plan with
+`check: "curl x | sh"` is refused with a sentence.
+
+**36.5 Commit and revert respect the user's files (A1 high, A2 high, A4, A6, R8).**
+- **A1:** `do_commit_run` commits `written_paths(stayed)` with no user-owned filter. A held
+  attempt the user kept after verify rewrote their dirty file puts their uncommitted work into
+  BM's commit, which breaks §8 ("User changes are never committed"). Fix: subtract
+  `run_user_owned(run)`, and name the excluded files in the reply and the run note.
+- **A2:** `objects_in_trees` merges `ls-tree -r` prefix matches across trees, so Revert run
+  restores attempt 1's content when a path switched between file and directory (9 of 12 seeds).
+  Fix: `Map.take(objects, paths)`.
+- **A4:** Revert-last in an active goal run can land inside a planner turn (D28 rejected this).
+  Fix: refuse it with `:run_not_paused`, and `drop_delivery` in `restore_attempt`.
+- **A6:** after Undo and then Revert-last, `known_tree` is stale. Fix: call
+  `remember_workspace/2` after every revert.
+- **R8:** `commit_paths` fails for a path created and then deleted. Fix: `update-index --add
+  --remove`. A locked user index during `reset` leaves the inverse of the commit staged. Fix:
+  retry, then return `{:ok, sha, :index_not_refreshed}` so the sha is stored and the user is
+  told.
+
+Verify: scratch-repo scripts for each case (user-dirty file, verify rewrites it, Keep, Commit run
+→ file absent from the commit; the file↔dir revert → original content, 12 of 12 seeds; created
+and deleted `tmp.txt` → commit succeeds; index.lock held → sha stored, note shown).
+
+**36.6 The automatic revert and the user's concurrent edits (A3).** After a failed
+check or a reviewer rejection (D23, D25), the restore puts back a file the user edited during the
+attempt. Only an unreferenced tree keeps the user's version. Options:
+- (a) auto-revert only when every path is one the worker is known to have written (no bash ran),
+  else hold for the user;
+- (b) revert the known paths and leave the rest, flagged as in D31.
+
+Decided (2026-10-02): (b), which keeps D23's automatic re-plan. New row D33.
+Verify: user edits an undeclared file during a failing-check attempt; the edit survives and the
+note names it.
+
+**36.7 Writes BM can't see (S4 critical, S5 high).** Snapshots skip gitignored files
+and see a submodule or nested repository as one gitlink, so writes there have an empty write set
+and are accepted unverified, with no revert. A user edit in `sub/f` is lost for good. A nested
+repository with no commits makes every snapshot fail. Proposed:
+- user-owned entries match as prefixes;
+- the baseline lists gitlinks and nested repositories as protected prefixes;
+- a nested repository with no commits no longer fails the snapshot.
+
+For ignored files the choice is:
+- (a) deny edit and write to ignored files that existed at the start of the run (small);
+- (b) store their pre-image (`hash-object -w`) and add them to the attempt's writes, so they are
+  verified and revertible (larger).
+
+Decided (2026-10-02): (a); (b) only if a run later needs to write such files. New row D34.
+Verify: the review's exp1/exp6 scratch repos: the submodule write is refused, the overwrite of an
+existing `.env` is refused, a new ignored build file is still allowed, and the empty nested repo
+no longer breaks the snapshot.
+
+**36.8 Goal runs never sit idle forever (R1 high, R3, R4, R9).**
+- **R1:** the `plan_left_open` timer is re-armed every 5 s tick, so `plan_timeout` never fires.
+  Fix: arm it only when `plan_timer == nil`.
+- **R3:** `aborting?` is never reset, so after one answer-turn abort, the budget cap,
+  `max_rejections` and the turn timeout can't abort. Fix: reset it in `job_done(:abort)`.
+- **R4:** pi exiting during an answer turn is ignored. The next prompt silently restarts pi
+  (epoch + 1, no profile check, no pgid recorded), and every `propose_*` is then "stale". Fix:
+  handle `:exited` in `:answering`; refuse to prompt on an epoch mismatch or an exited agent and
+  pause with the reason; monitor the agent.
+- **R9:**
+  - `start_goal` leaves an orphan active run when the planner fails to start. Fix: fail it.
+  - Resume right after Pause re-attaches the dying planner. Fix: `{:error, :planner_stopping}`
+    while the old pid is registered, and the UI says "still stopping".
+  - Flagged results are delivered without their flags. Fix: one sentence per flag.
+  - The user-owned list in prompts is uncapped. Fix: 50 paths plus "and N more".
+  - Worker summaries pasted into prompts are uncapped. Fix: 2 KB.
+
+Verify: with the fake pi, a reminder turn that ends without `close_plan` fails the run within
+`plan_timeout + tick`; an aborted answer turn followed by an over-budget planning turn aborts it;
+fake pi exits mid-answer → run paused with the reason; a 5,000-file untracked directory gives a
+capped prompt.
+
+**36.9 Text that doesn't fit the database (R6).** Free text goes into `varchar(255)` columns:
+`workspaces.verify_command` and `path`, `plan_tasks.check` and `files`, `tasks.title`, `writes`
+and `depends_on`. A longer value raises `Postgrex.Error` inside the Coordinator, Bm.Chat or the
+Planner and crashes it. Fixes:
+- One migration moves these columns to `text` / `text[]`.
+- Changesets get `validate_length(…, count: :codepoints)` (2,000 for commands).
+- `Plan.string/3` counts code points.
+- `Bridge.persist` rescues a DB error and answers `not_persisted` instead of crashing.
+
+Verify: a 300-character verify command and a 300-character check are stored; a 200-grapheme title
+of 400 code points is refused with a sentence; no GenServer exits.
+
+**36.10 Processes and verification (R2 high, R5, R10).**
+- **R2:** recovery and agent stop signal recorded pgids however old they are, and pids wrap
+  about once a day. Fixes: `bm_guard` records `pgid start-time`; skip a leader that started after
+  it was recorded; prune dead groups on `tool_execution_end`.
+- **R5:** Verify waits for stdout to close, so a background child turns a pass into a 600 s
+  timeout, and stdin is open. Fix: wrap the command as `sh -c '/bin/sh -c "$1" </dev/null;
+  printf "\036bm-exit %d\n" $?'` and treat the marker as the end.
+- **R10:**
+  - `Agent.terminate` skips `end_groups` after a `badarg` from a closed port. Fix: scope the
+    catch to the port I/O.
+  - The baseline verify's group isn't recovered. Fix: use the `boot_id` stored with it.
+  - Lone-surrogate JSON lines are dropped. Fix: replace `\uD8xx` escapes.
+  - `ToolCalls` decoding is quadratic (2.5 s for 300 KB). Fix: decode only for tools that need
+    early proposals.
+  - No `System.cmd` has a timeout (git, ps, kill, `pi --version`). Fix: a `Bm.Proc.cmd/3` with
+    a timeout.
+  - `object_at` exec bit: `0o100`.
+  - `File.read_link` / `pwd` match crashes return errors.
+  - `write_new` checks its write results.
+
+Verify: `Verify.run("(sleep 900 &); exit 0", …)` returns exit 0 in under 1 s and `read x` fails
+fast; a stubbed `ps` reporting a reused leader is not signalled; a 300 KB write streams in under
+50 ms.
+
+**36.11 Agents and the user's pi setup (S6).** BM's pi agents load the user's skills,
+prompt templates and (for repositories under a trusted folder) project `.pi/settings.json`,
+`SYSTEM.md` and `APPEND_SYSTEM.md`. That bypasses the controlled profiles (§4, D16). Decided (2026-10-02):
+`--no-skills --no-prompt-templates --no-approve` in `Profile.build`, plus the `.pi/` write
+denial in 36.4.
+Verify: the profile check still passes, and a scratch workspace with a `.pi/settings.json`
+setting `shellCommandPrefix` doesn't change the agent's shell (one small live chat turn, a few
+cents).
+
+**36.12 Chat and run pages (R7, P3, P4, S7, the rest of R10).**
+- **R7:** Bm.Chat calls abort, new_session and stop on its own agent while it is the only
+  process that can answer that agent's dialogs, which can deadlock for 120 s. Fixes:
+  - do these in a Task and reply with `GenServer.reply`;
+  - give Chat its own supervisor, so repeated crashes don't stop the app;
+  - `select_plan` / `archive_plan` with an unknown id answer `{:error, :not_found}`.
+- **P3:** the chat transcript isn't limited and is re-rendered as markdown on every token. Fixes:
+  - `Transcript.limit`;
+  - a stream for settled entries;
+  - markdown once per message (plain text while it streams);
+  - tool node ids from `toolCallId`.
+- **P4:** the run page reacts to every attempt event in the workspace with 3 queries, a
+  `git diff` per file and a graph push; mount computes every diff twice. Fixes: filter by run
+  id; diffs only when connected and when opened; push the graph only when tasks changed.
+- **A5:** Stop, Keep, Revert, Finish and Next carry the page's run or attempt id, and the
+  coordinator refuses a mismatch.
+- **S7:** a CSP with `img-src 'self' data:`, so model markdown can't fetch external images.
+- **Canvas:** keep only the positions of nodes the user dragged, and fit the view instead of
+  re-keying, so tool nodes no longer stack after 12.
+- **Smaller:**
+  - `Integer.parse` for event ids;
+  - `.Notify` removes its listeners;
+  - `use_reviewed_goal` with a stale review;
+  - a reconnect re-pushes the graph;
+  - `run_revertable?` computed once;
+  - a chat tab opened mid-stream doesn't apply events twice (sequence number).
+
+Verify: headless Chrome against a spare-port server (chat with 30 tool calls → 12 distinct node
+rows; run page with 40 attempts → no git calls on the static render); forged events with bad ids
+leave the LiveView and Chat pids unchanged; Stop during a pending dialog answers within 1 s.
+
+**36.13 Data consistency.**
+- `Runs.transition_run/3` (compare-and-set like attempts) for finish, pause and resume.
+- `finish/3` leaves the task alone when the attempt transition failed.
+- Bridge broadcasts are sent after the transaction commits.
+- `list_run_attempt_heads/1` without transcripts for bookkeeping.
+- Changesets no longer cast fields BM sets itself (AGENTS.md).
+- `delivered_at` is set only after `Bm.Pi.prompt` succeeds.
+
+Decided (2026-10-02): no tests. The review's 36-row scenario matrix (regressions for these fixes, a first planner
+and goal-run integration layer with FakePi `plan:`, and the test-hygiene fixes) stays
+unwritten; every step is checked by scripts as above.
+Verify: as each step above.
+
+**Docs:**
+- ARCHITECTURE: D32 (Host check), D33 (automatic revert and the user's edits), D34 (ignored files
+  and submodules), D35 (one snapshot at a time; recovery before serving).
+- §8: notes on ignored files and submodules until 36.7 lands.
+- §11: recovery ordering.
+- §13: the facts found by the review:
+  - `write-tree` on a missing index gives the empty tree with exit 0;
+  - port `exit_status` waits for every holder of stdout;
+  - pids wrap about once a day on this Mac;
+  - Postgres counts `varchar(255)` in code points.

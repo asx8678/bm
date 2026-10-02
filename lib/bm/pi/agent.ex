@@ -191,6 +191,10 @@ defmodule Bm.Pi.Agent do
      emit(state, {:error, "pi exited with status #{code}. Send a message to restart it."})}
   end
 
+  # The owner is gone: nobody can answer this agent's requests or use it again (every tool would
+  # fail closed), and nobody would stop it. Its open dialogs are declined and it stops, ending pi
+  # and its process groups (terminate/2). Left running, it leaked until the next restart, and a
+  # new owner asking for the same id got this one back (the chat after a crash).
   def handle_info({:DOWN, _ref, :process, owner, _reason}, %{owner: owner} = state) do
     state =
       Enum.reduce(state.dialogs, %{state | owner: nil, dialogs: %{}}, fn
@@ -201,7 +205,8 @@ defmodule Bm.Pi.Agent do
           answer_dialog(acc, dialog_id, %{"ok" => false, "error" => "no_owner"})
       end)
 
-    {:noreply, state}
+    Logger.info("pi agent #{state.id}: its owner stopped; stopping")
+    {:stop, :normal, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}

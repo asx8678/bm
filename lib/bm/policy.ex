@@ -37,8 +37,11 @@ defmodule Bm.Policy do
   @type decision :: :allow | {:deny, String.t()}
 
   # git subcommands that change the repository, the index or the working tree.
-  @git_writes ~w(add am apply checkout cherry-pick clean commit gc merge mv notes pull push
-                 rebase reset restore revert rm switch update-index update-ref worktree)
+  @git_writes ~w(add am apply bisect checkout checkout-index cherry-pick clean clone commit
+                 commit-tree fast-import fetch filter-branch gc hash-object init merge mv notes
+                 prune pull push read-tree rebase reflog remote repack replace reset restore
+                 revert rm sparse-checkout submodule switch symbolic-ref update-index update-ref
+                 worktree)
   # Global git options that take a separate value (`git -C dir status`).
   @git_options_with_value ~w(-C -c --git-dir --work-tree --namespace --exec-path)
 
@@ -121,10 +124,11 @@ defmodule Bm.Policy do
       not inside?(full, root) ->
         {:deny, "#{path} is outside the workspace. Only change files inside #{ctx.root}."}
 
-      inside?(full, Path.join(root, ".git")) ->
+      inside?(String.downcase(full), String.downcase(Path.join(root, ".git"))) ->
         {:deny, "BM manages git itself; don't change files in .git."}
 
-      Path.relative_to(full, root) in ctx.user_owned ->
+      # Compared without case: on macOS NOTES.md is the user's notes.md.
+      user_owned?(Path.relative_to(full, root), ctx.user_owned) ->
         {:deny,
          "#{Path.relative_to(full, root)} has uncommitted changes of the user; BM must not " <>
            "change it. Report that the task needs it instead."}
@@ -132,6 +136,11 @@ defmodule Bm.Policy do
       true ->
         :allow
     end
+  end
+
+  defp user_owned?(relative, owned) do
+    relative = String.downcase(relative)
+    Enum.any?(owned, &(String.downcase(&1) == relative))
   end
 
   # pi's own rules (path-utils.js): strip a leading "@", expand "~", normalize odd spaces.
@@ -146,23 +155,41 @@ defmodule Bm.Policy do
     end
   end
 
-  # Resolves symlinks in every existing component; the missing tail is kept as is.
-  defp real_path(path) do
+  # Resolves symlinks in every existing component; the missing tail is kept as is. It runs inside
+  # the coordinator, so it must always return: after 40 symlinks (a loop, like the system's
+  # ELOOP) or on a directory it can't enter, the path becomes one no workspace contains.
+  @max_links 40
+  @unresolvable "/nonexistent/bm-unresolvable-path"
+
+  defp real_path(path), do: real_path(path, @max_links)
+
+  defp real_path(_path, 0), do: @unresolvable
+
+  defp real_path(path, links) do
     path = Path.expand(path)
 
     case File.lstat(path) do
       {:ok, %File.Stat{type: :symlink}} ->
-        {:ok, target} = File.read_link(path)
-        target |> Path.expand(Path.dirname(path)) |> real_path()
+        case File.read_link(path) do
+          {:ok, target} -> target |> Path.expand(Path.dirname(path)) |> real_path(links - 1)
+          {:error, _} -> @unresolvable
+        end
 
       {:ok, %File.Stat{type: :directory}} ->
-        {out, 0} = System.cmd("pwd", ["-P"], cd: path)
-        String.trim(out)
+        case System.cmd("pwd", ["-P"], cd: path, stderr_to_stdout: true) do
+          {out, 0} -> String.trim(out)
+          _ -> @unresolvable
+        end
 
       _file_or_missing ->
         parent = Path.dirname(path)
-        if parent == path, do: path, else: Path.join(real_path(parent), Path.basename(path))
+
+        if parent == path,
+          do: path,
+          else: Path.join(real_path(parent, links), Path.basename(path))
     end
+  rescue
+    _ -> @unresolvable
   end
 
   defp inside?(path, dir), do: path == dir or String.starts_with?(path, dir <> "/")
@@ -396,18 +423,28 @@ defmodule Bm.Policy do
 
   # `yarn` alone installs; otherwise the first non-option argument is the subcommand.
   defp dependency_change?("yarn", args) do
-    case Enum.reject(args, &String.starts_with?(&1, "-")) do
+    case subcommand_words(args) do
       [] -> true
       [sub | _] -> sub in @dependency_subcommands["yarn"]
     end
   end
 
   defp dependency_change?(cmd, args) do
-    case Enum.reject(args, &String.starts_with?(&1, "-")) do
+    case subcommand_words(args) do
       [sub | _] -> sub in Map.get(@dependency_subcommands, cmd, [])
       [] -> false
     end
   end
+
+  # Options of package managers that take a separate value (`npm --prefix dir install`).
+  @options_with_value ~w(-C --prefix --cwd --dir --filter -F --workspace --manifest-path
+                         --target --project --directory)
+
+  defp subcommand_words([opt, _value | rest]) when opt in @options_with_value,
+    do: subcommand_words(rest)
+
+  defp subcommand_words(["-" <> _ | rest]), do: subcommand_words(rest)
+  defp subcommand_words(words), do: words
 
   defp check_git(args) do
     case git_subcommand(args) do
@@ -441,6 +478,18 @@ defmodule Bm.Policy do
     end)
   end
 
+  # `.git/config` is outside every snapshot (like dependencies): only reading it is fine.
+  defp git_write?("config", rest) do
+    reads = ~w(-l --list --get --get-all --get-regexp --show-origin --show-scope)
+
+    cond do
+      Enum.any?(rest, &(&1 in reads)) -> false
+      # `git config user.name`: one key, no value, no option, reads it.
+      match?([key] when binary_part(key, 0, 1) != "-", rest) -> false
+      true -> true
+    end
+  end
+
   defp git_write?("tag", rest), do: not (rest == [] or hd(rest) in ["-l", "--list"])
   defp git_write?("stash", rest), do: not match?([sub | _] when sub in ~w(list show), rest)
   defp git_write?(_sub, _rest), do: false
@@ -461,7 +510,7 @@ defmodule Bm.Policy do
       String.starts_with?(target, "$") ->
         {:deny, "Writing to #{target} (a variable) is not allowed; name the file."}
 
-      temporary?(target) ->
+      temporary?(target, ctx.root) ->
         :allow
 
       ctx[:mode] == :read_only ->
@@ -483,8 +532,12 @@ defmodule Bm.Policy do
     |> Enum.reject(&String.starts_with?(&1, "&"))
   end
 
-  defp temporary?(target) do
-    full = target |> pi_path() |> Path.expand() |> real_path()
-    Enum.any?(["/tmp", System.tmp_dir!()], &inside?(full, real_path(&1)))
+  # Relative targets are relative to the workspace (where the command runs), not to BM. A
+  # workspace may itself lie in a temp directory: its files follow the workspace rules.
+  defp temporary?(target, root) do
+    full = target |> pi_path() |> Path.expand(root) |> real_path()
+
+    not inside?(full, real_path(root)) and
+      Enum.any?(["/tmp", System.tmp_dir!()], &inside?(full, real_path(&1)))
   end
 end

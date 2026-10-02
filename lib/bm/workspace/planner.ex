@@ -858,6 +858,10 @@ defmodule Bm.Workspace.Planner do
         {:error, :lane_busy} ->
           {:noreply, state}
 
+        # Paused meanwhile (the user's Pause): this planner is being stopped.
+        {:error, :run_paused} ->
+          {:stop, :normal, %{state | phase: :ending}}
+
         {:error, :budget_exhausted} ->
           end_run(state, :failed, "the run's budget is spent")
 

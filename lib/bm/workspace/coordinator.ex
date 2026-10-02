@@ -393,20 +393,27 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   def handle_call({:end_run, run_id, status, reason}, _from, %{run: %{id: run_id}} = state) do
-    if state.phase == nil and state.lane == :free do
-      run = Runs.get_run!(run_id)
+    run = Runs.get_run!(run_id)
 
-      for task <- Runs.latest_tasks(run), task.status in [:queued, :running] do
-        Runs.update_task_status(task, :cancelled)
-      end
+    cond do
+      # Only the run's planner ends it, and a paused run's planner is stopping (the user paused
+      # it, or it paused itself): what it still sends on its way out must not end the run.
+      run.status == :paused ->
+        {:reply, {:error, :run_paused}, state}
 
-      {:ok, run} = Runs.finish_run(run, status, reason)
-      if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
-      broadcast_run(state, run)
-      state = prune_checkpoints(state)
-      {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
-    else
-      {:reply, {:error, :lane_busy}, state}
+      state.phase == nil and state.lane == :free ->
+        for task <- Runs.latest_tasks(run), task.status in [:queued, :running] do
+          Runs.update_task_status(task, :cancelled)
+        end
+
+        {:ok, run} = Runs.finish_run(run, status, reason)
+        if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
+        broadcast_run(state, run)
+        state = prune_checkpoints(state)
+        {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
+
+      true ->
+        {:reply, {:error, :lane_busy}, state}
     end
   end
 
@@ -438,10 +445,13 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:pause_by_user, run_id}, _from, %{run: %{id: run_id}} = state) do
     case Runs.get_run!(run_id) do
       %{status: :active, planner: %{}} = run ->
-        # Stopped first, and no longer watched: its exit is not a surprise to report.
+        # No longer watched: its exit is not a surprise to report. Stopped asynchronously, as in
+        # finish_run: the planner may be calling this process right now, and stopping it from
+        # here would wait out its shutdown timeout and then kill it before it ends its pi
+        # session. The run is paused first, so whatever it asks meanwhile is refused.
         if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
-        Bm.Workspace.Planner.stop(run_id)
         {:ok, run} = Runs.pause_run(run, "paused by the user")
+        Task.start(fn -> Bm.Workspace.Planner.stop(run_id) end)
         broadcast_run(state, run)
         {:reply, {:ok, run}, %{state | run: run, planner_ref: nil}}
 
@@ -796,33 +806,36 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Reverting a whole run (11.4)
 
+  # Each file goes back to what it was before the first attempt that changed it, only if it
+  # still holds what the last attempt that changed it left. (Checking every file against the last
+  # attempt's tree would miss the user's edit of a file an earlier attempt wrote: that tree
+  # already holds the edit, and it would be lost.) The user's own files are left as they are.
   defp do_revert_run(state, run) do
-    # Attempts in order; their changes stayed if accepted, or kept by the user.
-    stayed =
-      run
-      |> Runs.list_run_attempts()
-      |> Enum.sort_by(& &1.id)
-      |> Enum.filter(fn attempt ->
-        attempt.actual_writes != [] and is_binary(attempt.tree_before) and
-          is_binary(attempt.tree_after) and
-          (attempt.status == :accepted or
-             (attempt.status != :reverted and "kept" in attempt.flags))
-      end)
-
-    case stayed do
+    case stayed_attempts(run) do
       [] ->
         {:error, :nothing_to_revert}
 
-      [first | _] ->
-        last = List.last(stayed)
-        entries = Enum.flat_map(stayed, & &1.actual_writes)
+      stayed ->
+        owned = run_user_owned(run)
 
-        with :ok <- Git.restore(state.root, entries, first.tree_before, last.tree_after) do
+        restores =
+          for path <- written_paths(stayed), path not in owned do
+            writers = writers(stayed, path)
+            {path, hd(writers).tree_before, List.last(writers).tree_after}
+          end
+
+        with :ok <- Git.restore_paths(state.root, restores) do
           for attempt <- stayed do
-            case Runs.transition_attempt(attempt, :reverted) do
-              {:ok, _} -> :ok
+            left = left_for_user(attempt, owned)
+
+            case Runs.transition_attempt(attempt, :reverted, note_left(%{}, attempt, left)) do
+              {:ok, _} ->
+                :ok
+
               # A kept failed/cancelled attempt that can't move: the files are back anyway.
-              {:error, _} -> Runs.add_attempt_flag(attempt, "run_reverted")
+              {:error, _} ->
+                Runs.add_attempt_flag(attempt, "run_reverted")
+                if left != [], do: Runs.add_attempt_flag(attempt, "user_files_left")
             end
           end
 
@@ -836,28 +849,11 @@ defmodule Bm.Workspace.Coordinator do
   ## Committing a run (15.1, D26)
 
   defp do_commit_run(state, run) do
-    stayed =
-      run
-      |> Runs.list_run_attempts()
-      |> Enum.sort_by(& &1.id)
-      |> Enum.filter(fn a ->
-        a.actual_writes != [] and is_binary(a.tree_after) and
-          (a.status == :accepted or (a.status != :reverted and "kept" in a.flags))
-      end)
-
-    paths =
-      stayed |> Enum.flat_map(&Enum.map(&1.actual_writes, fn w -> w["path"] end)) |> Enum.uniq()
+    stayed = stayed_attempts(run)
+    paths = written_paths(stayed)
 
     # The run's final content of each path: from the last attempt that wrote it.
-    final =
-      Map.new(paths, fn path ->
-        last =
-          stayed
-          |> Enum.filter(&Enum.any?(&1.actual_writes, fn w -> w["path"] == path end))
-          |> List.last()
-
-        {path, last.tree_after}
-      end)
+    final = Map.new(paths, &{&1, List.last(writers(stayed, &1)).tree_after})
 
     changed =
       Enum.filter(paths, fn path ->
@@ -884,6 +880,48 @@ defmodule Bm.Workspace.Coordinator do
           {:ok, run}
         end
     end
+  end
+
+  ## Changes that stayed, and the user's files
+
+  # The run's attempts whose changes stayed in the workspace, in order: accepted, or kept by the
+  # user and not reverted since.
+  defp stayed_attempts(run) do
+    run
+    |> Runs.list_run_attempts()
+    |> Enum.sort_by(& &1.id)
+    |> Enum.filter(fn a ->
+      a.actual_writes != [] and is_binary(a.tree_before) and is_binary(a.tree_after) and
+        (a.status == :accepted or (a.status != :reverted and "kept" in a.flags))
+    end)
+  end
+
+  defp write_paths(attempt), do: Enum.map(attempt.actual_writes, & &1["path"])
+  defp written_paths(attempts), do: attempts |> Enum.flat_map(&write_paths/1) |> Enum.uniq()
+  defp writers(attempts, path), do: Enum.filter(attempts, &(path in write_paths(&1)))
+
+  # The user's files: dirty when the run began, or changed outside BM during it (13.1).
+  defp run_user_owned(run), do: get_in(run.baseline || %{}, ["user_owned"]) || []
+
+  # A revert never puts the user's own files back. The policy refuses the worker's edits to them,
+  # so a change there is most likely the user's, made while BM ran, and putting the file back
+  # would lose it. They stay as they are; the attempt names them and where their earlier version
+  # is (the tree before the attempt).
+  defp left_for_user(attempt, owned), do: Enum.filter(write_paths(attempt), &(&1 in owned))
+
+  defp revertible_writes(attempt, left),
+    do: Enum.reject(attempt.actual_writes, &(&1["path"] in left))
+
+  defp note_left(attrs, _attempt, []), do: attrs
+
+  defp note_left(attrs, attempt, left) do
+    note =
+      "BM left your files #{Enum.join(left, ", ")} as they are; their versions from before " <>
+        "the attempt: git show #{String.slice(attempt.tree_before, 0, 12)}:<path>"
+
+    error = Enum.join(Enum.reject([attrs[:error] || attempt.error, note], &is_nil/1), "; ")
+    flags = Map.get(attrs, :flags, attempt.flags) ++ ["user_files_left"]
+    Map.merge(attrs, %{error: error, flags: flags})
   end
 
   # The goal's first line, cut at a word boundary to fit a git subject line.
@@ -968,18 +1006,26 @@ defmodule Bm.Workspace.Coordinator do
         {:error, {:dependents, dependents}}
 
       true ->
+        left = left_for_user(attempt, run_user_owned(run))
+
+        attrs =
+          note_left(
+            %{
+              flags: attempt.flags ++ ["undone"],
+              error: "undone by the user; its changes are reverted"
+            },
+            attempt,
+            left
+          )
+
         with :ok <-
                Git.restore(
                  state.root,
-                 attempt.actual_writes,
+                 revertible_writes(attempt, left),
                  attempt.tree_before,
                  attempt.tree_after
                ),
-             {:ok, attempt} <-
-               Runs.transition_attempt(attempt, :reverted, %{
-                 flags: attempt.flags ++ ["undone"],
-                 error: "undone by the user; its changes are reverted"
-               }) do
+             {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted, attrs) do
           {:ok, task} = Runs.update_task_status(task, :cancelled)
 
           Phoenix.PubSub.broadcast(
@@ -2292,16 +2338,24 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp restore_attempt(state, attempt) do
-    with :ok <-
-           Git.restore(state.root, attempt.actual_writes, attempt.tree_before, attempt.tree_after),
-         {:ok, attempt} <- Runs.transition_attempt(attempt, :reverted) do
+    left = left_for_user(attempt, run_user_owned(state.run))
+    entries = revertible_writes(attempt, left)
+
+    with :ok <- Git.restore(state.root, entries, attempt.tree_before, attempt.tree_after),
+         {:ok, attempt} <-
+           Runs.transition_attempt(attempt, :reverted, note_left(%{}, attempt, left)) do
       {:ok, task} = attempt.task_id |> Runs.get_task!() |> Runs.update_task_status(:cancelled)
       state = %{state | attempt: attempt, task: task, lane: :free}
       {:ok, broadcast_attempt(resume_if_reconciled(state))}
     end
   end
 
-  # A run paused by recovery resumes once no interrupted attempt waits for the user.
+  # A run paused by recovery resumes once no interrupted attempt waits for the user. A goal run
+  # only while this coordinator still watches its planner (just the coordinator restarted): a
+  # planner the user paused (unwatched at once, though it may take seconds to stop) or one lost
+  # with BM is not, and the run waits for Resume planning, which starts a new one. Resumed
+  # without it, the run sat "active" with nothing to schedule its tasks, and a run the user had
+  # paused came back by itself.
   defp resume_if_reconciled(%{run: %{id: id}} = state) do
     run = Runs.get_run!(id)
 
@@ -2310,8 +2364,12 @@ defmodule Bm.Workspace.Coordinator do
       |> Runs.list_run_attempts()
       |> Enum.any?(&(&1.status == :needs_reconciliation and "kept" not in &1.flags))
 
+    planner_gone? =
+      run.planner != nil and
+        (state.planner_ref == nil or Bm.Workspace.Planner.whereis(id) == nil)
+
     case run do
-      %{status: :paused} when not waiting? ->
+      %{status: :paused} when not waiting? and not planner_gone? ->
         {:ok, run} = Runs.resume_run(run)
         %{state | run: run}
 

@@ -356,6 +356,10 @@ defmodule BmWeb.RunLive do
 
   defp reload(run), do: %{Runs.get_run!(run.id) | workspace: run.workspace}
 
+  # A revert left some of the user's own files as they were (the coordinator never puts them back).
+  defp left_user_files?(attempts),
+    do: Enum.any?(attempts, &(&1 && "user_files_left" in &1.flags))
+
   ## Actions
 
   @impl true
@@ -434,8 +438,14 @@ defmodule BmWeb.RunLive do
   def handle_event("revert_task", %{"task" => task_id}, socket) do
     case Coordinator.revert_task(socket.assigns.root, String.to_integer(task_id)) do
       {:ok, task} ->
-        {:noreply,
-         put_flash(socket, :info, "Undone: the files of task #{task.key} are back as before it.")}
+        message =
+          if left_user_files?([Runs.latest_attempt(task)]),
+            do:
+              "Undone: task #{task.key}'s files are back as before it, except your own files, " <>
+                "which BM left as they are (see the attempt).",
+            else: "Undone: the files of task #{task.key} are back as before it."
+
+        {:noreply, put_flash(socket, :info, message)}
 
       {:error, {:changed_since, paths}} ->
         {:noreply,
@@ -468,7 +478,15 @@ defmodule BmWeb.RunLive do
          socket
          |> assign(run: %{run | workspace: socket.assigns.run.workspace})
          |> stream(:attempts, Enum.map(attempts, &decorate(&1, socket.assigns.root)), reset: true)
-         |> put_flash(:info, "Reverted: every change this run left is back as it was before.")}
+         |> put_flash(
+           :info,
+           if(left_user_files?(attempts),
+             do:
+               "Reverted: the run's changes are back as they were before, except your own " <>
+                 "files, which BM left as they are (see the attempts).",
+             else: "Reverted: every change this run left is back as it was before."
+           )
+         )}
 
       {:error, {:changed_since, paths}} ->
         {:noreply,
@@ -1631,6 +1649,10 @@ defmodule BmWeb.RunLive do
   defp flag_help("leftover_processes"), do: "Left processes running; BM ended them"
   defp flag_help("verify_changed_files"), do: "The verify command changed files"
   defp flag_help("kept"), do: "Kept by the user as it was"
+
+  defp flag_help("user_files_left"),
+    do:
+      "Reverted, but BM left your own uncommitted files as they are; the note says where their earlier version is"
 
   defp flag_help("reviewer_wrote"),
     do:
