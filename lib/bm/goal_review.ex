@@ -18,7 +18,7 @@ defmodule Bm.GoalReview do
   def review(path, goal) do
     with {:ok, root} <- Bm.Runs.canonical_path(path),
          :ok <- Git.check_root(root),
-         {:ok, baseline} <- Git.baseline(root) do
+         {:ok, user_owned} <- Git.user_owned(root) do
       # Not "review-<n>": that is the reviewer of attempt n (Bm.Review).
       id = "goal-review-#{System.unique_integer([:positive])}"
 
@@ -26,9 +26,9 @@ defmodule Bm.GoalReview do
         {:ok, _report} ->
           Bm.Pi.subscribe(id)
           flush(id)
-          :ok = Bm.Pi.prompt(id, prompt(goal, baseline.user_owned))
+          :ok = Bm.Pi.prompt(id, prompt(goal, user_owned))
           deadline = System.monotonic_time(:millisecond) + @timeout
-          result = serve(id, root, baseline.user_owned, deadline, false)
+          result = serve(id, root, user_owned, deadline, false)
           cost = Bm.Pi.snapshot(id).summary.spend.confirmed
           Bm.Pi.stop(id)
 

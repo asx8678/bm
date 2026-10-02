@@ -32,14 +32,39 @@ defmodule Bm.Workspace.Git do
 
   ## Snapshots (D19)
 
-  @doc "Tree id of the working tree, written from BM's private index."
+  @doc """
+  Tree id of the working tree, written from BM's private index. Snapshots of one repository run
+  one at a time: they share the private index, and a second `git add` failing on its lock used to
+  delete the index under the first, whose `write-tree` then gave the empty tree.
+  """
   @spec snapshot(Path.t()) :: {:ok, tree} | {:error, term()}
   def snapshot(repo) do
-    with {:ok, index} <- private_index(repo),
-         :ok <- prepare_index(repo, index),
-         :ok <- add_all(repo, index) do
-      git(repo, ["write-tree"], index: index) |> trimmed()
+    with {:ok, index} <- private_index(repo) do
+      with_index(index, fn ->
+        with :ok <- clear_stale_lock(index),
+             :ok <- prepare_index(repo, index),
+             :ok <- add_all(repo, index) do
+          git(repo, ["write-tree"], index: index) |> trimmed()
+        end
+      end)
     end
+  end
+
+  # One BM process at a time per private index (`:global` locks are per node; BM runs one node).
+  defp with_index(index, fun), do: :global.trans({{__MODULE__, index}, self()}, fun, [node()])
+
+  # A lock git left behind (killed mid-write) would fail every later snapshot.
+  @stale_lock_ms 60_000
+
+  defp clear_stale_lock(index) do
+    lock = index <> ".lock"
+
+    with {:ok, %{mtime: mtime}} <- File.stat(lock, time: :posix),
+         true <- System.os_time(:second) - mtime > div(@stale_lock_ms, 1000) do
+      File.rm(lock)
+    end
+
+    :ok
   end
 
   defp private_index(repo) do
@@ -55,11 +80,12 @@ defmodule Bm.Workspace.Git do
   defp git_dir(repo) do
     with {:ok, out} <-
            git(repo, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], stderr: true),
-         [git_dir, top] <- String.split(out, "\n", trim: true) do
-      {real, 0} = System.cmd("pwd", ["-P"], cd: repo)
+         [git_dir, top] <- String.split(out, "\n", trim: true),
+         {real, 0} <- System.cmd("pwd", ["-P"], cd: repo, stderr_to_stdout: true) do
       if top == String.trim(real), do: {:ok, git_dir}, else: {:error, {:not_repository_root, top}}
     else
       {:error, _} = error -> error
+      {_out, status} when is_integer(status) -> {:error, :no_directory}
       _ -> {:error, :bare_repository}
     end
   end
@@ -74,17 +100,28 @@ defmodule Bm.Workspace.Git do
     end
   end
 
-  defp add_all(repo, index) do
+  # A lock held by another git process (not BM's: those are serialized) is waited for; a damaged
+  # private index is only a cache and is rebuilt once. The index is never deleted for a lock.
+  defp add_all(repo, index, lock_waits \\ 10) do
     case git(repo, ["add", "-A", "--", "."], index: index, stderr: true) do
       {:ok, _} ->
         :ok
 
-      # A damaged private index is only a cache: rebuild it once.
-      {:error, _} ->
-        File.rm(index)
+      {:error, {:git, _, _, out}} = error ->
+        cond do
+          not String.contains?(out, "index.lock") ->
+            File.rm(index)
 
-        with :ok <- prepare_index(repo, index),
-             do: git(repo, ["add", "-A", "--", "."], index: index, stderr: true) |> ok()
+            with :ok <- prepare_index(repo, index),
+                 do: git(repo, ["add", "-A", "--", "."], index: index, stderr: true) |> ok()
+
+          lock_waits > 0 ->
+            Process.sleep(200)
+            add_all(repo, index, lock_waits - 1)
+
+          true ->
+            error
+        end
     end
   end
 
@@ -162,16 +199,26 @@ defmodule Bm.Workspace.Git do
   @spec baseline(Path.t()) ::
           {:ok, %{head: String.t() | nil, tree: tree, user_owned: [String.t()]}}
   def baseline(repo) do
+    with {:ok, tree} <- snapshot(repo),
+         {:ok, user_owned} <- user_owned(repo) do
+      {:ok, %{head: head(repo), tree: tree, user_owned: user_owned}}
+    end
+  end
+
+  @doc """
+  The user-owned paths alone (staged, modified or untracked, not ignored), sorted; no snapshot.
+  For readers that must not touch the private index while a run may be snapshotting.
+  """
+  def user_owned(repo) do
     args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]
 
-    with {:ok, tree} <- snapshot(repo),
-         {:ok, out} <- git(repo, args) do
-      user_owned =
+    with {:ok, out} <- git(repo, args) do
+      paths =
         for record <- String.split(out, <<0>>, trim: true),
             <<_xy::binary-size(2), " ", path::binary>> <- [record],
             do: path
 
-      {:ok, %{head: head(repo), tree: tree, user_owned: Enum.sort(user_owned)}}
+      {:ok, Enum.sort(paths)}
     end
   end
 

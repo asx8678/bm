@@ -2182,3 +2182,14 @@ Verify: as each step above.
   - port `exit_status` waits for every holder of stdout;
   - pids wrap about once a day on this Mac;
   - Postgres counts `varchar(255)` in code points.
+
+**Status 36.1 (2026-10-02).**
+- `Git.snapshot/1` holds a `:global` lock per private index.
+- A lock held by another git process is waited for (10 × 200 ms), then reported. The index is
+  never deleted for a lock error, and a lock older than 60 s is removed.
+- `Git.user_owned/1` (status only) serves `baseline/1` and GoalReview, which no longer snapshots.
+- Answer turns take no snapshot.
+- Also fixed: `git_dir/1` no longer match-crashes when `pwd` fails.
+- Checked: the review's race script gave 0 mismatches against a serial snapshot in 300 rounds of
+  3 overlapping snapshots (before the fix, 28–31 of 900 were the empty tree). A 61-s-old lock is
+  cleared; a fresh one gives an error after about 2 s with the index kept.

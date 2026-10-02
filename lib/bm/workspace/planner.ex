@@ -451,7 +451,7 @@ defmodule Bm.Workspace.Planner do
 
   # `logged`: what the planner log keeps of `text`.
   defp start_turn(state, kind, text, logged) do
-    case Git.snapshot(state.root) do
+    case turn_snapshot(state, kind) do
       {:ok, tree} ->
         turn = state.turn + 1
         state = %{state | turn: turn, turn_tree: tree, phase: :busy, seen_running?: false}
@@ -473,6 +473,11 @@ defmodule Bm.Workspace.Planner do
         pause(state, "snapshot before a planner turn failed: #{inspect(error)}")
     end
   end
+
+  # Answer turns get no snapshot check (D24), so they take no snapshot: the worker's attempt is
+  # running and the coordinator snapshots it meanwhile.
+  defp turn_snapshot(state, :question), do: {:ok, state.turn_tree}
+  defp turn_snapshot(state, _kind), do: Git.snapshot(state.root)
 
   defp kind_label(:prompt), do: "prompt"
   defp kind_label(:delivery), do: "results"
