@@ -85,12 +85,14 @@ defmodule Bm.Workspace.Recovery do
       if agent_id = planner["agent_id"], do: Bm.Pi.stop(agent_id)
 
       if planner["boot_id"] != nil and planner["boot_id"] == Bm.Proc.boot_id() do
+        at = run.updated_at && DateTime.to_unix(run.updated_at)
+
         groups =
           [planner["pgid"]]
           |> Enum.reject(&is_nil/1)
-          |> Kernel.++(
-            if planner["pgid_file"], do: Bm.Proc.read_pgid_file(planner["pgid_file"]), else: []
-          )
+          |> Enum.map(&{&1, at})
+          |> Kernel.++(Bm.Proc.read_pgid_records(planner["pgid_file"]))
+          |> Bm.Proc.not_reused()
 
         Bm.Proc.terminate_groups(Bm.Proc.live_groups(groups))
       end
@@ -209,12 +211,22 @@ defmodule Bm.Workspace.Recovery do
   defp task_status(%{planner: %{}}, :failed), do: :queued
   defp task_status(_run, _status), do: :failed
 
-  defp end_process_groups(%Attempt{boot_id: boot_id} = attempt) do
+  # The baseline verify runs before the attempt records its boot (plan 36.10): its own boot id
+  # counts then. pi's and verify's groups count as recorded when the attempt last changed (both
+  # started before that); the pgid file has a time per command. Ids another program took over
+  # since are left alone.
+  defp end_process_groups(%Attempt{} = attempt) do
+    boot_id = attempt.boot_id || get_in(attempt.verify || %{}, ["boot_id"])
+
     if boot_id != nil and boot_id == Bm.Proc.boot_id() do
+      at = attempt.updated_at && DateTime.to_unix(attempt.updated_at)
+
       groups =
         [attempt.pgid, verify_pgid(attempt)]
         |> Enum.reject(&is_nil/1)
-        |> Kernel.++(pgid_file_groups(attempt))
+        |> Enum.map(&{&1, at})
+        |> Kernel.++(Bm.Proc.read_pgid_records(attempt.pgid_file))
+        |> Bm.Proc.not_reused()
 
       Bm.Proc.terminate_groups(Bm.Proc.live_groups(groups))
     end
@@ -222,9 +234,6 @@ defmodule Bm.Workspace.Recovery do
 
   defp verify_pgid(%Attempt{verify: %{"pgid" => pgid}}), do: pgid
   defp verify_pgid(_attempt), do: nil
-
-  defp pgid_file_groups(%Attempt{pgid_file: nil}), do: []
-  defp pgid_file_groups(%Attempt{pgid_file: file}), do: Bm.Proc.read_pgid_file(file)
 
   defp outcome(root, %Attempt{tree_before: tree_before}) when is_binary(tree_before) do
     with {:ok, tree} <- Git.snapshot(root),

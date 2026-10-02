@@ -21,11 +21,12 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /**
  * pi runs every bash command in a session of its own, outside pi's process group. The prefix
- * appends that session's group id (`$$`, the shell is the group leader) to the file BM named in
- * BM_PGID_FILE, so BM can find and end whatever the command leaves running (decision D18).
+ * appends that session's group id (`$$`, the shell is the group leader) and the time to the file
+ * BM named in BM_PGID_FILE, so BM can find and end whatever the command leaves running (decision
+ * D18), and can tell a group id that another program took over later (plan 36.10).
  */
 function recordProcessGroup(input: { command: string }, pgidFile: string): void {
-	input.command = `printf '%s\\n' "$$" >> ${shellQuote(pgidFile)}\n${input.command}`;
+	input.command = `printf '%s %s\\n' "$$" "$(date +%s)" >> ${shellQuote(pgidFile)}\n${input.command}`;
 }
 
 /**

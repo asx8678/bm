@@ -2334,3 +2334,36 @@ Verify: as each step above.
   - a title of 200 graphemes / 400 code points is refused by `Plan.validate` with a sentence and
     by the task changeset with no raise.
 - Scratch rows were deleted.
+
+**Status 36.10 (2026-10-02).**
+- **Process groups.**
+  - `bm_guard` records `pgid time` per command. `Bm.Proc.read_pgid_records/1` reads them (old
+    lines without a time still work), and `not_reused/1` drops a group id whose leader is alive
+    and started after the id was recorded (`ps -o etime`).
+  - Recovery (attempts and planners) and the agent's own group handling pass through it. pi's
+    and verify's groups count as recorded at the attempt's (or run's) last update.
+  - The agent re-checks its groups after every bash `tool_execution_end`, so long sessions
+    forget empty groups early.
+  - The baseline verify's group is recovered by the `boot_id` stored with it.
+- **Verify** runs the command as `/bin/sh -c "$1" </dev/null` inside a wrapper that prints an
+  exit marker; the marker ends the wait.
+- **Agent.** Port writes after pi exited no longer raise, and `terminate/2` always ends the
+  groups. JSON lines with lone UTF-16 surrogates are repaired (to U+FFFD) instead of dropped.
+- **ToolCalls** skips early decoding for pi's own tools and decodes only when a delta ends in
+  `}`.
+- **`Bm.Proc.cmd/3`** (System.cmd with a timeout; TERM then KILL) runs every git call (300 s),
+  Policy's git calls (10 s), the planner's file list and `pi --version` (30 s).
+- **git.ex.** The execute bit is the owner's only. A failed `read_link` is an error, not a
+  crash. `write_new` checks its write and close.
+- Checked:
+  - Verify: `(sleep 30 &); echo tests passed; exit 0` → exit 0 in 53 ms (the review measured a
+    full timeout); `read x` → exit 0 at once with empty input; `exec sh -c '…; exit 5'` → exit
+    5; output that looks like a marker without the newline is kept; a real timeout still fires
+    after 1 s; no `sleep 30` left behind.
+  - `Proc.cmd`: a 500 ms timeout ends `sleep 30` (717 ms).
+  - `not_reused` keeps a group recorded after its leader started and drops one recorded an hour
+    before.
+  - A line with `\ud83d` alone decodes (`�`) with real pairs intact.
+  - A 300 KB `write` in 40-byte deltas: 1,631 ms before, 0 ms after; `add_task` still gives its
+    early observation.
+  - The file↔directory revert and the recovery check (live group ended) still pass.

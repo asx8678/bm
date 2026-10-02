@@ -234,10 +234,11 @@ defmodule Bm.Policy do
     File.exists?(full) and not MapSet.member?(ctx[:touched] || MapSet.new(), relative) and
       match?(
         {_, 0},
-        System.cmd("git", ["check-ignore", "-q", "--", relative],
+        Bm.Proc.cmd("git", ["check-ignore", "-q", "--", relative],
           cd: ctx.root,
           env: [{"GIT_OPTIONAL_LOCKS", "0"}],
-          stderr_to_stdout: true
+          stderr_to_stdout: true,
+          timeout: 10_000
         )
       )
   rescue
@@ -759,10 +760,11 @@ defmodule Bm.Policy do
   # An alias in the user's git configuration (`git co` = `git checkout`) is checked as what it
   # runs: `!…` as a shell command, otherwise as git with those words.
   defp check_git_alias(sub, rest, ctx, depth) do
-    case System.cmd("git", ["config", "--get", "alias." <> sub],
+    case Bm.Proc.cmd("git", ["config", "--get", "alias." <> sub],
            cd: ctx.root,
            env: [{"GIT_OPTIONAL_LOCKS", "0"}],
-           stderr_to_stdout: true
+           stderr_to_stdout: true,
+           timeout: 10_000
          ) do
       {"!" <> command, 0} ->
         authorize(

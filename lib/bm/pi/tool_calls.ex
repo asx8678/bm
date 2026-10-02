@@ -24,8 +24,18 @@ defmodule Bm.Pi.ToolCalls do
 
   @doc "Applies one `assistantMessageEvent`; returns `{state, observations}`."
   @spec apply(%__MODULE__{}, map()) :: {%__MODULE__{}, [observation]}
+  # pi's own tools need no early observation, and their arguments (a whole file for `write`)
+  # can be large: decoding the growing buffer at every delta was quadratic (plan 36.10).
+  @no_early ~w(read write edit bash grep find ls)
+
   def apply(state, %{"type" => "toolcall_start", "contentIndex" => index} = event) do
-    call = %{id: event["id"], name: event["toolName"], buffer: "", early?: false}
+    call = %{
+      id: event["id"],
+      name: event["toolName"],
+      buffer: "",
+      early?: event["toolName"] in @no_early
+    }
+
     {put_call(state, index, call), []}
   end
 
@@ -35,7 +45,8 @@ defmodule Bm.Pi.ToolCalls do
       {:ok, %{early?: false} = call} ->
         call = %{call | buffer: call.buffer <> delta}
 
-        case JSON.decode(call.buffer) do
+        # A JSON object can only be complete when the text ends with `}`.
+        case String.ends_with?(String.trim_trailing(delta), "}") && JSON.decode(call.buffer) do
           {:ok, arguments} when is_map(arguments) ->
             {put_call(state, index, %{call | early?: true, buffer: ""}),
              [{:early, public(call, arguments)}]}

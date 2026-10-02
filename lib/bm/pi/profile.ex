@@ -175,7 +175,7 @@ defmodule Bm.Pi.Profile do
   defp pi_version do
     [exe | args] = Keyword.get(config(), :pi_command, ["pi"])
 
-    case System.cmd(exe, args ++ ["--version"], stderr_to_stdout: true) do
+    case Bm.Proc.cmd(exe, args ++ ["--version"], stderr_to_stdout: true, timeout: 30_000) do
       {out, 0} -> String.trim(out)
       {out, _} -> {:error, String.trim(out)}
     end

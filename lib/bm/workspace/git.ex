@@ -540,11 +540,12 @@ defmodule Bm.Workspace.Git do
         {:ok, nil}
 
       {:ok, %File.Stat{type: :symlink}} ->
-        {:ok, target} = File.read_link(full)
-        hash(repo, ["hash-object", "--stdin"], target, "120000")
+        with {:ok, target} <- File.read_link(full),
+             do: hash(repo, ["hash-object", "--stdin"], target, "120000")
 
+      # git looks at the owner's execute bit only (a 0654 file is 100644 to git).
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        file_mode = if Bitwise.band(mode, 0o111) != 0, do: "100755", else: "100644"
+        file_mode = if Bitwise.band(mode, 0o100) != 0, do: "100755", else: "100644"
         hash(repo, ["hash-object", "--path=#{path}", "--", Path.expand(full)], nil, file_mode)
 
       {:ok, %File.Stat{type: :directory}} ->
@@ -686,13 +687,19 @@ defmodule Bm.Workspace.Git do
           File.ln_s(target, full)
 
         {:file, data, mode} ->
-          with {:ok, io} <- File.open(full, [:write, :exclusive, :binary]) do
-            IO.binwrite(io, data)
-            File.close(io)
+          # Every result counts: a full disk must not report a truncated file as restored.
+          with {:ok, io} <- File.open(full, [:write, :exclusive, :binary]),
+               :ok <- write_and_close(io, data) do
             File.chmod(full, if(mode == "100755", do: 0o755, else: 0o644))
           end
       end
     end
+  end
+
+  defp write_and_close(io, data) do
+    result = IO.binwrite(io, data)
+    closed = File.close(io)
+    if result == :ok, do: closed, else: result
   end
 
   # A directory the attempt created where a file must return; it is empty by now or the write
@@ -746,17 +753,26 @@ defmodule Bm.Workspace.Git do
 
   ## Running git
 
+  # A snapshot of a large repository can take a while; a hung one (a clean filter, gpg's
+  # pinentry for a signed commit) must not wedge the coordinator for good.
+  @git_timeout 300_000
+
   defp git(repo, args, opts \\ []) do
     env =
       @env ++
         Keyword.get(opts, :env, []) ++
         if(opts[:index], do: [{"GIT_INDEX_FILE", opts[:index]}], else: [])
 
-    cmd_opts = [cd: repo, env: env, stderr_to_stdout: Keyword.get(opts, :stderr, false)]
+    cmd_opts = [
+      cd: repo,
+      env: env,
+      stderr_to_stdout: Keyword.get(opts, :stderr, false),
+      timeout: Keyword.get(opts, :timeout, @git_timeout)
+    ]
 
     result =
       case opts[:input] do
-        nil -> System.cmd("git", args, cmd_opts)
+        nil -> Bm.Proc.cmd("git", args, cmd_opts)
         input -> run_with_input(args, input, cmd_opts)
       end
 
@@ -772,7 +788,7 @@ defmodule Bm.Workspace.Git do
     File.write!(path, input)
 
     try do
-      System.cmd("sh", ["-c", ~s(exec git "$@" < "$0"), path | args], cmd_opts)
+      Bm.Proc.cmd("sh", ["-c", ~s(exec git "$@" < "$0"), path | args], cmd_opts)
     after
       File.rm(path)
     end

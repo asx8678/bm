@@ -440,7 +440,7 @@ defmodule Bm.Workspace.Planner do
 
   # Tracked and untracked, non-ignored files, so the planner needs no `ls` round-trip.
   defp repository_files(root) do
-    case System.cmd("git", ~w(ls-files --cached --others --exclude-standard),
+    case Bm.Proc.cmd("git", ~w(ls-files --cached --others --exclude-standard),
            cd: root,
            env: [{"GIT_OPTIONAL_LOCKS", "0"}],
            stderr_to_stdout: true

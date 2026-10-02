@@ -70,6 +70,7 @@ defmodule Bm.Pi.Agent do
       pgid_file: nil,
       # Groups seen empty once are never signalled again: their ids may be reused.
       dead_groups: MapSet.new(),
+      pgid_at: nil,
       pgid_dir: opts[:pgid_dir] || config[:pgid_dir] || Path.join(System.tmp_dir!(), "bm/pgids"),
       buffer: "",
       # Incremented every time the pi session is replaced (new process or confirmed new_session).
@@ -230,10 +231,10 @@ defmodule Bm.Pi.Agent do
       end
 
     Logger.info("pi agent #{state.id}: stopped by #{stopped_by}")
+    # Always, also when pi exited just before (its closed port made the shutdown command raise,
+    # and the groups it left were never ended, plan 36.10).
     end_groups(state)
-    Port.close(port)
-  catch
-    :error, :badarg -> :ok
+    close_port(port)
   end
 
   def terminate(_reason, _state), do: :ok
@@ -261,8 +262,9 @@ defmodule Bm.Pi.Agent do
 
   defp live_groups(state) do
     known =
-      [state.pgid | Bm.Proc.read_pgid_file(state.pgid_file)]
-      |> Enum.reject(&MapSet.member?(state.dead_groups, &1))
+      [{state.pgid, Map.get(state, :pgid_at)} | Bm.Proc.read_pgid_records(state.pgid_file)]
+      |> Enum.reject(&MapSet.member?(state.dead_groups, elem(&1, 0)))
+      |> Bm.Proc.not_reused()
 
     live = Bm.Proc.live_groups(known)
     dead = MapSet.union(state.dead_groups, MapSet.new(known -- live))
@@ -327,6 +329,7 @@ defmodule Bm.Pi.Agent do
           | port: port,
             os_pid: os_pid,
             pgid: os_pid,
+            pgid_at: System.os_time(:second),
             pgid_file: pgid_file,
             status: :starting,
             session_epoch: state.session_epoch + 1,
@@ -348,9 +351,18 @@ defmodule Bm.Pi.Agent do
     }
   end
 
+  # pi may have exited a moment ago: its port is closed and its exit status not yet handled.
   defp send_record(state, record) do
     Port.command(state.port, [JSON.encode!(record), "\n"])
     state
+  catch
+    :error, :badarg -> state
+  end
+
+  defp close_port(port) do
+    Port.close(port)
+  catch
+    :error, :badarg -> :ok
   end
 
   defp append_buffer(%{buffer: :overflow} = state, _chunk), do: state
@@ -366,7 +378,7 @@ defmodule Bm.Pi.Agent do
   defp handle_line(state, line) do
     state = log_raw(state, line)
 
-    case JSON.decode(line) do
+    case decode_line(line) do
       {:ok, record} when is_map(record) ->
         handle_record(state, record)
 
@@ -377,6 +389,29 @@ defmodule Bm.Pi.Agent do
 
         state
     end
+  end
+
+  # Node writes a lone UTF-16 surrogate (a string cut inside an emoji, e.g. by pi's line
+  # truncation) as `\ud83d`, which JSON.decode refuses: the whole event was lost (plan 36.10).
+  @doc false
+  def decode_line(line) do
+    with {:error, _} = error <- JSON.decode(line) do
+      if line =~ ~r/\\u[dD][89a-fA-F]/,
+        do: line |> replace_lone_surrogates() |> JSON.decode(),
+        else: error
+    end
+  end
+
+  defp replace_lone_surrogates(line) do
+    line
+    |> String.replace(
+      ~r/\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})/,
+      "\\ufffd"
+    )
+    |> String.replace(
+      ~r/(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2}/,
+      "\\ufffd"
+    )
   end
 
   defp log_raw(%{raw_log: nil} = state, _line), do: state
@@ -473,7 +508,10 @@ defmodule Bm.Pi.Agent do
     emit(state, {:tool_start, record["toolCallId"], record["toolName"], detail})
   end
 
+  # A finished bash command's group is checked now and remembered as dead if empty, so a long
+  # session (the chat, a planner) never signals an id that has since gone to another program.
   defp handle_record(state, %{"type" => "tool_execution_end"} = record) do
+    state = if record["toolName"] == "bash", do: elem(live_groups(state), 1), else: state
     emit(%{state | tool: nil}, {:tool_end, record["toolCallId"], record["isError"] != true})
   end
 
