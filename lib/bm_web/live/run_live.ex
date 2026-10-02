@@ -34,6 +34,9 @@ defmodule BmWeb.RunLive do
     root = run.workspace.path
     if connected?(socket), do: Coordinator.subscribe(root)
     attempts = Runs.list_run_attempts_with_tasks(run)
+    # The static render only shows the page; diffs (a git call per changed file) and the
+    # coordinator (started for an unfinished run) wait for the live connection (plan 36.12).
+    live? = connected?(socket)
 
     {:ok,
      socket
@@ -41,7 +44,7 @@ defmodule BmWeb.RunLive do
        page_title: "#{label(run)} · #{run.goal}",
        run: run,
        root: root,
-       lane: lane(run),
+       lane: if(live? or run.status not in [:active, :paused], do: lane(run), else: :unknown),
        # Other extensions' questions from the running worker (plan 24.1).
        approvals: approvals(run),
        approval_form: to_form(%{"id" => "", "value" => ""}, as: :approval),
@@ -59,8 +62,8 @@ defmodule BmWeb.RunLive do
        graph: if(run.planner, do: RunGraph.build(run, Runs.latest_tasks(run)))
      )
      |> stream(:tasks, if(run.planner, do: Runs.list_tasks(run), else: []))
-     |> stream(:attempts, Enum.map(attempts, &decorate(&1, root)))
-     |> then(&if(connected?(&1), do: watch_live(&1, List.last(attempts)), else: &1))}
+     |> stream(:attempts, Enum.map(attempts, &decorate(&1, if(live?, do: root))))
+     |> then(&if(live?, do: &1 |> watch_live(List.last(attempts)) |> resync_graph(), else: &1))}
   end
 
   # A finished run whose checkpoint refs are gone (pruned after newer runs, see the coordinator).
@@ -162,14 +165,14 @@ defmodule BmWeb.RunLive do
   end
 
   # Redraws the canvas of a goal run from the database plus the live activity.
+  # Pushed only when it changed: spend updates (one per model message) rebuilt it every time.
   defp refresh_graph(%{assigns: %{goal_run?: true}} = socket) do
     run = socket.assigns.run
+    graph = RunGraph.build(run, Runs.latest_tasks(run), socket.assigns.live)
 
-    push_event(
-      socket,
-      "flow:set_graph",
-      RunGraph.build(run, Runs.latest_tasks(run), socket.assigns.live)
-    )
+    if graph == socket.assigns.graph,
+      do: socket,
+      else: socket |> assign(graph: graph) |> push_event("flow:set_graph", graph)
   end
 
   defp refresh_graph(socket), do: socket
@@ -228,7 +231,7 @@ defmodule BmWeb.RunLive do
   end
 
   defp diffs(%{tree_before: before, tree_after: after_tree, actual_writes: writes}, root)
-       when is_binary(before) and is_binary(after_tree) do
+       when is_binary(root) and is_binary(before) and is_binary(after_tree) do
     for %{"path" => path, "status" => status} <- writes do
       text =
         case Git.file_diff(root, before, after_tree, path) do
@@ -242,11 +245,19 @@ defmodule BmWeb.RunLive do
 
   defp diffs(_attempt, _root), do: []
 
+  # After a reconnect the canvas (phx-update="ignore") still shows what it had: send it the
+  # graph this mount built.
+  defp resync_graph(%{assigns: %{graph: %{} = graph}} = socket),
+    do: push_event(socket, "flow:set_graph", graph)
+
+  defp resync_graph(socket), do: socket
+
   ## Updates from the coordinator
 
   @impl true
   def handle_info({:workspace, _root, {:attempt, attempt, lane}}, socket) do
-    %{task: task} = Runs.attempt_context(attempt)
+    # One query decides whether the event is this run's (every attempt of the workspace comes).
+    task = Runs.get_task!(attempt.task_id)
 
     if task.run_id == socket.assigns.run.id do
       attempt = %{attempt | task: task}
@@ -332,13 +343,14 @@ defmodule BmWeb.RunLive do
     socket = notify_if_ended(socket, socket.assigns.run, run)
 
     socket =
-      if run.planner != nil and run.status != :active,
-        # Ending or pausing may cancel queued tasks without a task event.
-        do:
-          socket
-          |> stream(:tasks, Runs.list_tasks(run), reset: true)
-          |> assign(planner_phase: nil),
-        else: socket
+      if run.planner != nil and run.status != :active and
+           run.status != socket.assigns.run.status,
+         # Ending or pausing may cancel queued tasks without a task event.
+         do:
+           socket
+           |> stream(:tasks, Runs.list_tasks(run), reset: true)
+           |> assign(planner_phase: nil),
+         else: socket
 
     socket = assign(socket, run: run, lane: lane)
 
@@ -363,11 +375,14 @@ defmodule BmWeb.RunLive do
   ## Actions
 
   @impl true
-  def handle_event("stop", _params, socket), do: act(socket, &Coordinator.cancel/1)
-  def handle_event("keep", _params, socket), do: act(socket, &Coordinator.keep/1)
+  def handle_event("stop", _params, socket),
+    do: act(socket, &Coordinator.cancel(&1, socket.assigns.run.id))
+
+  def handle_event("keep", _params, socket),
+    do: act(socket, &Coordinator.keep(&1, socket.assigns.run.id))
 
   def handle_event("revert", _params, socket) do
-    case Coordinator.revert(socket.assigns.root) do
+    case Coordinator.revert(socket.assigns.root, socket.assigns.run.id) do
       :ok ->
         {:noreply, socket}
 
@@ -385,7 +400,7 @@ defmodule BmWeb.RunLive do
   end
 
   def handle_event("finish", _params, socket) do
-    case Coordinator.finish_run(socket.assigns.root) do
+    case Coordinator.finish_run(socket.assigns.root, socket.assigns.run.id) do
       {:ok, run} ->
         {:noreply,
          assign(socket, run: %{run | workspace: socket.assigns.run.workspace}, lane: :finished)}
@@ -428,7 +443,7 @@ defmodule BmWeb.RunLive do
         {:noreply,
          socket
          |> assign(run: %{run | workspace: socket.assigns.run.workspace})
-         |> put_flash(:info, "Committed as #{String.slice(run.commit_sha, 0, 8)} on your branch.")}
+         |> put_flash(:info, committed_message(run))}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Not committed: #{explain_commit(reason)}")}
@@ -436,36 +451,12 @@ defmodule BmWeb.RunLive do
   end
 
   def handle_event("revert_task", %{"task" => task_id}, socket) do
-    case Coordinator.revert_task(socket.assigns.root, String.to_integer(task_id)) do
-      {:ok, task} ->
-        message =
-          if left_user_files?([Runs.latest_attempt(task)]),
-            do:
-              "Undone: task #{task.key}'s files are back as before it, except your own files, " <>
-                "which BM left as they are (see the attempt).",
-            else: "Undone: the files of task #{task.key} are back as before it."
-
-        {:noreply, put_flash(socket, :info, message)}
-
-      {:error, {:changed_since, paths}} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Not undone: #{Enum.join(paths, ", ")} changed since the task. Nothing was touched."
-         )}
-
-      {:error, {:dependents, keys}} ->
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Not undone: #{Enum.join(keys, ", ")} #{if length(keys) == 1, do: "depends", else: "depend"} " <>
-             "on this task. Undo #{if length(keys) == 1, do: "it", else: "them"} first."
-         )}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Not undone: #{explain_action(reason)}")}
+    # Only a task of this page's run, by a well-formed id.
+    with {id, ""} <- Integer.parse(task_id),
+         %{run_id: run_id} when run_id == socket.assigns.run.id <- Runs.get_task(id) do
+      revert_task(socket, id)
+    else
+      _ -> {:noreply, put_flash(socket, :error, "Not undone: that task isn't part of this run.")}
     end
   end
 
@@ -553,7 +544,8 @@ defmodule BmWeb.RunLive do
     attrs = %{title: BmWeb.HomeLive.title(goal), goal: goal}
 
     with false <- goal == "",
-         {:ok, _attempt} <- Coordinator.run_task(socket.assigns.root, attrs) do
+         {:ok, _attempt} <-
+           Coordinator.run_task(socket.assigns.root, attrs, socket.assigns.run.id) do
       {:noreply, assign(socket, form: to_form(%{"goal" => ""}, as: :next))}
     else
       true ->
@@ -562,6 +554,40 @@ defmodule BmWeb.RunLive do
       {:error, reason} ->
         {_field, message} = BmWeb.HomeLive.explain(reason, socket.assigns.root)
         {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
+  defp revert_task(socket, task_id) do
+    case Coordinator.revert_task(socket.assigns.root, task_id) do
+      {:ok, task} ->
+        message =
+          if left_user_files?([Runs.latest_attempt(task)]),
+            do:
+              "Undone: task #{task.key}'s files are back as before it, except your own files, " <>
+                "which BM left as they are (see the attempt).",
+            else: "Undone: the files of task #{task.key} are back as before it."
+
+        {:noreply, put_flash(socket, :info, message)}
+
+      {:error, {:changed_since, paths}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Not undone: #{Enum.join(paths, ", ")} changed since the task. Nothing was touched."
+         )}
+
+      {:error, {:dependents, keys}} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Not undone: #{Enum.join(keys, ", ")} #{if length(keys) == 1, do: "depends", else: "depend"} " <>
+             "on this task. Undo #{if length(keys) == 1, do: "it", else: "them"} first."
+         )}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Not undone: #{explain_action(reason)}")}
     end
   end
 
@@ -581,11 +607,15 @@ defmodule BmWeb.RunLive do
     do: "the latest attempt is #{status |> to_string() |> String.replace("_", " ")}."
 
   def explain_action(:not_resumable), do: "only a paused goal run can resume planning."
+
+  def explain_action(:planner_stopping),
+    do: "the previous planner is still stopping; try again in a few seconds."
+
   def explain_action(:already_reverted), do: "this run was already reverted."
   def explain_action(:run_not_finished), do: "finish the run first."
 
   def explain_action(:run_not_paused),
-    do: "a goal run's task can be undone while the run is paused or finished (Pause first)."
+    do: "a goal run's changes can be undone while the run is paused or finished (Pause first)."
 
   def explain_action(:not_pausable), do: "only an active goal run can be paused."
 
@@ -605,7 +635,29 @@ defmodule BmWeb.RunLive do
 
   def explain_action(other), do: "unexpected error (#{inspect(other)})."
 
+  @doc "What a commit did, with the user's files it left out and an index that wasn't updated."
+  def committed_message(run) do
+    baseline = run.baseline || %{}
+    left = baseline["commit_left"] || []
+
+    [
+      "Committed as #{String.slice(run.commit_sha, 0, 8)} on your branch.",
+      left != [] &&
+        "Left out your own uncommitted files: #{Enum.join(left, ", ")} (still uncommitted).",
+      "index_not_refreshed" in (baseline["commit_notes"] || []) &&
+        "Git's index was locked, so `git status` may show the committed files as changed; " <>
+          "run `git reset -q -- <files>` to refresh it."
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join(" ")
+  end
+
   @doc false
+  def explain_commit({:only_user_files, paths}),
+    do:
+      "the run's changes left are all in your own uncommitted files (#{Enum.join(paths, ", ")}); " <>
+        "BM doesn't commit those."
+
   def explain_commit({:changed_since, paths}),
     do: "#{Enum.join(paths, ", ")} changed since the run; commit them yourself if you want them."
 
@@ -701,15 +753,23 @@ defmodule BmWeb.RunLive do
                 const show = () => { button.hidden = !supported || Notification.permission !== "default" }
                 show()
                 button.addEventListener("click", () => Notification.requestPermission().then(show))
-                this.baseTitle = document.title
                 const clear = () => { if (document.title.startsWith("● ")) document.title = document.title.slice(2) }
+                const visible = () => { if (!document.hidden) clear() }
                 window.addEventListener("focus", clear)
-                document.addEventListener("visibilitychange", () => { if (!document.hidden) clear() })
+                document.addEventListener("visibilitychange", visible)
+                // Removed when the page goes: they piled up with every visit to a run.
+                this.cleanup = () => {
+                  window.removeEventListener("focus", clear)
+                  document.removeEventListener("visibilitychange", visible)
+                }
                 this.handleEvent("bm:notify", ({title, body}) => {
                   if (document.hasFocus()) return
                   if (!document.title.startsWith("● ")) document.title = "● " + document.title
                   if (supported && Notification.permission === "granted") new Notification(title, {body})
                 })
+              },
+              destroyed() {
+                if (this.cleanup) this.cleanup()
               }
             }
           </script>
@@ -1132,15 +1192,7 @@ defmodule BmWeb.RunLive do
                 do: "The planner is working. Tasks start when it has proposed them.",
                 else: "The planner chooses the next task; nothing waits for you."}
             </p>
-            <.action
-              :if={revertable?(@latest)}
-              id="revert-btn"
-              event="revert"
-              style={:secondary}
-              disable_with="Reverting…"
-            >
-              Revert last change
-            </.action>
+            <%!-- No Revert here: it could land inside a planner turn (D28); Pause, then undo. --%>
             <.action id="pause-run-btn" event="pause" style={:secondary} disable_with="Pausing…">
               Pause
             </.action>
@@ -1210,7 +1262,7 @@ defmodule BmWeb.RunLive do
   defp activity_text(_activity), do: "Thinking…"
 
   # A finished run with at least one checkpoint left something to revert.
-  defp run_revertable?(run), do: Enum.any?(Runs.list_run_attempts(run), & &1.checkpoint_ref)
+  defp run_revertable?(run), do: Runs.any_checkpoint?(run)
 
   defp revertable?(%{status: :accepted, actual_writes: [_ | _]}), do: true
   defp revertable?(_attempt), do: false
@@ -1663,6 +1715,10 @@ defmodule BmWeb.RunLive do
 
   defp flag_help("auto_reverted"),
     do: "The planner's check failed; BM reverted the changes and asked the planner to re-plan"
+
+  defp flag_help("files_left"),
+    do:
+      "BM reverted only the worker's own changes; other files that changed during the attempt (maybe yours) were left as they are"
 
   defp flag_help(_flag), do: nil
 end

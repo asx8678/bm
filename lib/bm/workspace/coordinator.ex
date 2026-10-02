@@ -93,7 +93,8 @@ defmodule Bm.Workspace.Coordinator do
   instead (the planner's scheduler, plan 7.4).
   Returns `{:ok, attempt}` once admitted; the attempt continues asynchronously.
   """
-  def run_task(path, attrs), do: call(path, {:run_task, Map.new(attrs)})
+  def run_task(path, attrs, run_id \\ nil),
+    do: call(path, fenced({:run_task, Map.new(attrs)}, run_id))
 
   @doc """
   Starts a goal run (milestone C): a new run with planning open, and its planner
@@ -162,23 +163,29 @@ defmodule Bm.Workspace.Coordinator do
   def state(path), do: call(path, :state)
 
   @doc "Cancels the running attempt. Changes it made stay and hold the lane."
-  def cancel(path), do: call(path, :cancel)
+  def cancel(path, run_id \\ nil), do: call(path, fenced(:cancel, run_id))
 
   @doc "Accepts the held attempt's changes as they are (recorded as unverified) and frees the lane."
-  def keep(path), do: call(path, :keep)
+  def keep(path, run_id \\ nil), do: call(path, fenced(:keep, run_id))
 
   @doc """
   Reverts the run's latest attempt (held or not): its files go back to `tree_before`, only if
   they still hold what the attempt left. `{:error, {:changed_since, paths}}` changes nothing.
   """
-  def revert(path), do: call(path, :revert)
+  def revert(path, run_id \\ nil), do: call(path, fenced(:revert, run_id))
 
   @doc """
   Finishes the workspace's run (`:done`), which releases the workspace: the next task starts a
   new run with a fresh baseline of the user's files. Refused while an attempt runs or the lane
   is held.
   """
-  def finish_run(path), do: call(path, :finish_run)
+  def finish_run(path, run_id \\ nil), do: call(path, fenced(:finish_run, run_id))
+
+  # With a run id (the run page, the API), the action applies only while that run is the
+  # workspace's unfinished one: a page left open on a finished run must not stop, keep, revert
+  # or finish the next run, or add a task to it (plan 36.12).
+  defp fenced(message, nil), do: message
+  defp fenced(message, run_id), do: {:for_run, run_id, message}
 
   @doc "Stops the coordinator and its worker."
   def stop(path) do
@@ -314,6 +321,12 @@ defmodule Bm.Workspace.Coordinator do
   ## Calls
 
   @impl true
+  def handle_call({:for_run, run_id, message}, from, %{run: %{id: run_id}} = state),
+    do: handle_call(message, from, state)
+
+  def handle_call({:for_run, _run_id, _message}, _from, state),
+    do: {:reply, {:error, :run_not_active}, state}
+
   def handle_call(:state, _from, state) do
     reply = %{
       lane: state.lane,
@@ -383,7 +396,7 @@ defmodule Bm.Workspace.Coordinator do
                "user_owned" => baseline.user_owned
              }
            }),
-         {:ok, pid} <- start_planner(state, run, opts) do
+         {:ok, pid} <- start_planner_or_fail(state, run, opts) do
       state = %{state | workspace: workspace, run: run, planner_ref: Process.monitor(pid)}
       broadcast_run(state, run)
       {:reply, {:ok, run}, state}
@@ -406,7 +419,7 @@ defmodule Bm.Workspace.Coordinator do
           Runs.update_task_status(task, :cancelled)
         end
 
-        {:ok, run} = Runs.finish_run(run, status, reason)
+        run = stored(Runs.finish_run(run, status, reason), run)
         if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
         broadcast_run(state, run)
         state = prune_checkpoints(state)
@@ -423,7 +436,7 @@ defmodule Bm.Workspace.Coordinator do
   def handle_call({:pause_run, run_id, reason}, _from, %{run: %{id: run_id}} = state) do
     case Runs.get_run!(run_id) do
       %{status: :active} = run ->
-        {:ok, run} = Runs.pause_run(run, reason)
+        run = stored(Runs.pause_run(run, reason), run)
         broadcast_run(state, run)
         {:reply, {:ok, run}, %{state | run: run}}
 
@@ -450,7 +463,7 @@ defmodule Bm.Workspace.Coordinator do
         # here would wait out its shutdown timeout and then kill it before it ends its pi
         # session. The run is paused first, so whatever it asks meanwhile is refused.
         if state.planner_ref, do: Process.demonitor(state.planner_ref, [:flush])
-        {:ok, run} = Runs.pause_run(run, "paused by the user")
+        run = stored(Runs.pause_run(run, "paused by the user"), run)
         Task.start(fn -> Bm.Workspace.Planner.stop(run_id) end)
         broadcast_run(state, run)
         {:reply, {:ok, run}, %{state | run: run, planner_ref: nil}}
@@ -473,8 +486,11 @@ defmodule Bm.Workspace.Coordinator do
       state.phase != nil or state.lane != :free ->
         {:reply, {:error, :lane_busy}, state}
 
+      Bm.Workspace.Planner.whereis(run_id) != nil ->
+        {:reply, {:error, :planner_stopping}, state}
+
       true ->
-        {:ok, run} = Runs.resume_run(run)
+        run = stored(Runs.resume_run(run), run)
 
         case start_planner(state, run, Keyword.put(opts, :resume, true)) do
           {:ok, pid} ->
@@ -482,7 +498,9 @@ defmodule Bm.Workspace.Coordinator do
             {:reply, {:ok, run}, %{state | run: run, planner_ref: Process.monitor(pid)}}
 
           {:error, reason} ->
-            {:ok, run} = Runs.pause_run(run, "the planner did not start: #{inspect(reason)}")
+            run =
+              stored(Runs.pause_run(run, "the planner did not start: #{inspect(reason)}"), run)
+
             {:reply, {:error, reason}, %{state | run: run}}
         end
     end
@@ -607,7 +625,7 @@ defmodule Bm.Workspace.Coordinator do
       end
     end
 
-    {:ok, run} = Runs.finish_run(run, status, reason)
+    run = stored(Runs.finish_run(run, status, reason), run)
     broadcast_run(state, run)
     state = prune_checkpoints(state)
     {:reply, {:ok, run}, %{state | run: nil, attempt: nil, task: nil, planner_ref: nil}}
@@ -784,6 +802,19 @@ defmodule Bm.Workspace.Coordinator do
 
   defp admit_task(run, attrs), do: Runs.create_task(run, task_attrs(run, attrs))
 
+  # The run exists by now: if its planner can't start, it ends, or the workspace would hold an
+  # unfinished run this coordinator doesn't know (every later start refused as busy, plan 36.8).
+  defp start_planner_or_fail(state, run, opts) do
+    case start_planner(state, run, opts) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, reason} = error ->
+        Runs.finish_run(run, :failed, "the planner did not start: #{inspect(reason)}")
+        error
+    end
+  end
+
   defp start_planner(state, run, opts) do
     Bm.Workspace.Planner.start(run.id, state.root, opts)
   end
@@ -799,6 +830,11 @@ defmodule Bm.Workspace.Coordinator do
       do: {:done, "finished by the user"},
       else: {:cancelled, "finished by the user before the plan was complete"}
   end
+
+  # A run status write that lost a race (another process changed the run first): what is
+  # stored now counts.
+  defp stored({:ok, run}, _run), do: run
+  defp stored({:error, :stale}, run), do: %{Runs.get_run!(run.id) | workspace: run.workspace}
 
   defp broadcast_run(state, run) do
     Phoenix.PubSub.broadcast(Bm.PubSub, topic(state.root), {:workspace, state.root, {:run, run}})
@@ -848,9 +884,13 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Committing a run (15.1, D26)
 
+  # The user's own files are left out (§8: user changes are never committed): a kept attempt
+  # may have written one (e.g. a verify command that formats files), and committing it would
+  # commit the user's uncommitted work with it. The run names them (`baseline["commit_left"]`).
   defp do_commit_run(state, run) do
     stayed = stayed_attempts(run)
-    paths = written_paths(stayed)
+    owned = run_user_owned(run)
+    {left, paths} = stayed |> written_paths() |> Enum.split_with(&(&1 in owned))
 
     # The run's final content of each path: from the last attempt that wrote it.
     final = Map.new(paths, &{&1, List.last(writers(stayed, &1)).tree_after})
@@ -861,6 +901,9 @@ defmodule Bm.Workspace.Coordinator do
       end)
 
     cond do
+      paths == [] and left != [] ->
+        {:error, {:only_user_files, left}}
+
       paths == [] ->
         {:error, :nothing_to_commit}
 
@@ -874,11 +917,24 @@ defmodule Bm.Workspace.Coordinator do
 
         message = "#{subject}\n\nChanges made by BM run #{label} and accepted.\n"
 
-        with {:ok, sha} <- Git.commit_paths(state.root, paths, message) do
-          {:ok, run} = Runs.update_run(run, %{commit_sha: sha})
+        with {:ok, sha, notes} <- commit_paths(state.root, paths, message) do
+          baseline =
+            (run.baseline || %{})
+            |> Map.put("commit_left", left)
+            |> Map.put("commit_notes", notes)
+
+          {:ok, run} = Runs.update_run(run, %{commit_sha: sha, baseline: baseline})
           broadcast_run(state, run)
           {:ok, run}
         end
+    end
+  end
+
+  defp commit_paths(root, paths, message) do
+    case Git.commit_paths(root, paths, message) do
+      {:ok, sha} -> {:ok, sha, []}
+      {:ok, sha, :index_not_refreshed} -> {:ok, sha, ["index_not_refreshed"]}
+      error -> error
     end
   end
 
@@ -1073,9 +1129,16 @@ defmodule Bm.Workspace.Coordinator do
 
   defp maybe_set_verify_command(workspace, _attrs), do: {:ok, workspace}
 
+  # Reloaded: recovery or another process may have paused or ended it since this state was read.
   defp ensure_run(%{run: %{status: :active} = run}, _attrs) do
     run = Runs.get_run!(run.id)
-    if Runs.budget_exhausted?(run), do: {:error, :budget_exhausted}, else: {:ok, run}
+
+    cond do
+      run.status == :paused -> {:error, :run_paused}
+      run.status != :active -> {:error, :run_not_active}
+      Runs.budget_exhausted?(run) -> {:error, :budget_exhausted}
+      true -> {:ok, run}
+    end
   end
 
   defp ensure_run(%{run: %{status: :paused}}, _attrs), do: {:error, :run_paused}
@@ -1133,7 +1196,12 @@ defmodule Bm.Workspace.Coordinator do
 
     case state.run && Runs.get_run!(state.run.id) do
       %{status: :active} = run ->
-        {:ok, run} = Runs.pause_run(run, "the planner stopped unexpectedly (#{inspect(reason)})")
+        run =
+          stored(
+            Runs.pause_run(run, "the planner stopped unexpectedly (#{inspect(reason)})"),
+            run
+          )
+
         broadcast_run(state, run)
         {:noreply, %{state | run: run}}
 
@@ -1496,6 +1564,11 @@ defmodule Bm.Workspace.Coordinator do
   # What the worker was allowed to do so far, for the freshness check (13.2).
   defp note_allowed(state, %{op: "authorize", payload: payload}, %{"allow" => true}) do
     case payload do
+      # The files the command names as written count as the worker's own (plan 36.6).
+      %{"tool" => "bash", "input" => %{"command" => command}} when is_binary(command) ->
+        touched = command |> Bm.Policy.write_targets(state.root) |> MapSet.new()
+        %{state | bash_ran?: true, touched: MapSet.union(state.touched, touched)}
+
       %{"tool" => "bash"} ->
         %{state | bash_ran?: true}
 
@@ -1592,7 +1665,7 @@ defmodule Bm.Workspace.Coordinator do
 
   defp authorize_policy(state, tool, payload) do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
-    ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
+    ctx = %{root: state.root, user_owned: user_owned(state), mode: mode, touched: state.touched}
 
     input = payload["input"] || %{}
 
@@ -1874,9 +1947,10 @@ defmodule Bm.Workspace.Coordinator do
   defp start_verification(state, :check_only) do
     coordinator = self()
     %{root: root, task: %{check: check}, config: %{verify_timeout: timeout}} = state
+    owned = run_user_owned(state.run)
 
     start_job(state, :verify, fn ->
-      check_result = Bm.Workspace.Verify.run(check, root, timeout, coordinator)
+      check_result = run_check(check, root, owned, timeout, coordinator)
       %{"exit" => 0, "output" => "", "skipped" => "no changes", "check" => check_result}
     end)
   end
@@ -1887,17 +1961,27 @@ defmodule Bm.Workspace.Coordinator do
     command = state.workspace.verify_command
     check = state.task.check
     timeout = state.config.verify_timeout
+    owned = run_user_owned(state.run)
 
     # The task's check (plan 7.7) runs only after the workspace verify command passed.
     start_job(state, :verify, fn ->
       case Bm.Workspace.Verify.run(command, root, timeout, coordinator) do
         %{"exit" => 0} = verify when is_binary(check) ->
-          Map.put(verify, "check", Bm.Workspace.Verify.run(check, root, timeout, coordinator))
+          Map.put(verify, "check", run_check(check, root, owned, timeout, coordinator))
 
         verify ->
           verify
       end
     end)
+  end
+
+  # A task's check is checked again where it runs (plan 36.4): a refused one fails like a
+  # failing check, without running.
+  defp run_check(check, root, owned, timeout, coordinator) do
+    case Bm.Plan.check_policy(check, root, owned) do
+      :ok -> Bm.Workspace.Verify.run(check, root, timeout, coordinator)
+      {:error, sentence} -> %{"exit" => 126, "output" => sentence, "refused" => true}
+    end
   end
 
   defp verified(state, result) do
@@ -1955,17 +2039,22 @@ defmodule Bm.Workspace.Coordinator do
         true -> "the task's check `#{command}` exited #{check["exit"]}"
       end
 
+    known = workers_paths(state)
     state = finish(state, :failed, Map.merge(changes, %{verify: verify, error: reason}))
     attempt = Runs.get_attempt!(state.attempt.id)
+    # Only the worker's own writes go back (D33): another changed file may be the user's edit
+    # made meanwhile, which a revert would lose with nobody asked. It stays and is named.
+    {revert, left} = Enum.split_with(attempt.actual_writes, &(&1["path"] in known))
+    left = Enum.map(left, & &1["path"])
 
-    with [_ | _] <- attempt.actual_writes,
-         :ok <-
-           Git.restore(state.root, attempt.actual_writes, attempt.tree_before, attempt.tree_after),
+    with [_ | _] <- revert,
+         :ok <- Git.restore(state.root, revert, attempt.tree_before, attempt.tree_after),
          {:ok, attempt} <-
-           Runs.transition_attempt(attempt, :reverted, %{
-             flags: attempt.flags ++ ["auto_reverted"],
-             error: reason <> "; BM reverted its changes for a re-plan"
-           }) do
+           Runs.transition_attempt(
+             attempt,
+             :reverted,
+             auto_revert_note(attempt, reason, left)
+           ) do
       broadcast_attempt(%{state | attempt: attempt, lane: :free})
     else
       # Nothing to revert: the lane is already free.
@@ -1984,6 +2073,30 @@ defmodule Bm.Workspace.Coordinator do
 
         broadcast_attempt(%{state | attempt: attempt})
     end
+  end
+
+  # Paths the worker is known to have written: its declared writes, its edit/write calls and the
+  # files its bash commands named (plan 36.6, D33).
+  defp workers_paths(state),
+    do: MapSet.union(MapSet.new(state.task.writes || []), state.touched)
+
+  defp auto_revert_note(attempt, reason, []) do
+    %{
+      flags: attempt.flags ++ ["auto_reverted"],
+      error: reason <> "; BM reverted its changes for a re-plan"
+    }
+  end
+
+  defp auto_revert_note(attempt, reason, left) do
+    %{
+      flags: attempt.flags ++ ["auto_reverted", "files_left"],
+      error:
+        reason <>
+          "; BM reverted the worker's changes for a re-plan and left #{Enum.join(left, ", ")} " <>
+          "as #{if length(left) == 1, do: "it is", else: "they are"} (not known to be the " <>
+          "worker's; maybe yours). Versions from before the attempt: " <>
+          "git show #{String.slice(attempt.tree_before, 0, 12)}:<path>"
+    }
   end
 
   ## Review (14.1, D25)
@@ -2259,22 +2372,25 @@ defmodule Bm.Workspace.Coordinator do
         {:ok, attempt} ->
           attempt
 
+        # Someone else moved it first: the task follows what is stored, not this outcome
+        # (plan 36.13: a task could read "accepted" while its attempt was not).
         {:error, reason} ->
           Logger.error(
             "attempt #{attempt.id}: #{attempt.status} -> #{status}: #{inspect(reason)}"
           )
 
-          attempt
+          Runs.get_attempt!(attempt.id)
       end
 
-    task_status =
-      case status do
-        :accepted -> :accepted
-        :cancelled -> :cancelled
-        _ -> :failed
-      end
+    task =
+      case task_status(attempt.status) do
+        nil ->
+          state.task
 
-    {:ok, task} = Runs.update_task_status(state.task, task_status)
+        task_status ->
+          {:ok, task} = Runs.update_task_status(state.task, task_status)
+          task
+      end
 
     lane =
       if status != :accepted and attempt.actual_writes != [],
@@ -2293,6 +2409,12 @@ defmodule Bm.Workspace.Coordinator do
         cancel_reason: nil
     })
   end
+
+  defp task_status(:accepted), do: :accepted
+  defp task_status(:cancelled), do: :cancelled
+  defp task_status(status) when status in [:failed, :held, :needs_reconciliation], do: :failed
+  # Still in flight (a move that failed): the task stays as it is.
+  defp task_status(_status), do: nil
 
   ## Keep (4.8)
 
@@ -2322,15 +2444,27 @@ defmodule Bm.Workspace.Coordinator do
   defp revert_latest(%{run: nil}), do: {:error, :nothing_to_revert}
 
   defp revert_latest(state) do
-    case Runs.list_run_attempts(state.run) do
+    run = Runs.get_run!(state.run.id)
+
+    case Runs.list_run_attempts(run) do
       [%Attempt{status: :reverted} | _] ->
         {:error, :nothing_to_revert}
 
       [%Attempt{actual_writes: [_ | _], tree_before: from, tree_after: expected} = attempt | _]
       when is_binary(from) and is_binary(expected) ->
-        if Attempt.allowed?(attempt.status, :reverted),
-          do: restore_attempt(state, attempt),
-          else: {:error, {:not_revertable, attempt.status}}
+        cond do
+          not Attempt.allowed?(attempt.status, :reverted) ->
+            {:error, {:not_revertable, attempt.status}}
+
+          # An accepted change in an active goal run: the revert could land inside a planner
+          # turn, which BM reads as the planner changing files (D28). A held attempt waits for
+          # exactly this decision.
+          run.planner != nil and run.status == :active and state.lane != {:held, attempt.id} ->
+            {:error, :run_not_paused}
+
+          true ->
+            restore_attempt(%{state | run: run}, attempt)
+        end
 
       _ ->
         {:error, :nothing_to_revert}
@@ -2340,12 +2474,25 @@ defmodule Bm.Workspace.Coordinator do
   defp restore_attempt(state, attempt) do
     left = left_for_user(attempt, run_user_owned(state.run))
     entries = revertible_writes(attempt, left)
+    was_accepted? = attempt.status == :accepted
 
     with :ok <- Git.restore(state.root, entries, attempt.tree_before, attempt.tree_after),
          {:ok, attempt} <-
            Runs.transition_attempt(attempt, :reverted, note_left(%{}, attempt, left)) do
       {:ok, task} = attempt.task_id |> Runs.get_task!() |> Runs.update_task_status(:cancelled)
-      state = %{state | attempt: attempt, task: task, lane: :free}
+      # A goal run's planner already heard this task was accepted: it hears again (as 23.1).
+      if was_accepted? and state.run.planner, do: Runs.drop_delivery(task)
+      # BM's own change outside an attempt: not the user's at the next admission (13.1). Undo
+      # recorded an older known tree that would otherwise still count.
+      run =
+        if state.run.status in [:active, :paused] do
+          {:ok, run} = remember_workspace(state.root, state.run)
+          run
+        else
+          state.run
+        end
+
+      state = %{state | run: run, attempt: attempt, task: task, lane: :free}
       {:ok, broadcast_attempt(resume_if_reconciled(state))}
     end
   end
@@ -2370,7 +2517,7 @@ defmodule Bm.Workspace.Coordinator do
 
     case run do
       %{status: :paused} when not waiting? and not planner_gone? ->
-        {:ok, run} = Runs.resume_run(run)
+        run = stored(Runs.resume_run(run), run)
         %{state | run: run}
 
       run ->

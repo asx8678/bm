@@ -51,7 +51,7 @@ defmodule Bm.Plans.Task do
     |> validate_format(:key, ~r/^[a-z][a-z0-9_]{0,47}$/,
       message: "must be snake_case: lowercase letters, digits and _, starting with a letter"
     )
-    |> validate_length(:title, max: 200)
+    |> validate_lengths()
     |> unique_constraint(:key, name: :plan_tasks_plan_id_key_index)
   end
 
@@ -60,7 +60,19 @@ defmodule Bm.Plans.Task do
     task
     |> cast(attrs, @content)
     |> validate_required([:title])
-    |> validate_length(:title, max: 200)
+    |> validate_lengths()
     |> put_change(:revision, task.revision + 1)
+  end
+
+  # Counted in code points, as the database does (plan 36.9).
+  defp validate_lengths(changeset) do
+    changeset
+    |> validate_length(:title, max: 200, count: :codepoints)
+    |> validate_length(:check, max: 2_000, count: :codepoints)
+    |> validate_change(:files, fn :files, files ->
+      if Enum.all?(files, &(String.length(&1) <= 1_000)),
+        do: [],
+        else: [files: "has a path longer than 1000 characters"]
+    end)
   end
 end

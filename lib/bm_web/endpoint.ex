@@ -40,6 +40,9 @@ defmodule BmWeb.Endpoint do
     param_key: "request_logger",
     cookie_key: "request_logger"
 
+  # Before anything reads the session: refuses DNS-rebinding requests (D32).
+  plug BmWeb.Plugs.LocalHost
+
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 

@@ -7,7 +7,13 @@ defmodule BmWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {BmWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    # Images only from BM itself: a model's markdown (`![x](https://…?d=secret)`) would
+    # otherwise make the browser fetch any URL by itself (plan 36.12). Phoenix's default
+    # base-uri and frame-ancestors are kept.
+    plug :put_secure_browser_headers, %{
+      "content-security-policy" =>
+        "base-uri 'self'; frame-ancestors 'self'; img-src 'self' data: blob:; media-src 'self'"
+    }
   end
 
   pipeline :api do

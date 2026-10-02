@@ -43,6 +43,9 @@ config :phoenix,
 # Recovery at start needs the database outside the test sandbox; tests call it directly.
 config :bm, recover_on_start: false
 
+# Phoenix.ConnTest addresses requests to www.example.com.
+config :bm, BmWeb.Plugs.LocalHost, extra_hosts: ["www.example.com"]
+
 # Replace pi with a scripted stand-in that speaks the same RPC protocol
 config :bm, Bm.Pi, command: ["node", Path.expand("../test/support/fake_pi.mjs", __DIR__)]
 

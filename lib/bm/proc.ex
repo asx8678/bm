@@ -132,18 +132,138 @@ defmodule Bm.Proc do
     end
   end
 
+  @doc """
+  Like `System.cmd/3`, with a `:timeout` (ms, default 120 s): a command still running then is
+  killed (TERM, then KILL) and `{output, :timeout}` returned. For git and other tools BM calls
+  inside its GenServers, where a hung command (a clean filter, gpg's pinentry, a network
+  filesystem) would wedge the caller (plan 36.10). Options: `:cd`, `:env`, `:stderr_to_stdout`.
+  """
+  def cmd(command, args, opts \\ []) do
+    exe = System.find_executable(command) || raise ArgumentError, "#{command} not found"
+    timeout = Keyword.get(opts, :timeout, 120_000)
+
+    port_opts =
+      [:binary, :exit_status, :hide, args: args] ++
+        if(opts[:stderr_to_stdout], do: [:stderr_to_stdout], else: []) ++
+        if(opts[:cd], do: [cd: opts[:cd]], else: []) ++
+        if(opts[:env],
+          do: [env: Enum.map(opts[:env], fn {k, v} -> {to_charlist(k), env_value(v)} end)],
+          else: []
+        )
+
+    port = Port.open({:spawn_executable, exe}, port_opts)
+    {:os_pid, pid} = Port.info(port, :os_pid)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    collect(port, pid, [], deadline)
+  end
+
+  # nil unsets the variable, as with System.cmd.
+  defp env_value(nil), do: false
+  defp env_value(value), do: to_charlist(value)
+
+  defp collect(port, pid, acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} -> collect(port, pid, [acc | data], deadline)
+      {^port, {:exit_status, status}} -> {IO.iodata_to_binary(acc), status}
+    after
+      remaining ->
+        System.cmd("kill", ["-TERM", to_string(pid)], stderr_to_stdout: true)
+        Process.sleep(200)
+        System.cmd("kill", ["-KILL", to_string(pid)], stderr_to_stdout: true)
+
+        try do
+          Port.close(port)
+        catch
+          :error, :badarg -> :ok
+        end
+
+        {IO.iodata_to_binary(acc), :timeout}
+    end
+  end
+
   @doc "Group ids recorded in a `BM_PGID_FILE` (one per line). A missing file has none."
-  def read_pgid_file(path) do
-    case File.read(path) do
+  def read_pgid_file(path),
+    do: path |> read_pgid_records() |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+  @doc """
+  The records of a `BM_PGID_FILE`: `{pgid, recorded_at}` (Unix seconds; nil in lines written
+  before the time was recorded).
+  """
+  def read_pgid_records(path) do
+    case path && File.read(path) do
       {:ok, content} ->
         for line <- String.split(content, "\n", trim: true),
-            {pgid, ""} <- [Integer.parse(String.trim(line))],
+            [pgid | rest] <- [String.split(line)],
+            {pgid, ""} <- [Integer.parse(pgid)],
             pgid > 1,
-            uniq: true,
-            do: pgid
+            do: {pgid, recorded_at(rest)}
 
-      {:error, _} ->
+      _ ->
         []
     end
+  end
+
+  defp recorded_at([at | _]) do
+    case Integer.parse(at) do
+      {at, ""} -> at
+      _ -> nil
+    end
+  end
+
+  defp recorded_at([]), do: nil
+
+  @doc """
+  The group ids among `records` (`{pgid, recorded_at}`) not taken over by another program since
+  they were recorded (plan 36.10). Pids wrap (about daily on a busy Mac): a group that emptied can
+  get its id back as an unrelated program's. A group id can't be reused while the group has
+  members, so an id is reused only if a live process with that pid (the new leader) started after
+  the id was recorded. A gone leader with members left means the members are still the
+  recorded group's.
+  """
+  def not_reused(records) do
+    started = start_times(Enum.map(records, &elem(&1, 0)))
+
+    for {pgid, at} <- records, pgid > 1, not reused?(started[pgid], at), uniq: true, do: pgid
+  end
+
+  # A second of slack: `date` and the shell's start fall in the same second or one apart.
+  defp reused?(nil, _at), do: false
+  defp reused?(_started, nil), do: false
+  defp reused?(started, at), do: started > at + 1
+
+  @doc "Unix start time (seconds) of each live pid among `pids`."
+  def start_times([]), do: %{}
+
+  def start_times(pids) do
+    {out, _status} =
+      System.cmd("ps", ["-o", "pid=,etime=", "-p", Enum.join(Enum.uniq(pids), ",")],
+        stderr_to_stdout: true
+      )
+
+    now = System.os_time(:second)
+
+    for line <- String.split(out, "\n", trim: true),
+        [pid, etime] <- [String.split(line)],
+        {pid, ""} <- [Integer.parse(pid)],
+        seconds when is_integer(seconds) <- [elapsed(etime)],
+        into: %{},
+        do: {pid, now - seconds}
+  end
+
+  # `ps` etime: [[dd-]hh:]mm:ss
+  defp elapsed(etime) do
+    {days, rest} =
+      case String.split(etime, "-") do
+        [d, rest] -> {String.to_integer(d), rest}
+        [rest] -> {0, rest}
+      end
+
+    parts = rest |> String.split(":") |> Enum.map(&String.to_integer/1)
+    [s, m, h] = Enum.reverse(parts) ++ List.duplicate(0, 3 - length(parts))
+    days * 86_400 + h * 3_600 + m * 60 + s
+  rescue
+    _ -> nil
   end
 end

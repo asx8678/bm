@@ -14,7 +14,7 @@ defmodule BmWeb.ChatLive do
   alias Bm.Pi.Transcript
 
   @agent_node "agent"
-  @no_summary %{status: :starting, model: nil, tool: nil, usage: nil, cwd: nil}
+  @no_summary %{status: :starting, model: nil, tool: nil, usage: nil, cwd: nil, seq: 0}
 
   @impl true
   def mount(_params, _session, socket) do
@@ -36,6 +36,7 @@ defmodule BmWeb.ChatLive do
        plan: load_plan(chat.plan_id),
        transcript: transcript,
        agent: summary,
+       seen_seq: Map.get(summary, :seq, 0),
        selected: nil,
        graph: graph(summary, transcript, nil),
        form: to_form(%{"text" => ""}),
@@ -49,7 +50,9 @@ defmodule BmWeb.ChatLive do
        refine_form: to_form(%{"text" => ""}, as: :refine),
        root_form: to_form(%{"path" => chat.root}, as: :root),
        repos: repos()
-     )}
+     )
+     # After a reconnect the canvas (phx-update="ignore") still shows the old graph.
+     |> then(&if(connected?(&1), do: push_graph(&1), else: &1))}
   end
 
   # Follows the agent's pi events (subscribed once per agent; a second subscription would
@@ -106,7 +109,7 @@ defmodule BmWeb.ChatLive do
   defp task(_socket, _key), do: nil
 
   defp load_plan(nil), do: nil
-  defp load_plan(id), do: Bm.Plans.get_plan!(id)
+  defp load_plan(id), do: Bm.Plans.get_plan(id)
 
   # Repositories BM knows that still exist, for the picker.
   defp repos, do: for(w <- Bm.Runs.list_workspaces(), File.dir?(w.path), do: w.path)
@@ -179,26 +182,17 @@ defmodule BmWeb.ChatLive do
     do: {:noreply, assign(socket, plans_open: false)}
 
   def handle_event("select_plan", %{"id" => id}, socket) do
-    id = if id == "", do: nil, else: String.to_integer(id)
-
-    case Bm.Chat.select_plan(id) do
-      :ok ->
-        {:noreply,
-         assign(socket, plans_open: false, open: MapSet.new(), refining: nil, pane: :plan)}
-
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
+    case if(id == "", do: nil, else: Integer.parse(id)) do
+      {id, ""} -> select_plan(id, socket)
+      nil -> select_plan(nil, socket)
+      _bad -> {:noreply, socket}
     end
   end
 
   def handle_event("archive_plan", %{"id" => id}, socket) do
-    case Bm.Chat.archive_plan(String.to_integer(id)) do
-      :ok ->
-        plans = Enum.reject(socket.assigns.plans, &(&1.id == String.to_integer(id)))
-        {:noreply, assign(socket, plans: plans)}
-
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
+    case Integer.parse(id) do
+      {id, ""} -> archive_plan(id, socket)
+      _bad -> {:noreply, socket}
     end
   end
 
@@ -271,8 +265,9 @@ defmodule BmWeb.ChatLive do
     end
   end
 
+  # Stopping waits until pi is idle: in the background, so the page stays responsive.
   def handle_event("stop", _params, socket) do
-    Bm.Chat.stop_turn()
+    Task.start(fn -> Bm.Chat.stop_turn() end)
     {:noreply, socket}
   end
 
@@ -299,9 +294,40 @@ defmodule BmWeb.ChatLive do
     do: {:noreply, socket |> assign(selected: nil) |> push_graph()}
 
   def handle_event("new_conversation", _params, socket) do
-    case Bm.Chat.new_conversation() do
-      :ok -> {:noreply, assign(socket, selected: nil)}
-      {:error, _} -> {:noreply, put_flash(socket, :error, "pi did not start a new conversation.")}
+    {:noreply,
+     socket
+     |> assign(selected: nil)
+     |> start_async(:new_conversation, fn -> Bm.Chat.new_conversation() end)}
+  end
+
+  @impl true
+  def handle_async(:new_conversation, {:ok, :ok}, socket), do: {:noreply, socket}
+
+  def handle_async(:new_conversation, _result, socket),
+    do: {:noreply, put_flash(socket, :error, "pi did not start a new conversation.")}
+
+  defp select_plan(id, socket) do
+    case Bm.Chat.select_plan(id) do
+      :ok ->
+        {:noreply,
+         assign(socket, plans_open: false, open: MapSet.new(), refining: nil, pane: :plan)}
+
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "That plan doesn't exist anymore.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
+    end
+  end
+
+  defp archive_plan(id, socket) do
+    case Bm.Chat.archive_plan(id) do
+      :ok ->
+        plans = Enum.reject(socket.assigns.plans, &(&1.id == id))
+        {:noreply, assign(socket, plans: plans)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "That plan belongs to another repository.")}
     end
   end
 
@@ -315,6 +341,7 @@ defmodule BmWeb.ChatLive do
 
         socket
         |> assign(agent_id: chat.agent_id, transcript: transcript, agent: summary, selected: nil)
+        |> assign(seen_seq: Map.get(summary, :seq, 0))
         |> assign(root_form: to_form(%{"path" => chat.root}, as: :root), repos: repos())
         |> push_graph()
       else
@@ -347,8 +374,19 @@ defmodule BmWeb.ChatLive do
 
   def handle_info({:plan, _plan_id, _event}, socket), do: {:noreply, socket}
 
+  # Events the snapshot taken at subscription already holds come again: they are dropped by
+  # their number (a second tab opened mid-answer repeated text, plan 36.12).
+  def handle_info(
+        {:pi, id, _event, %{seq: seq}},
+        %{assigns: %{agent_id: id, seen_seq: seen}} = socket
+      )
+      when seq <= seen,
+      do: {:noreply, socket}
+
   def handle_info({:pi, id, event, summary}, %{assigns: %{agent_id: id}} = socket) do
-    socket = assign(socket, transcript: Transcript.apply(socket.assigns.transcript, event))
+    # Bounded like the agent's own copy, so a long session can't grow the page without end.
+    transcript = socket.assigns.transcript |> Transcript.apply(event) |> Transcript.limit()
+    socket = assign(socket, transcript: transcript, seen_seq: Map.get(summary, :seq, 0))
 
     cond do
       # A tool call started or ended, or the conversation was cleared: the canvas changes shape.
@@ -378,7 +416,7 @@ defmodule BmWeb.ChatLive do
   defp graph_event?(_event), do: false
 
   defp agent_update(socket, summary) do
-    if summary == socket.assigns.agent do
+    if Map.delete(summary, :seq) == Map.delete(socket.assigns.agent, :seq) do
       {:noreply, socket}
     else
       {:noreply,
@@ -408,7 +446,7 @@ defmodule BmWeb.ChatLive do
 
     tool_nodes =
       for {{call, n}, row} <- Enum.with_index(tools) do
-        id = "tool-#{n}"
+        id = tool_node_id(call, n)
 
         %{
           id: id,
@@ -434,17 +472,18 @@ defmodule BmWeb.ChatLive do
     transcript |> Enum.filter(&(&1.role == :tool)) |> Enum.with_index(1)
   end
 
+  # By the call's own id: positions shift once the bounded transcript drops old entries, and the
+  # selected node must stay the same call.
+  defp tool_node_id(%{id: id}, _n) when is_binary(id) and id != "", do: "tool-" <> id
+  defp tool_node_id(_call, n), do: "tool-#{n}"
+
   defp node_data(summary),
     do: summary |> Map.put(:label, "pi agent") |> Map.put(:horizontal, true)
 
-  defp selected_tool(transcript, "tool-" <> n) do
-    case Integer.parse(n) do
-      {n, ""} ->
-        Enum.find_value(tool_calls(transcript), fn {call, i} -> if i == n, do: {call, n} end)
-
-      _ ->
-        nil
-    end
+  defp selected_tool(transcript, "tool-" <> _ = id) do
+    Enum.find_value(tool_calls(transcript), fn {call, n} ->
+      if tool_node_id(call, n) == id, do: {call, n}
+    end)
   end
 
   defp selected_tool(_transcript, _id), do: nil
@@ -676,7 +715,11 @@ defmodule BmWeb.ChatLive do
           </div>
 
           <div class="space-y-3">
-            <.entry :for={entry <- @transcript} entry={entry} />
+            <.entry
+              :for={{entry, i} <- Enum.with_index(@transcript)}
+              entry={entry}
+              streaming={@agent.status == :running and i == length(@transcript) - 1}
+            />
             <div
               :if={@agent.status == :running}
               class="flex items-center gap-1.5 text-xs text-bm-muted"
@@ -1249,6 +1292,7 @@ defmodule BmWeb.ChatLive do
   defp tokens(_usage), do: "–"
 
   attr :entry, :map, required: true
+  attr :streaming, :boolean, default: false
 
   # Board notes BM put in front of the user's message (`Bm.Chat`) show apart from it.
   defp entry(
@@ -1286,6 +1330,14 @@ defmodule BmWeb.ChatLive do
   end
 
   defp entry(%{entry: %{role: :assistant, text: ""}} = assigns), do: ~H""
+
+  # While the answer streams it shows as plain text: rendering its markdown again for every
+  # token made each answer cost O(length²) (plan 36.12). It becomes markdown once it ends.
+  defp entry(%{entry: %{role: :assistant}, streaming: true} = assigns) do
+    ~H"""
+    <div class="bm-prose whitespace-pre-wrap" phx-no-format>{@entry.text}</div>
+    """
+  end
 
   defp entry(%{entry: %{role: :assistant}} = assigns) do
     ~H"""

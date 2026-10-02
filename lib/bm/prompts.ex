@@ -70,13 +70,19 @@ defmodule Bm.Prompts do
     "\nBM runs this command after your work; it must pass:\n    #{check}\n"
   end
 
+  @max_summary 2_000
+  defp cap(text) when is_binary(text) and byte_size(text) > @max_summary,
+    do: String.slice(text, 0, @max_summary) <> " …(cut)"
+
+  defp cap(text), do: text
+
   defp dependency_section([]), do: ""
 
   defp dependency_section(dependencies) do
     items =
       Enum.map_join(dependencies, "\n", fn dep ->
         files = if dep.writes == [], do: "no files", else: Enum.join(dep.writes, ", ")
-        "- #{dep.title} (#{dep.key}): #{dep.summary || "no summary"} Changed: #{files}."
+        "- #{dep.title} (#{dep.key}): #{cap(dep.summary) || "no summary"} Changed: #{files}."
       end)
 
     "\nDone before this task (already in the repository):\n#{items}\n"
@@ -181,6 +187,10 @@ defmodule Bm.Prompts do
         summary = if r.summary, do: " Worker: #{r.summary}", else: ""
         files = if r.writes != [], do: " Changed: #{Enum.join(r.writes, ", ")}.", else: ""
         error = if r.error, do: " Problem: #{r.error}.", else: ""
+        notes = r |> Map.get(:flags, []) |> Enum.map(&flag_note/1) |> Enum.reject(&is_nil/1)
+
+        error =
+          if notes == [], do: error, else: error <> " Note: " <> Enum.join(notes, "; ") <> "."
 
         error =
           if Map.get(r, :undone?),
@@ -273,6 +283,24 @@ defmodule Bm.Prompts do
 
   defp files_section(_none), do: ""
 
+  # Why a flagged result was sent (D22 keeps the turn for flagged attempts so the planner can
+  # react to them, plan 36.8).
+  defp flag_note("not_reviewed"), do: "the reviewer could not run, so it is accepted unreviewed"
+  defp flag_note("undeclared_writes"), do: "it changed files beyond its declared writes"
+  defp flag_note("verify_changed_files"), do: "the verify command changed files"
+  defp flag_note("leftover_processes"), do: "it left processes running; BM ended them"
+  defp flag_note("kept"), do: "the user kept it as it was"
+  defp flag_note("files_left"), do: "files not known to be the worker's were left as they are"
+  defp flag_note(_flag), do: nil
+
+  @max_owned 50
+
   defp user_owned([]), do: "      (none)"
-  defp user_owned(paths), do: Enum.map_join(paths, "\n", &"      - #{&1}")
+
+  # Capped: an untracked directory can hold thousands; BM refuses those writes anyway.
+  defp user_owned(paths) do
+    shown = Enum.map_join(Enum.take(paths, @max_owned), "\n", &"      - #{&1}")
+    more = length(paths) - @max_owned
+    if more > 0, do: shown <> "\n      (and #{more} more; BM refuses writes to them)", else: shown
+  end
 end

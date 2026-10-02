@@ -20,7 +20,7 @@ defmodule Bm.Workspace.Recovery do
   times; otherwise the reason says why, and the user chooses Resume planning or Finish on the run
   page. When only a coordinator restarts, the run just pauses.
 
-  Runs at application start (`run/0`) and when a workspace coordinator starts
+  Runs at application start (`run/0`, before the Endpoint serves) and when a workspace coordinator starts
   (`recover_workspace/1`).
   """
 
@@ -41,6 +41,27 @@ defmodule Bm.Workspace.Recovery do
     attempts = Runs.list_in_flight_attempts() |> Enum.map(&recover/1)
     Enum.each(runs, &recover_planner(&1, auto_resume: true))
     attempts
+  end
+
+  @doc """
+  Runs `run/0` inside the application's start-up, before the Endpoint serves, and returns
+  `:ignore`. A failure is logged and doesn't stop BM from starting.
+  """
+  def start_link(recover? \\ true) do
+    if recover? do
+      try do
+        run()
+      rescue
+        error ->
+          Logger.error(
+            "recovery at start failed: " <> Exception.format(:error, error, __STACKTRACE__)
+          )
+      catch
+        kind, reason -> Logger.error("recovery at start failed: #{inspect({kind, reason})}")
+      end
+    end
+
+    :ignore
   end
 
   @doc "Recovers the in-flight attempts of one workspace."
@@ -64,12 +85,14 @@ defmodule Bm.Workspace.Recovery do
       if agent_id = planner["agent_id"], do: Bm.Pi.stop(agent_id)
 
       if planner["boot_id"] != nil and planner["boot_id"] == Bm.Proc.boot_id() do
+        at = run.updated_at && DateTime.to_unix(run.updated_at)
+
         groups =
           [planner["pgid"]]
           |> Enum.reject(&is_nil/1)
-          |> Kernel.++(
-            if planner["pgid_file"], do: Bm.Proc.read_pgid_file(planner["pgid_file"]), else: []
-          )
+          |> Enum.map(&{&1, at})
+          |> Kernel.++(Bm.Proc.read_pgid_records(planner["pgid_file"]))
+          |> Bm.Proc.not_reused()
 
         Bm.Proc.terminate_groups(Bm.Proc.live_groups(groups))
       end
@@ -130,6 +153,9 @@ defmodule Bm.Workspace.Recovery do
   end
 
   defp resume(run, root, count, lost) do
+    # Reloaded: the planner map is written back whole.
+    run = %{Runs.get_run!(run.id) | workspace: run.workspace}
+
     note = %{
       "at" => DateTime.to_iso8601(DateTime.utc_now()),
       "kind" => "note",
@@ -185,12 +211,22 @@ defmodule Bm.Workspace.Recovery do
   defp task_status(%{planner: %{}}, :failed), do: :queued
   defp task_status(_run, _status), do: :failed
 
-  defp end_process_groups(%Attempt{boot_id: boot_id} = attempt) do
+  # The baseline verify runs before the attempt records its boot (plan 36.10): its own boot id
+  # counts then. pi's and verify's groups count as recorded when the attempt last changed (both
+  # started before that); the pgid file has a time per command. Ids another program took over
+  # since are left alone.
+  defp end_process_groups(%Attempt{} = attempt) do
+    boot_id = attempt.boot_id || get_in(attempt.verify || %{}, ["boot_id"])
+
     if boot_id != nil and boot_id == Bm.Proc.boot_id() do
+      at = attempt.updated_at && DateTime.to_unix(attempt.updated_at)
+
       groups =
         [attempt.pgid, verify_pgid(attempt)]
         |> Enum.reject(&is_nil/1)
-        |> Kernel.++(pgid_file_groups(attempt))
+        |> Enum.map(&{&1, at})
+        |> Kernel.++(Bm.Proc.read_pgid_records(attempt.pgid_file))
+        |> Bm.Proc.not_reused()
 
       Bm.Proc.terminate_groups(Bm.Proc.live_groups(groups))
     end
@@ -198,9 +234,6 @@ defmodule Bm.Workspace.Recovery do
 
   defp verify_pgid(%Attempt{verify: %{"pgid" => pgid}}), do: pgid
   defp verify_pgid(_attempt), do: nil
-
-  defp pgid_file_groups(%Attempt{pgid_file: nil}), do: []
-  defp pgid_file_groups(%Attempt{pgid_file: file}), do: Bm.Proc.read_pgid_file(file)
 
   defp outcome(root, %Attempt{tree_before: tree_before}) when is_binary(tree_before) do
     with {:ok, tree} <- Git.snapshot(root),

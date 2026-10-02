@@ -20,7 +20,18 @@ defmodule Bm.Application do
       {DynamicSupervisor, name: Bm.Workspace.Supervisor, strategy: :one_for_one},
       # Blocking work of coordinators (starting/stopping pi, verification)
       {Task.Supervisor, name: Bm.TaskSupervisor},
-      Bm.Chat,
+      # The chat under its own supervisor: crashes there (a model's odd request) must not use up
+      # the application's restart allowance and stop BM with them (plan 36.12).
+      %{
+        id: Bm.ChatSupervisor,
+        type: :supervisor,
+        start:
+          {Supervisor, :start_link,
+           [
+             [Bm.Chat],
+             [strategy: :one_for_one, max_restarts: 10, max_seconds: 60, name: Bm.ChatSupervisor]
+           ]}
+      },
       # Attempts left in flight by the previous run of the app (docs/ARCHITECTURE.md §11)
       recovery(),
       # Start to serve requests, typically the last entry
@@ -33,10 +44,15 @@ defmodule Bm.Application do
     Supervisor.start_link(children, opts)
   end
 
+  # Recovery finishes before the Endpoint starts (docs/ARCHITECTURE.md §11): a page or API call
+  # during recovery would start a coordinator that recovers the same attempts a second time.
   defp recovery do
-    if Application.get_env(:bm, :recover_on_start, true),
-      do: {Task, &Bm.Workspace.Recovery.run/0},
-      else: {Task, fn -> :ok end}
+    %{
+      id: Bm.Workspace.Recovery,
+      start:
+        {Bm.Workspace.Recovery, :start_link, [Application.get_env(:bm, :recover_on_start, true)]},
+      restart: :temporary
+    }
   end
 
   # Tell Phoenix to update the endpoint configuration

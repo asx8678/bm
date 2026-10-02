@@ -32,14 +32,39 @@ defmodule Bm.Workspace.Git do
 
   ## Snapshots (D19)
 
-  @doc "Tree id of the working tree, written from BM's private index."
+  @doc """
+  Tree id of the working tree, written from BM's private index. Snapshots of one repository run
+  one at a time: they share the private index, and a second `git add` failing on its lock used to
+  delete the index under the first, whose `write-tree` then gave the empty tree.
+  """
   @spec snapshot(Path.t()) :: {:ok, tree} | {:error, term()}
   def snapshot(repo) do
-    with {:ok, index} <- private_index(repo),
-         :ok <- prepare_index(repo, index),
-         :ok <- add_all(repo, index) do
-      git(repo, ["write-tree"], index: index) |> trimmed()
+    with {:ok, index} <- private_index(repo) do
+      with_index(index, fn ->
+        with :ok <- clear_stale_lock(index),
+             :ok <- prepare_index(repo, index),
+             :ok <- add_all(repo, index) do
+          git(repo, ["write-tree"], index: index) |> trimmed()
+        end
+      end)
     end
+  end
+
+  # One BM process at a time per private index (`:global` locks are per node; BM runs one node).
+  defp with_index(index, fun), do: :global.trans({{__MODULE__, index}, self()}, fun, [node()])
+
+  # A lock git left behind (killed mid-write) would fail every later snapshot.
+  @stale_lock_ms 60_000
+
+  defp clear_stale_lock(index) do
+    lock = index <> ".lock"
+
+    with {:ok, %{mtime: mtime}} <- File.stat(lock, time: :posix),
+         true <- System.os_time(:second) - mtime > div(@stale_lock_ms, 1000) do
+      File.rm(lock)
+    end
+
+    :ok
   end
 
   defp private_index(repo) do
@@ -55,11 +80,12 @@ defmodule Bm.Workspace.Git do
   defp git_dir(repo) do
     with {:ok, out} <-
            git(repo, ["rev-parse", "--absolute-git-dir", "--show-toplevel"], stderr: true),
-         [git_dir, top] <- String.split(out, "\n", trim: true) do
-      {real, 0} = System.cmd("pwd", ["-P"], cd: repo)
+         [git_dir, top] <- String.split(out, "\n", trim: true),
+         {real, 0} <- System.cmd("pwd", ["-P"], cd: repo, stderr_to_stdout: true) do
       if top == String.trim(real), do: {:ok, git_dir}, else: {:error, {:not_repository_root, top}}
     else
       {:error, _} = error -> error
+      {_out, status} when is_integer(status) -> {:error, :no_directory}
       _ -> {:error, :bare_repository}
     end
   end
@@ -74,18 +100,46 @@ defmodule Bm.Workspace.Git do
     end
   end
 
-  defp add_all(repo, index) do
+  # A lock held by another git process (not BM's: those are serialized) is waited for; a damaged
+  # private index is only a cache and is rebuilt once. The index is never deleted for a lock.
+  defp add_all(repo, index, lock_waits \\ 10) do
     case git(repo, ["add", "-A", "--", "."], index: index, stderr: true) do
       {:ok, _} ->
         :ok
 
-      # A damaged private index is only a cache: rebuild it once.
-      {:error, _} ->
-        File.rm(index)
+      {:error, {:git, _, _, out}} = error ->
+        cond do
+          # A nested repository without commits can't be added; it is the user's (its path is
+          # user-owned through the status), so the snapshot leaves it out (plan 36.7).
+          (empty = no_commit_repos(out)) != [] ->
+            excludes = Enum.map(empty, &":(exclude,literal)#{&1}")
 
-        with :ok <- prepare_index(repo, index),
-             do: git(repo, ["add", "-A", "--", "."], index: index, stderr: true) |> ok()
+            git(repo, ["add", "-A", "--", "." | excludes],
+              index: index,
+              stderr: true,
+              env: [{"GIT_LITERAL_PATHSPECS", "0"}]
+            )
+            |> ok()
+
+          not String.contains?(out, "index.lock") ->
+            File.rm(index)
+
+            with :ok <- prepare_index(repo, index),
+                 do: git(repo, ["add", "-A", "--", "."], index: index, stderr: true) |> ok()
+
+          lock_waits > 0 ->
+            Process.sleep(200)
+            add_all(repo, index, lock_waits - 1)
+
+          true ->
+            error
+        end
     end
+  end
+
+  defp no_commit_repos(out) do
+    Regex.scan(~r/'([^']+)' does not have a commit checked out/, out, capture: :all_but_first)
+    |> List.flatten()
   end
 
   @doc "`:ok` if `repo` is the top level of a git working tree, `{:error, reason}` otherwise."
@@ -162,16 +216,35 @@ defmodule Bm.Workspace.Git do
   @spec baseline(Path.t()) ::
           {:ok, %{head: String.t() | nil, tree: tree, user_owned: [String.t()]}}
   def baseline(repo) do
+    with {:ok, tree} <- snapshot(repo),
+         {:ok, user_owned} <- user_owned(repo) do
+      {:ok, %{head: head(repo), tree: tree, user_owned: user_owned}}
+    end
+  end
+
+  @doc """
+  The user-owned paths alone (staged, modified or untracked, not ignored), sorted; no snapshot.
+  For readers that must not touch the private index while a run may be snapshotting.
+  """
+  def user_owned(repo) do
     args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]
 
-    with {:ok, tree} <- snapshot(repo),
-         {:ok, out} <- git(repo, args) do
-      user_owned =
+    with {:ok, out} <- git(repo, args),
+         {:ok, staged} <- git(repo, ["ls-files", "-s", "-z"]) do
+      paths =
         for record <- String.split(out, <<0>>, trim: true),
             <<_xy::binary-size(2), " ", path::binary>> <- [record],
             do: path
 
-      {:ok, %{head: head(repo), tree: tree, user_owned: Enum.sort(user_owned)}}
+      # Submodules: a snapshot records only their commit, so what is inside them is the user's
+      # too (plan 36.7). A nested repository shows in the status as `dir/`.
+      gitlinks =
+        for record <- String.split(staged, <<0>>, trim: true),
+            [meta, path] <- [String.split(record, "\t", parts: 2)],
+            String.starts_with?(meta, "160000 "),
+            do: path
+
+      {:ok, Enum.sort(Enum.uniq(paths ++ gitlinks))}
     end
   end
 
@@ -212,7 +285,8 @@ defmodule Bm.Workspace.Git do
 
   Refused with `{:error, reason}`: `:detached_head`, `:no_commits`, `{:staged, paths}` (the user
   staged changes in these paths), `:nothing_to_commit`. The author and committer are the user's
-  git identity; `message` is the commit message.
+  git identity; `message` is the commit message. `{:ok, commit, :index_not_refreshed}` when HEAD
+  moved but the user's index stayed locked (their `git status` then shows the paths changed).
   """
   def commit_paths(repo, paths, message) do
     tmp_index = Path.join(System.tmp_dir!(), "bm-commit-#{System.unique_integer([:positive])}")
@@ -224,7 +298,12 @@ defmodule Bm.Workspace.Git do
              git(repo, ["diff", "--cached", "--name-only", "-z", "HEAD", "--" | paths]),
            [] <- String.split(staged, <<0>>, trim: true),
            {:ok, _} <- git(repo, ["read-tree", "HEAD"], index: tmp_index),
-           {:ok, _} <- git(repo, ["add", "-A", "--" | paths], index: tmp_index, stderr: true),
+           # Not `add -A`: a path a run created and deleted again matches nothing and fails it.
+           {:ok, _} <-
+             git(repo, ["update-index", "--add", "--remove", "--" | paths],
+               index: tmp_index,
+               stderr: true
+             ),
            {:ok, tree} <- git(repo, ["write-tree"], index: tmp_index) |> trimmed(),
            {:ok, head_tree} <- git(repo, ["rev-parse", "HEAD^{tree}"]) |> trimmed(),
            true <- tree != head_tree || {:error, :nothing_to_commit},
@@ -233,15 +312,33 @@ defmodule Bm.Workspace.Git do
            {:ok, _} <-
              git(repo, ["update-ref", "-m", "bm: commit a run's changes", "HEAD", commit, head],
                stderr: true
-             ),
-           {:ok, _} <- git(repo, ["reset", "-q", "--" | paths], stderr: true) do
-        {:ok, commit}
+             ) do
+        # HEAD has moved: from here the commit stands, whatever the user's index does.
+        case reset_paths(repo, paths, 10) do
+          :ok -> {:ok, commit}
+          :error -> {:ok, commit, :index_not_refreshed}
+        end
       else
         [_ | _] = staged_paths -> {:error, {:staged, staged_paths}}
         {:error, _} = error -> error
       end
     after
       File.rm(tmp_index)
+    end
+  end
+
+  # The user's index entries for the committed paths follow the new HEAD. Their editor or prompt
+  # may hold `.git/index.lock` for a moment: retried, and reported if it stays.
+  defp reset_paths(_repo, _paths, 0), do: :error
+
+  defp reset_paths(repo, paths, tries) do
+    case git(repo, ["reset", "-q", "--" | paths], stderr: true) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        Process.sleep(200)
+        reset_paths(repo, paths, tries - 1)
     end
   end
 
@@ -399,7 +496,9 @@ defmodule Bm.Workspace.Git do
     |> Enum.group_by(&elem(&1, at), &elem(&1, 0))
     |> Enum.reduce_while({:ok, %{}}, fn {tree, paths}, {:ok, acc} ->
       case ls_tree(repo, tree, paths) do
-        {:ok, objects} -> {:cont, {:ok, Map.merge(acc, objects)}}
+        # `ls-tree -r` lists a directory's files under a path that is a directory in this tree;
+        # only the paths asked for count (a file↔directory change across attempts, plan 36.5).
+        {:ok, objects} -> {:cont, {:ok, Map.merge(acc, Map.take(objects, paths))}}
         error -> {:halt, error}
       end
     end)
@@ -441,11 +540,12 @@ defmodule Bm.Workspace.Git do
         {:ok, nil}
 
       {:ok, %File.Stat{type: :symlink}} ->
-        {:ok, target} = File.read_link(full)
-        hash(repo, ["hash-object", "--stdin"], target, "120000")
+        with {:ok, target} <- File.read_link(full),
+             do: hash(repo, ["hash-object", "--stdin"], target, "120000")
 
+      # git looks at the owner's execute bit only (a 0654 file is 100644 to git).
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        file_mode = if Bitwise.band(mode, 0o111) != 0, do: "100755", else: "100644"
+        file_mode = if Bitwise.band(mode, 0o100) != 0, do: "100755", else: "100644"
         hash(repo, ["hash-object", "--path=#{path}", "--", Path.expand(full)], nil, file_mode)
 
       {:ok, %File.Stat{type: :directory}} ->
@@ -587,13 +687,19 @@ defmodule Bm.Workspace.Git do
           File.ln_s(target, full)
 
         {:file, data, mode} ->
-          with {:ok, io} <- File.open(full, [:write, :exclusive, :binary]) do
-            IO.binwrite(io, data)
-            File.close(io)
+          # Every result counts: a full disk must not report a truncated file as restored.
+          with {:ok, io} <- File.open(full, [:write, :exclusive, :binary]),
+               :ok <- write_and_close(io, data) do
             File.chmod(full, if(mode == "100755", do: 0o755, else: 0o644))
           end
       end
     end
+  end
+
+  defp write_and_close(io, data) do
+    result = IO.binwrite(io, data)
+    closed = File.close(io)
+    if result == :ok, do: closed, else: result
   end
 
   # A directory the attempt created where a file must return; it is empty by now or the write
@@ -647,17 +753,26 @@ defmodule Bm.Workspace.Git do
 
   ## Running git
 
+  # A snapshot of a large repository can take a while; a hung one (a clean filter, gpg's
+  # pinentry for a signed commit) must not wedge the coordinator for good.
+  @git_timeout 300_000
+
   defp git(repo, args, opts \\ []) do
     env =
       @env ++
         Keyword.get(opts, :env, []) ++
         if(opts[:index], do: [{"GIT_INDEX_FILE", opts[:index]}], else: [])
 
-    cmd_opts = [cd: repo, env: env, stderr_to_stdout: Keyword.get(opts, :stderr, false)]
+    cmd_opts = [
+      cd: repo,
+      env: env,
+      stderr_to_stdout: Keyword.get(opts, :stderr, false),
+      timeout: Keyword.get(opts, :timeout, @git_timeout)
+    ]
 
     result =
       case opts[:input] do
-        nil -> System.cmd("git", args, cmd_opts)
+        nil -> Bm.Proc.cmd("git", args, cmd_opts)
         input -> run_with_input(args, input, cmd_opts)
       end
 
@@ -673,7 +788,7 @@ defmodule Bm.Workspace.Git do
     File.write!(path, input)
 
     try do
-      System.cmd("sh", ["-c", ~s(exec git "$@" < "$0"), path | args], cmd_opts)
+      Bm.Proc.cmd("sh", ["-c", ~s(exec git "$@" < "$0"), path | args], cmd_opts)
     after
       File.rm(path)
     end

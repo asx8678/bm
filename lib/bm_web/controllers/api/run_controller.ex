@@ -143,7 +143,13 @@ defmodule BmWeb.Api.RunController do
       case Coordinator.commit_run(run.workspace.path, run.id) do
         {:ok, run} ->
           summary = run_summary(conn, Runs.get_run_with_workspace(run.id))
-          json(conn, Map.put(summary, :commit_sha, run.commit_sha))
+
+          json(
+            conn,
+            summary
+            |> Map.put(:commit_sha, run.commit_sha)
+            |> Map.put(:message, BmWeb.RunLive.committed_message(run))
+          )
 
         {:error, reason} ->
           conn
@@ -162,10 +168,12 @@ defmodule BmWeb.Api.RunController do
   @doc "Keep, Revert or Stop (`action`) in the workspace's current run `id` (plan 24.2)."
   def decide(conn, %{"id" => id, "action" => action}) when action in ~w(keep revert cancel) do
     with_current_run(conn, id, fn path ->
+      {run_id, ""} = Integer.parse(String.replace_prefix(id, "BM-", ""))
+
       case action do
-        "keep" -> Coordinator.keep(path)
-        "revert" -> Coordinator.revert(path)
-        "cancel" -> Coordinator.cancel(path)
+        "keep" -> Coordinator.keep(path, run_id)
+        "revert" -> Coordinator.revert(path, run_id)
+        "cancel" -> Coordinator.cancel(path, run_id)
       end
     end)
   end

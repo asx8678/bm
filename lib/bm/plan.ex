@@ -41,6 +41,7 @@ defmodule Bm.Plan do
 
     with :ok <- check_open(ctx),
          {:ok, fields} <- fields(proposal),
+         :ok <- check_policy(fields.check, ctx.root, ctx.user_owned),
          {:ok, revision} <- check_key(fields.key, latest),
          {:ok, depends_on} <- check_dependencies(fields, latest),
          {:ok, writes} <- check_writes(fields, ctx) do
@@ -129,7 +130,8 @@ defmodule Bm.Plan do
           value == "" ->
             {:ok, nil}
 
-          opts[:max] && String.length(value) > opts[:max] ->
+          # Code points, as the database counts them (a grapheme can be several).
+          opts[:max] && length(String.codepoints(value)) > opts[:max] ->
             {:error, "`#{field}` is too long (at most #{opts[:max]} characters)."}
 
           true ->
@@ -154,6 +156,22 @@ defmodule Bm.Plan do
 
   defp check_command(_check), do: :ok
 
+  @doc """
+  A task's `check` runs as a shell command in the workspace, without pi and its guard, so it is
+  held to the rules of the planner's own bash (read-only `Bm.Policy`, plan 36.4). `:ok` or
+  `{:error, sentence}`.
+  """
+  def check_policy(nil, _root, _user_owned), do: :ok
+
+  def check_policy(check, root, user_owned) when is_binary(check) do
+    ctx = %{root: root, user_owned: user_owned || [], mode: :read_only}
+
+    case Bm.Policy.authorize("bash", %{"command" => check}, ctx) do
+      :allow -> :ok
+      {:deny, reason} -> {:error, "`check` is refused: #{reason} A check must only read and run."}
+    end
+  end
+
   defp boolean(p, field) do
     case Map.get(p, field) do
       value when is_boolean(value) -> {:ok, value}
@@ -168,9 +186,16 @@ defmodule Bm.Plan do
         {:ok, []}
 
       list when is_list(list) ->
-        if Enum.all?(list, &is_binary/1),
-          do: {:ok, list |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()},
-          else: {:error, "`#{field}` must be a list of strings."}
+        cond do
+          not Enum.all?(list, &is_binary/1) ->
+            {:error, "`#{field}` must be a list of strings."}
+
+          length(list) > 200 or Enum.any?(list, &(String.length(&1) > 1_000)) ->
+            {:error, "`#{field}` is too long (at most 200 entries of 1000 characters)."}
+
+          true ->
+            {:ok, list |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()}
+        end
 
       _other ->
         {:error, "`#{field}` must be a list of strings."}
@@ -246,7 +271,7 @@ defmodule Bm.Plan do
         relative == ".git" or String.starts_with?(relative, ".git/") ->
           {:halt, {:error, "#{path} is inside .git; BM manages git itself."}}
 
-        relative in ctx.user_owned ->
+        Bm.Policy.user_owned_path?(relative, ctx.user_owned) ->
           {:halt,
            {:error,
             "#{relative} has the user's uncommitted changes; BM won't change it. Plan " <>

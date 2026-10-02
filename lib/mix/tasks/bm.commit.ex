@@ -23,6 +23,12 @@ defmodule Mix.Tasks.Bm.Commit do
           "#{run["label"]} committed as #{String.slice(run["commit_sha"], 0, 8)} in #{run["repo"]}"
         )
 
+        # The user's files left out, or an index that stayed locked (plan 36.5).
+        case String.split(run["message"] || "", ". ", parts: 2) do
+          [_committed, rest] -> Mix.shell().info(rest)
+          _ -> :ok
+        end
+
       {:error, message} ->
         Mix.raise("Not committed: #{message}")
     end

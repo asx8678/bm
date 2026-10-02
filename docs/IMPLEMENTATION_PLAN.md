@@ -2182,3 +2182,268 @@ Verify: as each step above.
   - port `exit_status` waits for every holder of stdout;
   - pids wrap about once a day on this Mac;
   - Postgres counts `varchar(255)` in code points.
+
+**Status 36.1 (2026-10-02).**
+- `Git.snapshot/1` holds a `:global` lock per private index.
+- A lock held by another git process is waited for (10 × 200 ms), then reported. The index is
+  never deleted for a lock error, and a lock older than 60 s is removed.
+- `Git.user_owned/1` (status only) serves `baseline/1` and GoalReview, which no longer snapshots.
+- Answer turns take no snapshot.
+- Also fixed: `git_dir/1` no longer match-crashes when `pwd` fails.
+- Checked: the review's race script gave 0 mismatches against a serial snapshot in 300 rounds of
+  3 overlapping snapshots (before the fix, 28–31 of 900 were the empty tree). A 61-s-old lock is
+  cleared; a fresh one gives an error after about 2 s with the index kept.
+
+**Status 36.2 (2026-10-02).**
+- Recovery is a start-up child (`Recovery.start_link/1`) that runs `run/0` and returns `:ignore`,
+  so the Endpoint starts after it. A failure is logged and BM still starts.
+- `ensure_run` reloads the run and refuses one that is paused (`:run_paused`) or has ended
+  (`:run_not_active`, explained on the page).
+- `Recovery.resume/4` reloads the run before writing its planner map.
+- Checked on bm_test with a scratch repository: an in-flight attempt with a live process group
+  was `failed "interrupted (no changes)"` with a `tree_after` by the time the application had
+  started (563 ms). An immediate `ensure_started` left it unchanged, and the group was gone.
+  Scratch rows were deleted.
+
+**Status 36.3 (2026-10-02).**
+- `BmWeb.Plugs.LocalHost` runs in the endpoint before the session. Loopback names,
+  `*.localhost` and the configured host pass. Tests add `www.example.com` through
+  `extra_hosts`.
+- Dev `check_origin` allows only those origins.
+- Prod binds 127.0.0.1 unless `BM_BIND_ALL=1` is set.
+- New decision row D32.
+- Checked against a server on port 4011: with `Host: evil.example`, `/runs` and `/api/runs`
+  return 403; `localhost`, `127.0.0.1` and `app.localhost` return 200. A websocket upgrade with
+  Origin `evil.example` gets 403; with `localhost` it gets 101. `mix bm.runs` still lists runs.
+
+**Status 36.4 (2026-10-02).**
+- `Bm.Policy` checks wrappers as what they run. `check_tokens/3` drops each wrapper's options
+  (`timeout` also drops its duration) and checks the inner command, nesting at most 8 deep.
+- `find` with `-delete`, `-fprint` or `-fls` has its targets checked.
+- `git -c alias.*|core.*|include.*`, `--config-env`, `--exec-path=` and `GIT_CONFIG_*`/`GIT_DIR`
+  assignments (also through `export`) are refused.
+- A git subcommand outside the known reads and writes is resolved through
+  `git config --get alias.<sub>` and checked as what it expands to.
+- A shell with neither `-c` nor a script is refused, unless it reads a checked heredoc.
+- Edits under `.pi/` are refused.
+- `Bm.Plan.check_policy/3` puts a `check` through read-only Policy in `Plan.validate`, in
+  `Bm.Plans.add_task/update_task`, and again where it runs (`run_check/5`: a refused check fails
+  with exit 126 without running).
+- Checked from a non-temp scratch repository: 159 allow/deny cases are all right. These are the
+  test file's earlier cases, the review's bypasses (`timeout 60 git push`,
+  `nice -n 10 git reset --hard`, `find -exec git reset --hard \;` read-only, `xargs git push`,
+  `git -c alias.lg='!…' lg`) and new ones (user alias `co` → checkout refused, `lg` → log
+  allowed, `pushit` → `!git push` refused, `curl … | sh` refused, `cat <<EOF | sh` with a
+  harmless body allowed).
+- Plan checks `curl x | sh`, `timeout 5 git push` and `echo x > out.txt` are refused.
+- Still not covered (by design, the moduledoc's safety net): interpreters such as `node -e` and
+  `python -c`, and network access.
+
+**Status 36.5 (2026-10-02).**
+- **Commit run** leaves out the run's user-owned files. They are named in the run
+  (`baseline["commit_left"]`) and in the flash, API and `mix bm.commit` message. A run whose
+  only remaining changes are in such files is refused (`{:only_user_files, paths}`).
+- **`Git.commit_paths`** stages with `update-index --add --remove`, so a path created and then
+  deleted no longer fails it. After `update-ref` the commit stands. The user's index is reset
+  with retries, and an index that stays locked gives
+  `{:ok, sha, :index_not_refreshed}`, which the message explains.
+- **`objects_in_trees`** keeps only the asked-for paths.
+- **Revert last change** reloads the run and is refused in an active goal run unless it is the
+  held attempt (`:run_not_paused`). The Revert button is gone from the active goal run's bar.
+  Reverting an accepted attempt drops its delivery, so the planner hears of it, and records the
+  workspace as BM's known tree.
+- Checked:
+  - the review's file↔directory repro gives the original content in 12 of 12 seeds (was 9 of 12
+    wrong);
+  - a created-then-deleted path commits;
+  - with `.git/index.lock` held, the commit lands and returns `:index_not_refreshed`;
+  - through the real coordinator on bm_test: a kept attempt that rewrote the user's dirty
+    `u.txt` → the commit holds only `a.txt` and `u.txt` stays modified and uncommitted (flash
+    names it); Revert in an active goal run → `:run_not_paused`, and once paused → `:ok` with
+    `known_tree` equal to the workspace.
+- Scratch rows were deleted.
+
+**Status 36.6 (2026-10-02).**
+- `revert_for_replan` (failed check, D23; reviewer rejection, D25) restores only the worker's
+  known paths. Those are the declared `writes`, its edit/write calls, and the files its allowed
+  bash commands name as written (`Bm.Policy.write_targets/2`: redirections, `tee`, `sed -i`,
+  `cp`/`mv`/`install`/`ln` targets, `rm`, `touch`, `mkdir`, `truncate`, also inside wrappers).
+- Other changed files stay. The attempt is flagged `files_left`, and its note names them and the
+  tree with their earlier version.
+- New decision row D33.
+- Checked through the real coordinator and planner with the fake pi on bm_test. The worker
+  writes `a.txt` (declared) and runs `echo b > b.txt`; the user edits `u.txt` meanwhile; the
+  task check `false` fails. Result: `a.txt` restored, `b.txt` removed, `u.txt` kept with the
+  user's edit, attempt `reverted` with `auto_reverted` and `files_left` and the note naming
+  `u.txt`. Scratch rows were deleted.
+
+**Status 36.7 (2026-10-02).**
+- `Bm.Policy.user_owned_path?/2` matches an entry as the path itself or a directory prefix,
+  without case. Policy and `Plan.check_writes` use it.
+- `Git.user_owned/1` adds submodules (index mode 160000). Nested repositories already appear as
+  `dir/`.
+- A nested repository without commits is excluded from `add -A` instead of failing the snapshot.
+- Edit, write and shell write targets to an existing gitignored file are refused, unless the
+  worker wrote it earlier in the attempt (`ctx.touched`). New ignored files are allowed.
+- New decision row D34.
+- Checked on a scratch repository with two submodules (one with the user's uncommitted edit), an
+  ignored `.env`, an ignored `build/` and an empty nested repository. The snapshot succeeds and
+  `user_owned` is `["crates/foo/", "sub", "sub2"]`. Writes to `sub/…`, `sub2/…`,
+  `crates/foo/x`, `.env` and `echo X=2 > .env` are refused. `build/out.js`, `a.txt`, a `.env`
+  the worker wrote itself and `cp a.txt sub/x` behave as expected (10 of 10). The 159 Policy
+  cases still pass.
+
+**Status 36.8 (2026-10-02).**
+- `plan_left_open` arms the plan timeout once.
+- `aborting?` is reset when the abort job ends.
+- The planner monitors its pi adapter: an adapter that stops, or pi exiting during an answer
+  turn, gives the worker the fallback and pauses the run with the reason.
+- Before each prompt, `same_session/1` checks that the agent is alive and still in the assigned
+  session. Otherwise the run pauses instead of pi silently starting an unchecked session whose
+  proposals would all be "stale".
+- `Planner.start` answers `{:error, :planner_stopping}` while the run's previous planner is
+  still registered, and `resume_planning` refuses early, with a sentence on the page.
+- `start_goal` fails the new run when its planner can't start.
+- Deliveries name the flags of accepted results ("the reviewer could not run…", "changed files
+  beyond its declared writes", …).
+- Worker summaries in prompts are cut at 2 KB. The user-owned list in planner and goal-review
+  prompts is capped at 50 ("and N more").
+- Checked with the fake pi on bm_test:
+  - a planner that leaves the plan open and ignores the reminder → run `failed` "the planner left
+    the plan open" after 1.2 s (`plan_timeout` 800 ms, `tick` 50 ms); before, the tick re-armed
+    it forever;
+  - the planner's pi killed (`kill -9`) during an answer turn → the run is paused "the planner's
+    pi process exited", the worker's question gets the fallback and the worker's attempt is
+    accepted, and the planner process ends;
+  - 5,000 user-owned paths give a 4 KB planner prompt with "and 4950 more";
+  - a flagged delivery names both flags.
+- Read only: the `aborting?` reset, `start_goal` failing its run, and `:planner_stopping`.
+- Scratch rows were deleted.
+
+**Status 36.9 (2026-10-02).**
+- Migration `widen_free_text_columns` moves to `text` / `text[]`: `workspaces.path` and
+  `verify_command`, `tasks.title` and `writes`, `plans.title`, `plan_tasks.title`, `check` and
+  `files`, `attempts.pgid_file`. bm_dev and bm_test are migrated.
+- Changesets count code points: titles ≤ 200, checks and verify commands ≤ 2,000, plan files
+  ≤ 1,000 each.
+- `Bm.Plan` counts code points too and bounds `writes`/`depends_on` (200 entries of 1,000).
+- `Bridge.persist` answers `not_persisted` (logged) instead of raising in its owner.
+- Checked on bm_test:
+  - a 330-character verify command and a 299-character plan check are stored;
+  - a 2,001-character verify command is a changeset error;
+  - a title of 200 graphemes / 400 code points is refused by `Plan.validate` with a sentence and
+    by the task changeset with no raise.
+- Scratch rows were deleted.
+
+**Status 36.10 (2026-10-02).**
+- **Process groups.**
+  - `bm_guard` records `pgid time` per command. `Bm.Proc.read_pgid_records/1` reads them (old
+    lines without a time still work), and `not_reused/1` drops a group id whose leader is alive
+    and started after the id was recorded (`ps -o etime`).
+  - Recovery (attempts and planners) and the agent's own group handling pass through it. pi's
+    and verify's groups count as recorded at the attempt's (or run's) last update.
+  - The agent re-checks its groups after every bash `tool_execution_end`, so long sessions
+    forget empty groups early.
+  - The baseline verify's group is recovered by the `boot_id` stored with it.
+- **Verify** runs the command as `/bin/sh -c "$1" </dev/null` inside a wrapper that prints an
+  exit marker; the marker ends the wait.
+- **Agent.** Port writes after pi exited no longer raise, and `terminate/2` always ends the
+  groups. JSON lines with lone UTF-16 surrogates are repaired (to U+FFFD) instead of dropped.
+- **ToolCalls** skips early decoding for pi's own tools and decodes only when a delta ends in
+  `}`.
+- **`Bm.Proc.cmd/3`** (System.cmd with a timeout; TERM then KILL) runs every git call (300 s),
+  Policy's git calls (10 s), the planner's file list and `pi --version` (30 s).
+- **git.ex.** The execute bit is the owner's only. A failed `read_link` is an error, not a
+  crash. `write_new` checks its write and close.
+- Checked:
+  - Verify: `(sleep 30 &); echo tests passed; exit 0` → exit 0 in 53 ms (the review measured a
+    full timeout); `read x` → exit 0 at once with empty input; `exec sh -c '…; exit 5'` → exit
+    5; output that looks like a marker without the newline is kept; a real timeout still fires
+    after 1 s; no `sleep 30` left behind.
+  - `Proc.cmd`: a 500 ms timeout ends `sleep 30` (717 ms).
+  - `not_reused` keeps a group recorded after its leader started and drops one recorded an hour
+    before.
+  - A line with `\ud83d` alone decodes (`�`) with real pairs intact.
+  - A 300 KB `write` in 40-byte deltas: 1,631 ms before, 0 ms after; `add_task` still gives its
+    early observation.
+  - The file↔directory revert and the recovery check (live group ended) still pass.
+
+**Status 36.11 (2026-10-02).**
+- Every BM agent starts with `--no-skills --no-prompt-templates --no-approve` (pi 0.87.1 has
+  all three), and edits under `.pi/` are refused (36.4).
+- Checked with the real pi and no model call:
+  - `get_commands` in a scratch repository lists the user's 25 skills (`skill:cdp`,
+    `skill:gsearch`, …) without the flags, and none with them;
+  - `Profile.start(:chat)` still passes its fail-closed check in a repository whose
+    `.pi/settings.json` sets `shellCommandPrefix` and whose `.pi/SYSTEM.md` holds a hijack line.
+- Not checked live (it needs a model turn): that the hijack text stays out of the system prompt.
+  pi documents `--no-approve` as "Ignore project-local files for this run".
+
+**Status 36.12 (2026-10-02).**
+- **Bm.Chat.** Stop, New conversation and the old agent's stop on a repository switch run in
+  tasks (`GenServer.reply` later), so the chat keeps answering its agent's dialogs meanwhile.
+  It runs under its own `Bm.ChatSupervisor` (10 restarts a minute). An unknown plan id answers
+  `{:error, :not_found}` (`Plans.get_plan/1`).
+- **Chat page.**
+  - The transcript is bounded (`Transcript.limit`).
+  - The answer being streamed shows as plain text and becomes markdown when it ends.
+  - The agent numbers its events (`summary.seq`), and the page drops those its snapshot already
+    held.
+  - Canvas tool nodes are keyed by the tool call's id.
+  - Plan ids from the page are parsed safely.
+  - Stop and New conversation don't block the page.
+  - The canvas is re-sent after a reconnect.
+- **Canvas.** Only nodes the user dragged keep their position. The view refits through a
+  `FitView` child instead of rebuilding SvelteFlow, so zoom and pan survive.
+- **Run page.**
+  - Diffs and the coordinator start wait for the live connection.
+  - An attempt event costs one query before it is known to be this run's.
+  - The graph is pushed only when it changed, and the tasks stream resets only when the run's
+    status changes.
+  - Revert-run availability is one `exists?` query.
+  - The Notify hook removes its listeners.
+  - The canvas is re-sent after a reconnect.
+  - Undo checks that the task is the page's run's.
+- **Fencing.** Stop, Keep, Revert, Finish and Next (and the API's keep/revert/cancel) carry the
+  run id. The coordinator refuses them with `:run_not_active` unless that run is its current one
+  (`{:for_run, id, message}`).
+- **Elsewhere.** A stale "use reviewed goal" submit is ignored. Pages send
+  `img-src 'self' data: blob:` in their content security policy.
+- Checked against a server on port 4011 with headless Chrome over the DevTools protocol:
+  - one real chat turn (13 `read` calls; a few cents) → the Activity canvas shows 12 tool nodes
+    on 12 rows (the review's simulation: 1 row); the answer renders as markdown (`<strong>`); a
+    second tab opened 6 s into the turn ends with the same answer text (321 = 321 characters)
+    and the same 17 tool rows;
+  - run 90 renders with the right action bar and a fitted canvas; its diff shows on the live
+    render and not in the static HTML;
+  - the CSP header is present; `/`, `/runs`, `/runs/79` and `/runs/90` answer 200.
+- Not exercised: Stop during a pending dialog, and forged bad ids (read only).
+
+**Status 36.13 (2026-10-02).**
+- Run status writes (`finish_run`, `pause_run`, `resume_run`) are compare-and-set
+  (`transition_run/3`, `{:error, :stale}` otherwise). The coordinator then uses what is stored
+  (`stored/2`) instead of crashing or overwriting.
+- Task status writes are forced. `finish/3` sets the task from the attempt's stored status when
+  its own transition lost.
+- The planner's task and run broadcasts made inside a bridge request wait for the commit
+  (`Bm.Bridge.after_commit/1`) and are dropped on a rollback or duplicate.
+- `Runs.list_run_attempts/1` leaves transcripts out.
+- `Run`, `Runs.Task`, `Plans.Plan` and `Bridge.Request` changesets no longer cast BM's own
+  fields (`plan_open`, `baseline`, `planner`, `revision`, `status`, `attempt_id`). Archiving uses
+  `Plans.set_status/2`.
+- A delivery is marked delivered only once the planner took the turn.
+- Tests: none written or run (the user's decision).
+- Checked by re-running the scripts of 36.5, 36.6 and 36.8 (all as before) and a goal run to
+  completion with the fake pi: a flagged attempt (`undeclared_writes`) is delivered, the
+  delivery is marked delivered, the planner closes the plan in wave 2, and the run is `done`.
+
+**Docs (2026-10-02).** ARCHITECTURE has decision rows D32–D35, §8 (guarantees: Commit run, D33,
+D34, the policy's wrapper rule), §11 (recovery before serving) and §13 (five verified facts from
+the review).
+
+**Status: Phase 36 done (2026-10-02)**, on branch `phase-36` (from `review-fixes`; neither
+merged). Every finding of the third review is fixed, except these, which stay open:
+- the network access and interpreter writes the policy can't see (its documented limits);
+- ignored files a command creates (D34);
+- live checks of Stop during a pending chat dialog, of forged page ids and of the `.pi/` hijack
+  text in a model turn.

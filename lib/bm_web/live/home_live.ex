@@ -142,6 +142,11 @@ defmodule BmWeb.HomeLive do
     end
   end
 
+  # A submit that arrives when no review is shown (a second click, a stale page) does nothing.
+  def handle_event("use_reviewed_goal", _params, %{assigns: %{review: review}} = socket)
+      when not is_map(review),
+      do: {:noreply, socket}
+
   def handle_event("use_reviewed_goal", params, socket) do
     %{goal: suggested, questions: questions} = socket.assigns.review
     answers = params["answers"] || %{}
@@ -338,6 +343,9 @@ defmodule BmWeb.HomeLive do
 
   def explain(:run_paused, _path),
     do: {:path, "This workspace's run is paused after an interruption; resolve it first."}
+
+  def explain(:run_not_active, _path),
+    do: {:path, "This run has ended meanwhile. Reload the page to start a new one."}
 
   def explain(:budget_exhausted, _path),
     do: {:budget_usd, "The run's budget is spent. Finish the run to start a new one."}
