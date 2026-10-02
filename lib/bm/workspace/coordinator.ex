@@ -848,9 +848,13 @@ defmodule Bm.Workspace.Coordinator do
 
   ## Committing a run (15.1, D26)
 
+  # The user's own files are left out (§8: user changes are never committed): a kept attempt
+  # may have written one (e.g. a verify command that formats files), and committing it would
+  # commit the user's uncommitted work with it. The run names them (`baseline["commit_left"]`).
   defp do_commit_run(state, run) do
     stayed = stayed_attempts(run)
-    paths = written_paths(stayed)
+    owned = run_user_owned(run)
+    {left, paths} = stayed |> written_paths() |> Enum.split_with(&(&1 in owned))
 
     # The run's final content of each path: from the last attempt that wrote it.
     final = Map.new(paths, &{&1, List.last(writers(stayed, &1)).tree_after})
@@ -861,6 +865,9 @@ defmodule Bm.Workspace.Coordinator do
       end)
 
     cond do
+      paths == [] and left != [] ->
+        {:error, {:only_user_files, left}}
+
       paths == [] ->
         {:error, :nothing_to_commit}
 
@@ -874,11 +881,24 @@ defmodule Bm.Workspace.Coordinator do
 
         message = "#{subject}\n\nChanges made by BM run #{label} and accepted.\n"
 
-        with {:ok, sha} <- Git.commit_paths(state.root, paths, message) do
-          {:ok, run} = Runs.update_run(run, %{commit_sha: sha})
+        with {:ok, sha, notes} <- commit_paths(state.root, paths, message) do
+          baseline =
+            (run.baseline || %{})
+            |> Map.put("commit_left", left)
+            |> Map.put("commit_notes", notes)
+
+          {:ok, run} = Runs.update_run(run, %{commit_sha: sha, baseline: baseline})
           broadcast_run(state, run)
           {:ok, run}
         end
+    end
+  end
+
+  defp commit_paths(root, paths, message) do
+    case Git.commit_paths(root, paths, message) do
+      {:ok, sha} -> {:ok, sha, []}
+      {:ok, sha, :index_not_refreshed} -> {:ok, sha, ["index_not_refreshed"]}
+      error -> error
     end
   end
 
@@ -2340,15 +2360,27 @@ defmodule Bm.Workspace.Coordinator do
   defp revert_latest(%{run: nil}), do: {:error, :nothing_to_revert}
 
   defp revert_latest(state) do
-    case Runs.list_run_attempts(state.run) do
+    run = Runs.get_run!(state.run.id)
+
+    case Runs.list_run_attempts(run) do
       [%Attempt{status: :reverted} | _] ->
         {:error, :nothing_to_revert}
 
       [%Attempt{actual_writes: [_ | _], tree_before: from, tree_after: expected} = attempt | _]
       when is_binary(from) and is_binary(expected) ->
-        if Attempt.allowed?(attempt.status, :reverted),
-          do: restore_attempt(state, attempt),
-          else: {:error, {:not_revertable, attempt.status}}
+        cond do
+          not Attempt.allowed?(attempt.status, :reverted) ->
+            {:error, {:not_revertable, attempt.status}}
+
+          # An accepted change in an active goal run: the revert could land inside a planner
+          # turn, which BM reads as the planner changing files (D28). A held attempt waits for
+          # exactly this decision.
+          run.planner != nil and run.status == :active and state.lane != {:held, attempt.id} ->
+            {:error, :run_not_paused}
+
+          true ->
+            restore_attempt(%{state | run: run}, attempt)
+        end
 
       _ ->
         {:error, :nothing_to_revert}
@@ -2358,12 +2390,25 @@ defmodule Bm.Workspace.Coordinator do
   defp restore_attempt(state, attempt) do
     left = left_for_user(attempt, run_user_owned(state.run))
     entries = revertible_writes(attempt, left)
+    was_accepted? = attempt.status == :accepted
 
     with :ok <- Git.restore(state.root, entries, attempt.tree_before, attempt.tree_after),
          {:ok, attempt} <-
            Runs.transition_attempt(attempt, :reverted, note_left(%{}, attempt, left)) do
       {:ok, task} = attempt.task_id |> Runs.get_task!() |> Runs.update_task_status(:cancelled)
-      state = %{state | attempt: attempt, task: task, lane: :free}
+      # A goal run's planner already heard this task was accepted: it hears again (as 23.1).
+      if was_accepted? and state.run.planner, do: Runs.drop_delivery(task)
+      # BM's own change outside an attempt: not the user's at the next admission (13.1). Undo
+      # recorded an older known tree that would otherwise still count.
+      run =
+        if state.run.status in [:active, :paused] do
+          {:ok, run} = remember_workspace(state.root, state.run)
+          run
+        else
+          state.run
+        end
+
+      state = %{state | run: run, attempt: attempt, task: task, lane: :free}
       {:ok, broadcast_attempt(resume_if_reconciled(state))}
     end
   end

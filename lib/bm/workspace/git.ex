@@ -259,7 +259,8 @@ defmodule Bm.Workspace.Git do
 
   Refused with `{:error, reason}`: `:detached_head`, `:no_commits`, `{:staged, paths}` (the user
   staged changes in these paths), `:nothing_to_commit`. The author and committer are the user's
-  git identity; `message` is the commit message.
+  git identity; `message` is the commit message. `{:ok, commit, :index_not_refreshed}` when HEAD
+  moved but the user's index stayed locked (their `git status` then shows the paths changed).
   """
   def commit_paths(repo, paths, message) do
     tmp_index = Path.join(System.tmp_dir!(), "bm-commit-#{System.unique_integer([:positive])}")
@@ -271,7 +272,12 @@ defmodule Bm.Workspace.Git do
              git(repo, ["diff", "--cached", "--name-only", "-z", "HEAD", "--" | paths]),
            [] <- String.split(staged, <<0>>, trim: true),
            {:ok, _} <- git(repo, ["read-tree", "HEAD"], index: tmp_index),
-           {:ok, _} <- git(repo, ["add", "-A", "--" | paths], index: tmp_index, stderr: true),
+           # Not `add -A`: a path a run created and deleted again matches nothing and fails it.
+           {:ok, _} <-
+             git(repo, ["update-index", "--add", "--remove", "--" | paths],
+               index: tmp_index,
+               stderr: true
+             ),
            {:ok, tree} <- git(repo, ["write-tree"], index: tmp_index) |> trimmed(),
            {:ok, head_tree} <- git(repo, ["rev-parse", "HEAD^{tree}"]) |> trimmed(),
            true <- tree != head_tree || {:error, :nothing_to_commit},
@@ -280,15 +286,33 @@ defmodule Bm.Workspace.Git do
            {:ok, _} <-
              git(repo, ["update-ref", "-m", "bm: commit a run's changes", "HEAD", commit, head],
                stderr: true
-             ),
-           {:ok, _} <- git(repo, ["reset", "-q", "--" | paths], stderr: true) do
-        {:ok, commit}
+             ) do
+        # HEAD has moved: from here the commit stands, whatever the user's index does.
+        case reset_paths(repo, paths, 10) do
+          :ok -> {:ok, commit}
+          :error -> {:ok, commit, :index_not_refreshed}
+        end
       else
         [_ | _] = staged_paths -> {:error, {:staged, staged_paths}}
         {:error, _} = error -> error
       end
     after
       File.rm(tmp_index)
+    end
+  end
+
+  # The user's index entries for the committed paths follow the new HEAD. Their editor or prompt
+  # may hold `.git/index.lock` for a moment: retried, and reported if it stays.
+  defp reset_paths(_repo, _paths, 0), do: :error
+
+  defp reset_paths(repo, paths, tries) do
+    case git(repo, ["reset", "-q", "--" | paths], stderr: true) do
+      {:ok, _} ->
+        :ok
+
+      {:error, _} ->
+        Process.sleep(200)
+        reset_paths(repo, paths, tries - 1)
     end
   end
 
@@ -446,7 +470,9 @@ defmodule Bm.Workspace.Git do
     |> Enum.group_by(&elem(&1, at), &elem(&1, 0))
     |> Enum.reduce_while({:ok, %{}}, fn {tree, paths}, {:ok, acc} ->
       case ls_tree(repo, tree, paths) do
-        {:ok, objects} -> {:cont, {:ok, Map.merge(acc, objects)}}
+        # `ls-tree -r` lists a directory's files under a path that is a directory in this tree;
+        # only the paths asked for count (a file↔directory change across attempts, plan 36.5).
+        {:ok, objects} -> {:cont, {:ok, Map.merge(acc, Map.take(objects, paths))}}
         error -> {:halt, error}
       end
     end)

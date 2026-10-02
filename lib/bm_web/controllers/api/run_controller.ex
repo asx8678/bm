@@ -143,7 +143,13 @@ defmodule BmWeb.Api.RunController do
       case Coordinator.commit_run(run.workspace.path, run.id) do
         {:ok, run} ->
           summary = run_summary(conn, Runs.get_run_with_workspace(run.id))
-          json(conn, Map.put(summary, :commit_sha, run.commit_sha))
+
+          json(
+            conn,
+            summary
+            |> Map.put(:commit_sha, run.commit_sha)
+            |> Map.put(:message, BmWeb.RunLive.committed_message(run))
+          )
 
         {:error, reason} ->
           conn

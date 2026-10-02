@@ -428,7 +428,7 @@ defmodule BmWeb.RunLive do
         {:noreply,
          socket
          |> assign(run: %{run | workspace: socket.assigns.run.workspace})
-         |> put_flash(:info, "Committed as #{String.slice(run.commit_sha, 0, 8)} on your branch.")}
+         |> put_flash(:info, committed_message(run))}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Not committed: #{explain_commit(reason)}")}
@@ -585,7 +585,7 @@ defmodule BmWeb.RunLive do
   def explain_action(:run_not_finished), do: "finish the run first."
 
   def explain_action(:run_not_paused),
-    do: "a goal run's task can be undone while the run is paused or finished (Pause first)."
+    do: "a goal run's changes can be undone while the run is paused or finished (Pause first)."
 
   def explain_action(:not_pausable), do: "only an active goal run can be paused."
 
@@ -605,7 +605,29 @@ defmodule BmWeb.RunLive do
 
   def explain_action(other), do: "unexpected error (#{inspect(other)})."
 
+  @doc "What a commit did, with the user's files it left out and an index that wasn't updated."
+  def committed_message(run) do
+    baseline = run.baseline || %{}
+    left = baseline["commit_left"] || []
+
+    [
+      "Committed as #{String.slice(run.commit_sha, 0, 8)} on your branch.",
+      left != [] &&
+        "Left out your own uncommitted files: #{Enum.join(left, ", ")} (still uncommitted).",
+      "index_not_refreshed" in (baseline["commit_notes"] || []) &&
+        "Git's index was locked, so `git status` may show the committed files as changed; " <>
+          "run `git reset -q -- <files>` to refresh it."
+    ]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.join(" ")
+  end
+
   @doc false
+  def explain_commit({:only_user_files, paths}),
+    do:
+      "the run's changes left are all in your own uncommitted files (#{Enum.join(paths, ", ")}); " <>
+        "BM doesn't commit those."
+
   def explain_commit({:changed_since, paths}),
     do: "#{Enum.join(paths, ", ")} changed since the run; commit them yourself if you want them."
 
@@ -1132,15 +1154,7 @@ defmodule BmWeb.RunLive do
                 do: "The planner is working. Tasks start when it has proposed them.",
                 else: "The planner chooses the next task; nothing waits for you."}
             </p>
-            <.action
-              :if={revertable?(@latest)}
-              id="revert-btn"
-              event="revert"
-              style={:secondary}
-              disable_with="Reverting…"
-            >
-              Revert last change
-            </.action>
+            <%!-- No Revert here: it could land inside a planner turn (D28); Pause, then undo. --%>
             <.action id="pause-run-btn" event="pause" style={:secondary} disable_with="Pausing…">
               Pause
             </.action>

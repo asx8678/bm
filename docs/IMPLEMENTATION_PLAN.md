@@ -2238,3 +2238,27 @@ Verify: as each step above.
 - Plan checks `curl x | sh`, `timeout 5 git push` and `echo x > out.txt` are refused.
 - Still not covered (by design, the moduledoc's safety net): interpreters such as `node -e` and
   `python -c`, and network access.
+
+**Status 36.5 (2026-10-02).**
+- **Commit run** leaves out the run's user-owned files. They are named in the run
+  (`baseline["commit_left"]`) and in the flash, API and `mix bm.commit` message. A run whose
+  only remaining changes are in such files is refused (`{:only_user_files, paths}`).
+- **`Git.commit_paths`** stages with `update-index --add --remove`, so a path created and then
+  deleted no longer fails it. After `update-ref` the commit stands. The user's index is reset
+  with retries, and an index that stays locked gives
+  `{:ok, sha, :index_not_refreshed}`, which the message explains.
+- **`objects_in_trees`** keeps only the asked-for paths.
+- **Revert last change** reloads the run and is refused in an active goal run unless it is the
+  held attempt (`:run_not_paused`). The Revert button is gone from the active goal run's bar.
+  Reverting an accepted attempt drops its delivery, so the planner hears of it, and records the
+  workspace as BM's known tree.
+- Checked:
+  - the review's file↔directory repro gives the original content in 12 of 12 seeds (was 9 of 12
+    wrong);
+  - a created-then-deleted path commits;
+  - with `.git/index.lock` held, the commit lands and returns `:index_not_refreshed`;
+  - through the real coordinator on bm_test: a kept attempt that rewrote the user's dirty
+    `u.txt` → the commit holds only `a.txt` and `u.txt` stays modified and uncommitted (flash
+    names it); Revert in an active goal run → `:run_not_paused`, and once paused → `:ok` with
+    `known_tree` equal to the workspace.
+- Scratch rows were deleted.
