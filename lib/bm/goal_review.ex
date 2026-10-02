@@ -43,7 +43,17 @@ defmodule Bm.GoalReview do
   end
 
   defp prompt(goal, user_owned) do
-    owned = if user_owned == [], do: "none", else: Enum.join(user_owned, ", ")
+    owned =
+      case user_owned do
+        [] ->
+          "none"
+
+        paths when length(paths) > 50 ->
+          Enum.join(Enum.take(paths, 50), ", ") <> " (and #{length(paths) - 50} more)"
+
+        paths ->
+          Enum.join(paths, ", ")
+      end
 
     """
     You review a goal for BM before it is planned in this repository. Do NOT propose tasks and

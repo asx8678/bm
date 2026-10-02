@@ -383,7 +383,7 @@ defmodule Bm.Workspace.Coordinator do
                "user_owned" => baseline.user_owned
              }
            }),
-         {:ok, pid} <- start_planner(state, run, opts) do
+         {:ok, pid} <- start_planner_or_fail(state, run, opts) do
       state = %{state | workspace: workspace, run: run, planner_ref: Process.monitor(pid)}
       broadcast_run(state, run)
       {:reply, {:ok, run}, state}
@@ -472,6 +472,9 @@ defmodule Bm.Workspace.Coordinator do
 
       state.phase != nil or state.lane != :free ->
         {:reply, {:error, :lane_busy}, state}
+
+      Bm.Workspace.Planner.whereis(run_id) != nil ->
+        {:reply, {:error, :planner_stopping}, state}
 
       true ->
         {:ok, run} = Runs.resume_run(run)
@@ -783,6 +786,19 @@ defmodule Bm.Workspace.Coordinator do
   end
 
   defp admit_task(run, attrs), do: Runs.create_task(run, task_attrs(run, attrs))
+
+  # The run exists by now: if its planner can't start, it ends, or the workspace would hold an
+  # unfinished run this coordinator doesn't know (every later start refused as busy, plan 36.8).
+  defp start_planner_or_fail(state, run, opts) do
+    case start_planner(state, run, opts) do
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, reason} = error ->
+        Runs.finish_run(run, :failed, "the planner did not start: #{inspect(reason)}")
+        error
+    end
+  end
 
   defp start_planner(state, run, opts) do
     Bm.Workspace.Planner.start(run.id, state.root, opts)

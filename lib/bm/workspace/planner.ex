@@ -67,7 +67,9 @@ defmodule Bm.Workspace.Planner do
 
     case DynamicSupervisor.start_child(Bm.Workspace.Supervisor, spec) do
       {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
+      # The run's previous planner is still shutting down (it can take seconds to end its pi
+      # session): resuming onto it would watch a planner that is about to stop (plan 36.8).
+      {:error, {:already_started, _pid}} -> {:error, :planner_stopping}
       error -> error
     end
   end
@@ -165,6 +167,7 @@ defmodule Bm.Workspace.Planner do
       context_pending?: false,
       plan_timer: nil,
       aborting?: false,
+      agent_ref: nil,
       # Set when a limit is hit during a turn: the run fails once the planner is idle.
       fail_reason: nil,
       # The caller waiting for an answer turn (a worker's question, plan 12.2).
@@ -225,6 +228,14 @@ defmodule Bm.Workspace.Planner do
     job_done(%{state | job: nil}, kind, {:error, {:job_crashed, reason}})
   end
 
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state)
+      when ref == :erlang.map_get(:agent_ref, state) and state.phase != :ending do
+    state = %{state | agent_ref: nil}
+
+    if state.answering, do: GenServer.reply(state.answering, :unavailable)
+    pause(%{state | answering: nil}, "the planner's pi adapter stopped (#{inspect(reason)})")
+  end
+
   ## pi events and requests
 
   def handle_info({:pi, id, event, summary}, %{agent_id: id} = state) do
@@ -247,6 +258,10 @@ defmodule Bm.Workspace.Planner do
 
       {_event, %{status: :exited}} when state.phase in [:busy, :idle] ->
         pause(state, "the planner's pi process exited")
+
+      {_event, %{status: :exited}} when state.phase == :answering ->
+        GenServer.reply(state.answering, :unavailable)
+        pause(%{state | answering: nil}, "the planner's pi process exited")
 
       _other ->
         {:noreply, state}
@@ -369,6 +384,9 @@ defmodule Bm.Workspace.Planner do
 
     {:ok, run} = Runs.update_run(run, %{planner: planner})
     state = %{state | assignment: %{session_epoch: summary.session_epoch}}
+    # The adapter's own restart (by its supervisor) would start a new pi session behind the
+    # planner's back, with a fresh epoch counter: watched instead (plan 36.8).
+    state = Map.put(state, :agent_ref, monitor_agent(state.agent_id))
     context = prompt_context(run, state.root)
 
     cond do
@@ -403,7 +421,9 @@ defmodule Bm.Workspace.Planner do
     end_run(state, :failed, "the planner did not start: #{inspect(reason)}")
   end
 
-  defp job_done(state, :abort, _result), do: {:noreply, state}
+  # The next limit may need to abort again (plan 36.8: it stayed set, so after one answer-turn
+  # abort neither the budget cap nor the turn timeout could stop the model).
+  defp job_done(state, :abort, _result), do: {:noreply, %{state | aborting?: false}}
 
   defp prompt_context(run, root) do
     workspace = Runs.ensure_workspace(root) |> elem(1)
@@ -460,10 +480,14 @@ defmodule Bm.Workspace.Planner do
         log(state, kind_label(kind), logged)
         Process.send_after(self(), {:turn_timeout, turn}, state.config.turn_timeout)
 
-        case Bm.Pi.prompt(state.agent_id, text) do
-          :ok ->
-            broadcast(state)
-            {:noreply, state}
+        with :ok <- same_session(state),
+             :ok <- Bm.Pi.prompt(state.agent_id, text) do
+          broadcast(state)
+          {:noreply, state}
+        else
+          {:session, reason} ->
+            if state.answering, do: GenServer.reply(state.answering, :unavailable)
+            pause(%{state | answering: nil}, reason)
 
           error ->
             pause(state, "the planner did not take the prompt: #{inspect(error)}")
@@ -478,6 +502,28 @@ defmodule Bm.Workspace.Planner do
   # running and the coordinator snapshots it meanwhile.
   defp turn_snapshot(state, :question), do: {:ok, state.turn_tree}
   defp turn_snapshot(state, _kind), do: Git.snapshot(state.root)
+
+  # A prompt to an exited pi starts a new session (a new epoch, no profile check, no recorded
+  # process group), whose every proposal BM would then refuse as stale (plan 36.8). The run
+  # pauses instead; Resume planning starts a checked session.
+  defp same_session(%{assignment: %{session_epoch: epoch}} = state) do
+    case Bm.Pi.snapshot(state.agent_id).summary do
+      %{status: :exited} -> {:session, "the planner's pi process exited"}
+      %{session_epoch: ^epoch} -> :ok
+      _other -> {:session, "the planner's pi session changed"}
+    end
+  catch
+    :exit, _ -> {:session, "the planner's pi adapter is gone"}
+  end
+
+  defp same_session(_state), do: :ok
+
+  defp monitor_agent(agent_id) do
+    case Registry.lookup(Bm.Pi.Registry, agent_id) do
+      [{pid, _}] -> Process.monitor(pid)
+      [] -> nil
+    end
+  end
 
   defp kind_label(:prompt), do: "prompt"
   defp kind_label(:delivery), do: "results"
@@ -934,12 +980,20 @@ defmodule Bm.Workspace.Planner do
       task: task,
       status: delivery.status,
       undone?: attempt != nil and "undone" in attempt.flags,
-      summary: attempt && attempt.result && attempt.result["summary"],
+      summary: attempt && attempt.result && cap(attempt.result["summary"]),
+      flags: (attempt && attempt.flags) || [],
       writes: if(attempt, do: Enum.map(attempt.actual_writes, & &1["path"]), else: []),
       error: attempt && attempt.error,
       verify_tail: tail
     }
   end
+
+  # Worker summaries go into prompts; a runaway one must not fill them.
+  @max_summary 2_000
+  defp cap(text) when is_binary(text) and byte_size(text) > @max_summary,
+    do: String.slice(text, 0, @max_summary) <> " …(cut)"
+
+  defp cap(text), do: text
 
   defp plan_left_open(%{reminded?: false} = state) do
     if Runs.budget_exhausted?(Runs.get_run!(state.run_id)),
@@ -947,9 +1001,13 @@ defmodule Bm.Workspace.Planner do
       else: begin_turn(%{state | reminded?: true}, :reminder, Bm.Prompts.planner_reminder())
   end
 
+  # Armed once: the idle tick reaches this every few seconds, and re-arming it each time meant
+  # the timeout never fired (plan 36.8). A new turn cancels it.
+  defp plan_left_open(%{plan_timer: ref} = state) when ref != nil, do: {:noreply, state}
+
   defp plan_left_open(state) do
     ref = Process.send_after(self(), {:plan_timeout, state.turn}, state.config.plan_timeout)
-    {:noreply, %{cancel_plan_timer(state) | plan_timer: ref}}
+    {:noreply, %{state | plan_timer: ref}}
   end
 
   defp cancel_plan_timer(%{plan_timer: nil} = state), do: state

@@ -2292,3 +2292,30 @@ Verify: as each step above.
   `crates/foo/x`, `.env` and `echo X=2 > .env` are refused. `build/out.js`, `a.txt`, a `.env`
   the worker wrote itself and `cp a.txt sub/x` behave as expected (10 of 10). The 159 Policy
   cases still pass.
+
+**Status 36.8 (2026-10-02).**
+- `plan_left_open` arms the plan timeout once.
+- `aborting?` is reset when the abort job ends.
+- The planner monitors its pi adapter: an adapter that stops, or pi exiting during an answer
+  turn, gives the worker the fallback and pauses the run with the reason.
+- Before each prompt, `same_session/1` checks that the agent is alive and still in the assigned
+  session. Otherwise the run pauses instead of pi silently starting an unchecked session whose
+  proposals would all be "stale".
+- `Planner.start` answers `{:error, :planner_stopping}` while the run's previous planner is
+  still registered, and `resume_planning` refuses early, with a sentence on the page.
+- `start_goal` fails the new run when its planner can't start.
+- Deliveries name the flags of accepted results ("the reviewer could not run…", "changed files
+  beyond its declared writes", …).
+- Worker summaries in prompts are cut at 2 KB. The user-owned list in planner and goal-review
+  prompts is capped at 50 ("and N more").
+- Checked with the fake pi on bm_test:
+  - a planner that leaves the plan open and ignores the reminder → run `failed` "the planner left
+    the plan open" after 1.2 s (`plan_timeout` 800 ms, `tick` 50 ms); before, the tick re-armed
+    it forever;
+  - the planner's pi killed (`kill -9`) during an answer turn → the run is paused "the planner's
+    pi process exited", the worker's question gets the fallback and the worker's attempt is
+    accepted, and the planner process ends;
+  - 5,000 user-owned paths give a 4 KB planner prompt with "and 4950 more";
+  - a flagged delivery names both flags.
+- Read only: the `aborting?` reset, `start_goal` failing its run, and `:planner_stopping`.
+- Scratch rows were deleted.

@@ -581,6 +581,10 @@ defmodule BmWeb.RunLive do
     do: "the latest attempt is #{status |> to_string() |> String.replace("_", " ")}."
 
   def explain_action(:not_resumable), do: "only a paused goal run can resume planning."
+
+  def explain_action(:planner_stopping),
+    do: "the previous planner is still stopping; try again in a few seconds."
+
   def explain_action(:already_reverted), do: "this run was already reverted."
   def explain_action(:run_not_finished), do: "finish the run first."
 
