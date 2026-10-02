@@ -206,6 +206,9 @@ defmodule Bm.Runs do
 
   def get_task!(id), do: Repo.get!(Task, id)
 
+  @doc "The task with id `id`, or nil."
+  def get_task(id), do: Repo.get(Task, id)
+
   def list_tasks(%Run{id: run_id}) do
     Repo.all(from t in Task, where: t.run_id == ^run_id, order_by: [t.inserted_at, t.id])
   end
@@ -378,6 +381,16 @@ defmodule Bm.Runs do
         where: t.run_id == ^run_id,
         order_by: [asc: a.inserted_at, asc: a.id],
         preload: [task: t]
+    )
+  end
+
+  @doc "Whether any attempt of the run left a checkpoint (Revert run can put it back)."
+  def any_checkpoint?(%Run{id: run_id}) do
+    Repo.exists?(
+      from a in Attempt,
+        join: t in Task,
+        on: t.id == a.task_id,
+        where: t.run_id == ^run_id and not is_nil(a.checkpoint_ref)
     )
   end
 

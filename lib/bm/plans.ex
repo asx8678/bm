@@ -37,6 +37,14 @@ defmodule Bm.Plans do
   @doc "A plan with its workspace and its tasks in order."
   def get_plan!(id), do: Plan |> Repo.get!(id) |> Repo.preload([:workspace, tasks: tasks_query()])
 
+  @doc "The plan with id `id`, or nil."
+  def get_plan(id) do
+    case Repo.get(Plan, id) do
+      nil -> nil
+      plan -> Repo.preload(plan, [:workspace, tasks: tasks_query()])
+    end
+  end
+
   @doc "The most recently changed plans, with their workspaces."
   def list_plans(limit \\ 30) do
     Repo.all(

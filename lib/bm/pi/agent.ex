@@ -631,11 +631,15 @@ defmodule Bm.Pi.Agent do
   defp approval_outcome(%{"value" => value}), do: "answered #{inspect(value)}"
   defp approval_outcome(_fields), do: "answered"
 
+  # `seq` numbers the events: a client that subscribes and then takes a snapshot drops the
+  # events the snapshot already holds (plan 36.12).
   defp emit(state, event) do
     state = %{
       state
       | transcript: state.transcript |> Transcript.apply(event) |> Transcript.limit()
     }
+
+    state = Map.put(state, :seq, Map.get(state, :seq, 0) + 1)
 
     Bm.Pi.broadcast(state.id, event, summary(state))
     state
@@ -651,7 +655,8 @@ defmodule Bm.Pi.Agent do
       session_epoch: state.session_epoch,
       cwd: state.cwd,
       pgid: state.pgid,
-      pgid_file: state.pgid_file
+      pgid_file: state.pgid_file,
+      seq: Map.get(state, :seq, 0)
     }
   end
 

@@ -2378,3 +2378,43 @@ Verify: as each step above.
     `.pi/settings.json` sets `shellCommandPrefix` and whose `.pi/SYSTEM.md` holds a hijack line.
 - Not checked live (it needs a model turn): that the hijack text stays out of the system prompt.
   pi documents `--no-approve` as "Ignore project-local files for this run".
+
+**Status 36.12 (2026-10-02).**
+- **Bm.Chat.** Stop, New conversation and the old agent's stop on a repository switch run in
+  tasks (`GenServer.reply` later), so the chat keeps answering its agent's dialogs meanwhile.
+  It runs under its own `Bm.ChatSupervisor` (10 restarts a minute). An unknown plan id answers
+  `{:error, :not_found}` (`Plans.get_plan/1`).
+- **Chat page.**
+  - The transcript is bounded (`Transcript.limit`).
+  - The answer being streamed shows as plain text and becomes markdown when it ends.
+  - The agent numbers its events (`summary.seq`), and the page drops those its snapshot already
+    held.
+  - Canvas tool nodes are keyed by the tool call's id.
+  - Plan ids from the page are parsed safely.
+  - Stop and New conversation don't block the page.
+  - The canvas is re-sent after a reconnect.
+- **Canvas.** Only nodes the user dragged keep their position. The view refits through a
+  `FitView` child instead of rebuilding SvelteFlow, so zoom and pan survive.
+- **Run page.**
+  - Diffs and the coordinator start wait for the live connection.
+  - An attempt event costs one query before it is known to be this run's.
+  - The graph is pushed only when it changed, and the tasks stream resets only when the run's
+    status changes.
+  - Revert-run availability is one `exists?` query.
+  - The Notify hook removes its listeners.
+  - The canvas is re-sent after a reconnect.
+  - Undo checks that the task is the page's run's.
+- **Fencing.** Stop, Keep, Revert, Finish and Next (and the API's keep/revert/cancel) carry the
+  run id. The coordinator refuses them with `:run_not_active` unless that run is its current one
+  (`{:for_run, id, message}`).
+- **Elsewhere.** A stale "use reviewed goal" submit is ignored. Pages send
+  `img-src 'self' data: blob:` in their content security policy.
+- Checked against a server on port 4011 with headless Chrome over the DevTools protocol:
+  - one real chat turn (13 `read` calls; a few cents) → the Activity canvas shows 12 tool nodes
+    on 12 rows (the review's simulation: 1 row); the answer renders as markdown (`<strong>`); a
+    second tab opened 6 s into the turn ends with the same answer text (321 = 321 characters)
+    and the same 17 tool rows;
+  - run 90 renders with the right action bar and a fitted canvas; its diff shows on the live
+    render and not in the static HTML;
+  - the CSP header is present; `/`, `/runs`, `/runs/79` and `/runs/90` answer 200.
+- Not exercised: Stop during a pending dialog, and forged bad ids (read only).

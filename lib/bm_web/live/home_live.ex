@@ -142,6 +142,11 @@ defmodule BmWeb.HomeLive do
     end
   end
 
+  # A submit that arrives when no review is shown (a second click, a stale page) does nothing.
+  def handle_event("use_reviewed_goal", _params, %{assigns: %{review: review}} = socket)
+      when not is_map(review),
+      do: {:noreply, socket}
+
   def handle_event("use_reviewed_goal", params, socket) do
     %{goal: suggested, questions: questions} = socket.assigns.review
     answers = params["answers"] || %{}

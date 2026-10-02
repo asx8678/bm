@@ -93,7 +93,8 @@ defmodule Bm.Workspace.Coordinator do
   instead (the planner's scheduler, plan 7.4).
   Returns `{:ok, attempt}` once admitted; the attempt continues asynchronously.
   """
-  def run_task(path, attrs), do: call(path, {:run_task, Map.new(attrs)})
+  def run_task(path, attrs, run_id \\ nil),
+    do: call(path, fenced({:run_task, Map.new(attrs)}, run_id))
 
   @doc """
   Starts a goal run (milestone C): a new run with planning open, and its planner
@@ -162,23 +163,29 @@ defmodule Bm.Workspace.Coordinator do
   def state(path), do: call(path, :state)
 
   @doc "Cancels the running attempt. Changes it made stay and hold the lane."
-  def cancel(path), do: call(path, :cancel)
+  def cancel(path, run_id \\ nil), do: call(path, fenced(:cancel, run_id))
 
   @doc "Accepts the held attempt's changes as they are (recorded as unverified) and frees the lane."
-  def keep(path), do: call(path, :keep)
+  def keep(path, run_id \\ nil), do: call(path, fenced(:keep, run_id))
 
   @doc """
   Reverts the run's latest attempt (held or not): its files go back to `tree_before`, only if
   they still hold what the attempt left. `{:error, {:changed_since, paths}}` changes nothing.
   """
-  def revert(path), do: call(path, :revert)
+  def revert(path, run_id \\ nil), do: call(path, fenced(:revert, run_id))
 
   @doc """
   Finishes the workspace's run (`:done`), which releases the workspace: the next task starts a
   new run with a fresh baseline of the user's files. Refused while an attempt runs or the lane
   is held.
   """
-  def finish_run(path), do: call(path, :finish_run)
+  def finish_run(path, run_id \\ nil), do: call(path, fenced(:finish_run, run_id))
+
+  # With a run id (the run page, the API), the action applies only while that run is the
+  # workspace's unfinished one: a page left open on a finished run must not stop, keep, revert
+  # or finish the next run, or add a task to it (plan 36.12).
+  defp fenced(message, nil), do: message
+  defp fenced(message, run_id), do: {:for_run, run_id, message}
 
   @doc "Stops the coordinator and its worker."
   def stop(path) do
@@ -314,6 +321,12 @@ defmodule Bm.Workspace.Coordinator do
   ## Calls
 
   @impl true
+  def handle_call({:for_run, run_id, message}, from, %{run: %{id: run_id}} = state),
+    do: handle_call(message, from, state)
+
+  def handle_call({:for_run, _run_id, _message}, _from, state),
+    do: {:reply, {:error, :run_not_active}, state}
+
   def handle_call(:state, _from, state) do
     reply = %{
       lane: state.lane,

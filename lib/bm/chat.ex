@@ -106,14 +106,19 @@ defmodule Bm.Chat do
     end
   end
 
-  def handle_call(:stop_turn, _from, %{agent_id: id} = state) when is_binary(id),
-    do: {:reply, Bm.Pi.abort(id), state}
+  # Aborting waits until pi is idle, and pi may be waiting for this process to answer a dialog:
+  # done in a task, so the chat keeps answering (plan 36.12). The caller gets the reply then.
+  def handle_call(:stop_turn, from, %{agent_id: id} = state) when is_binary(id) do
+    in_background(from, fn -> Bm.Pi.abort(id) end)
+    {:noreply, state}
+  end
 
   def handle_call(:stop_turn, _from, state), do: {:reply, :ok, state}
 
-  def handle_call(:new_conversation, _from, %{status: :ready} = state) do
-    reply = Bm.Pi.new_session(state.agent_id)
-    {:reply, reply, broadcast(%{state | plan_id: nil, questions: [], notes: []})}
+  def handle_call(:new_conversation, from, %{status: :ready} = state) do
+    id = state.agent_id
+    in_background(from, fn -> Bm.Pi.new_session(id) end)
+    {:noreply, broadcast(%{state | plan_id: nil, questions: [], notes: []})}
   end
 
   def handle_call(:new_conversation, _from, state), do: {:reply, {:error, :not_ready}, state}
@@ -138,7 +143,7 @@ defmodule Bm.Chat do
     do: {:reply, {:error, :no_plan}, state}
 
   def handle_call({:remove_task, key}, _from, state) do
-    case Plans.remove_task(Plans.get_plan!(state.plan_id), key) do
+    case Plans.remove_task(current_plan(state), key) do
       {:ok, task} ->
         note = "the user removed task #{key} (\"#{task.title}\")"
         {:reply, :ok, %{state | notes: state.notes ++ [note]}}
@@ -154,12 +159,15 @@ defmodule Bm.Chat do
   end
 
   def handle_call({:select_plan, id}, _from, state) do
-    case Plans.get_plan!(id) do
+    case Plans.get_plan(id) do
       %{workspace_id: workspace_id} = plan when workspace_id == state.workspace.id ->
         state =
           plan_note(state, "the user switched to plan \"#{plan.title}\"; call get_plan to see it")
 
         {:reply, :ok, broadcast(%{state | plan_id: plan.id, questions: []})}
+
+      nil ->
+        {:reply, {:error, :not_found}, state}
 
       _other ->
         {:reply, {:error, :other_repository}, state}
@@ -167,9 +175,9 @@ defmodule Bm.Chat do
   end
 
   def handle_call({:archive_plan, id}, _from, state) do
-    plan = Plans.get_plan!(id)
+    plan = Plans.get_plan(id)
 
-    if plan.workspace_id == state.workspace.id do
+    if plan && plan.workspace_id == state.workspace.id do
       {:ok, _} = Plans.update_plan(plan, %{status: :archived})
 
       state =
@@ -248,12 +256,28 @@ defmodule Bm.Chat do
     broadcast(%{state | generation: generation, agent_id: id, status: :starting})
   end
 
+  # Stopping pi can take seconds; the caller (switching repositories) needn't wait for it.
   defp stop_agent(%{agent_id: id} = state) when is_binary(id) do
-    Bm.Pi.stop(id)
+    Task.start(fn -> Bm.Pi.stop(id) end)
     %{state | agent_id: nil, status: :stopped}
   end
 
   defp stop_agent(state), do: state
+
+  defp in_background(from, fun) do
+    Task.start(fn ->
+      reply =
+        try do
+          fun.()
+        catch
+          :exit, reason -> {:error, {:exit, reason}}
+        end
+
+      GenServer.reply(from, reply)
+    end)
+  end
+
+  defp current_plan(state), do: Plans.get_plan!(state.plan_id)
 
   ## Requests
 
@@ -283,7 +307,7 @@ defmodule Bm.Chat do
   defp answer("update_plan", payload, %{plan_id: id} = state) when is_integer(id) do
     # The model changes what the plan says, never its status.
     attrs = Map.take(payload, ~w(title goal findings scope))
-    {result(Plans.update_plan(Plans.get_plan!(id), attrs), id), state}
+    {result(Plans.update_plan(current_plan(state), attrs), id), state}
   end
 
   defp answer("ask_user", %{"questions" => [_ | _] = questions}, state) do
@@ -307,18 +331,18 @@ defmodule Bm.Chat do
   defp answer("get_plan", _payload, state), do: {ok(state.plan_id), state}
 
   defp answer("add_task", payload, state) do
-    plan = Plans.get_plan!(state.plan_id)
+    plan = current_plan(state)
     attrs = Map.drop(payload, ["before"])
     {result(Plans.add_task(plan, attrs, payload["before"]), plan.id), state}
   end
 
   defp answer("update_task", %{"key" => key} = payload, state) do
-    plan = Plans.get_plan!(state.plan_id)
+    plan = current_plan(state)
     {result(Plans.update_task(plan, key, Map.delete(payload, "key")), plan.id), state}
   end
 
   defp answer("remove_task", %{"key" => key}, state) do
-    plan = Plans.get_plan!(state.plan_id)
+    plan = current_plan(state)
     {result(Plans.remove_task(plan, key), plan.id), state}
   end
 
