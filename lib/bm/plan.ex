@@ -130,7 +130,8 @@ defmodule Bm.Plan do
           value == "" ->
             {:ok, nil}
 
-          opts[:max] && String.length(value) > opts[:max] ->
+          # Code points, as the database counts them (a grapheme can be several).
+          opts[:max] && length(String.codepoints(value)) > opts[:max] ->
             {:error, "`#{field}` is too long (at most #{opts[:max]} characters)."}
 
           true ->
@@ -185,9 +186,16 @@ defmodule Bm.Plan do
         {:ok, []}
 
       list when is_list(list) ->
-        if Enum.all?(list, &is_binary/1),
-          do: {:ok, list |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()},
-          else: {:error, "`#{field}` must be a list of strings."}
+        cond do
+          not Enum.all?(list, &is_binary/1) ->
+            {:error, "`#{field}` must be a list of strings."}
+
+          length(list) > 200 or Enum.any?(list, &(String.length(&1) > 1_000)) ->
+            {:error, "`#{field}` is too long (at most 200 entries of 1000 characters)."}
+
+          true ->
+            {:ok, list |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()}
+        end
 
       _other ->
         {:error, "`#{field}` must be a list of strings."}

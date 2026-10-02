@@ -47,6 +47,8 @@ defmodule Bm.Runs.Task do
     ])
     |> validate_required([:key, :title, :goal, :mutates])
     |> validate_format(:key, ~r/^[a-z][a-z0-9_]*$/)
+    |> validate_length(:title, max: 200, count: :codepoints)
+    |> validate_length(:check, max: 2_000, count: :codepoints)
     |> unique_constraint([:run_id, :key, :revision])
   end
 end

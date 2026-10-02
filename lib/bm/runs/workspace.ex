@@ -23,6 +23,8 @@ defmodule Bm.Runs.Workspace do
     |> validate_change(:path, fn :path, path ->
       if Path.type(path) == :absolute, do: [], else: [path: "must be absolute"]
     end)
+    |> validate_length(:path, max: 4_096, count: :codepoints)
+    |> validate_length(:verify_command, max: 2_000, count: :codepoints)
     |> unique_constraint(:path)
   end
 end

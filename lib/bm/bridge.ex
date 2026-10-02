@@ -99,7 +99,25 @@ defmodule Bm.Bridge do
 
   defp assigned?(_role, assignment), do: is_integer(assignment[:session_epoch])
 
+  # A failure here (a database error, a bug in the handler) is answered to the agent, not raised
+  # in its owner (the coordinator, planner or chat), which would crash it (plan 36.9).
   defp persist(role, agent_id, request, assignment, fun) do
+    do_persist(role, agent_id, request, assignment, fun)
+  rescue
+    error ->
+      require Logger
+
+      Logger.error(
+        "bm: #{request.op} not persisted: " <> Exception.format(:error, error, __STACKTRACE__)
+      )
+
+      %{
+        "ok" => false,
+        "error" => "not_persisted: #{Exception.message(error) |> String.slice(0, 200)}"
+      }
+  end
+
+  defp do_persist(role, agent_id, request, assignment, fun) do
     Repo.transaction(fn ->
       outcome = fun.(request)
 

@@ -33,7 +33,7 @@ defmodule Bm.Plans.Plan do
     plan
     |> cast(attrs, [:title, :goal, :findings])
     |> validate_required([:title, :goal])
-    |> validate_length(:title, max: 200)
+    |> validate_length(:title, max: 200, count: :codepoints)
   end
 
   @doc "Changes the model or the user may make to a plan."
@@ -41,6 +41,6 @@ defmodule Bm.Plans.Plan do
     plan
     |> cast(attrs, [:title, :goal, :findings, :scope, :status])
     |> validate_required([:title, :goal])
-    |> validate_length(:title, max: 200)
+    |> validate_length(:title, max: 200, count: :codepoints)
   end
 end

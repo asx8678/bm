@@ -2319,3 +2319,18 @@ Verify: as each step above.
   - a flagged delivery names both flags.
 - Read only: the `aborting?` reset, `start_goal` failing its run, and `:planner_stopping`.
 - Scratch rows were deleted.
+
+**Status 36.9 (2026-10-02).**
+- Migration `widen_free_text_columns` moves to `text` / `text[]`: `workspaces.path` and
+  `verify_command`, `tasks.title` and `writes`, `plans.title`, `plan_tasks.title`, `check` and
+  `files`, `attempts.pgid_file`. bm_dev and bm_test are migrated.
+- Changesets count code points: titles ≤ 200, checks and verify commands ≤ 2,000, plan files
+  ≤ 1,000 each.
+- `Bm.Plan` counts code points too and bounds `writes`/`depends_on` (200 entries of 1,000).
+- `Bridge.persist` answers `not_persisted` (logged) instead of raising in its owner.
+- Checked on bm_test:
+  - a 330-character verify command and a 299-character plan check are stored;
+  - a 2,001-character verify command is a changeset error;
+  - a title of 200 graphemes / 400 code points is refused by `Plan.validate` with a sentence and
+    by the task changeset with no raise.
+- Scratch rows were deleted.
