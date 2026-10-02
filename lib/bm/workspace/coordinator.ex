@@ -1624,7 +1624,7 @@ defmodule Bm.Workspace.Coordinator do
 
   defp authorize_policy(state, tool, payload) do
     mode = if state.attempt.role == :reader, do: :read_only, else: :write
-    ctx = %{root: state.root, user_owned: user_owned(state), mode: mode}
+    ctx = %{root: state.root, user_owned: user_owned(state), mode: mode, touched: state.touched}
 
     input = payload["input"] || %{}
 

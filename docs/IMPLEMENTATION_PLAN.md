@@ -2276,3 +2276,19 @@ Verify: as each step above.
   task check `false` fails. Result: `a.txt` restored, `b.txt` removed, `u.txt` kept with the
   user's edit, attempt `reverted` with `auto_reverted` and `files_left` and the note naming
   `u.txt`. Scratch rows were deleted.
+
+**Status 36.7 (2026-10-02).**
+- `Bm.Policy.user_owned_path?/2` matches an entry as the path itself or a directory prefix,
+  without case. Policy and `Plan.check_writes` use it.
+- `Git.user_owned/1` adds submodules (index mode 160000). Nested repositories already appear as
+  `dir/`.
+- A nested repository without commits is excluded from `add -A` instead of failing the snapshot.
+- Edit, write and shell write targets to an existing gitignored file are refused, unless the
+  worker wrote it earlier in the attempt (`ctx.touched`). New ignored files are allowed.
+- New decision row D34.
+- Checked on a scratch repository with two submodules (one with the user's uncommitted edit), an
+  ignored `.env`, an ignored `build/` and an empty nested repository. The snapshot succeeds and
+  `user_owned` is `["crates/foo/", "sub", "sub2"]`. Writes to `sub/…`, `sub2/…`,
+  `crates/foo/x`, `.env` and `echo X=2 > .env` are refused. `build/out.js`, `a.txt`, a `.env`
+  the worker wrote itself and `cp a.txt sub/x` behave as expected (10 of 10). The 159 Policy
+  cases still pass.

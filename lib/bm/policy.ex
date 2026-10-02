@@ -196,19 +196,52 @@ defmodule Bm.Policy do
         {:deny, "Files in .pi/ configure the coding agents; BM doesn't let agents change them."}
 
       # Compared without case: on macOS NOTES.md is the user's notes.md.
-      user_owned?(Path.relative_to(full, root), ctx.user_owned) ->
+      user_owned_path?(Path.relative_to(full, root), ctx.user_owned) ->
         {:deny,
-         "#{Path.relative_to(full, root)} has uncommitted changes of the user; BM must not " <>
-           "change it. Report that the task needs it instead."}
+         "#{Path.relative_to(full, root)} has uncommitted changes of the user (or lies in a " <>
+           "nested repository or submodule); BM must not change it. Report that the task " <>
+           "needs it instead."}
+
+      ignored_existing?(full, Path.relative_to(full, root), ctx) ->
+        {:deny,
+         "#{Path.relative_to(full, root)} is ignored by git and already exists, so BM can't " <>
+           "record or undo a change to it. Leave it as it is, or report that the task needs it."}
 
       true ->
         :allow
     end
   end
 
-  defp user_owned?(relative, owned) do
+  @doc """
+  Whether `relative` is one of the user's paths or lies inside one: compared without case (on
+  macOS NOTES.md is the user's notes.md), and an entry is also a directory prefix (a nested
+  repository is listed as `dir/`, a submodule as `sub`; writes inside them are invisible to
+  BM's snapshots, plan 36.7).
+  """
+  def user_owned_path?(relative, owned) do
     relative = String.downcase(relative)
-    Enum.any?(owned, &(String.downcase(&1) == relative))
+
+    Enum.any?(owned, fn entry ->
+      entry = entry |> String.downcase() |> String.trim_trailing("/")
+      relative == entry or String.starts_with?(relative, entry <> "/")
+    end)
+  end
+
+  # A file git ignores is in no snapshot: a change to it can't be recorded, verified or undone
+  # (decision D34). One that already exists is refused, unless this worker wrote it earlier in
+  # the attempt (`ctx.touched`); a new one is fine (build output, scratch files).
+  defp ignored_existing?(full, relative, ctx) do
+    File.exists?(full) and not MapSet.member?(ctx[:touched] || MapSet.new(), relative) and
+      match?(
+        {_, 0},
+        System.cmd("git", ["check-ignore", "-q", "--", relative],
+          cd: ctx.root,
+          env: [{"GIT_OPTIONAL_LOCKS", "0"}],
+          stderr_to_stdout: true
+        )
+      )
+  rescue
+    _ -> false
   end
 
   # pi's own rules (path-utils.js): strip a leading "@", expand "~", normalize odd spaces.

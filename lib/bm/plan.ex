@@ -263,7 +263,7 @@ defmodule Bm.Plan do
         relative == ".git" or String.starts_with?(relative, ".git/") ->
           {:halt, {:error, "#{path} is inside .git; BM manages git itself."}}
 
-        relative in ctx.user_owned ->
+        Bm.Policy.user_owned_path?(relative, ctx.user_owned) ->
           {:halt,
            {:error,
             "#{relative} has the user's uncommitted changes; BM won't change it. Plan " <>

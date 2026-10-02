@@ -109,6 +109,18 @@ defmodule Bm.Workspace.Git do
 
       {:error, {:git, _, _, out}} = error ->
         cond do
+          # A nested repository without commits can't be added; it is the user's (its path is
+          # user-owned through the status), so the snapshot leaves it out (plan 36.7).
+          (empty = no_commit_repos(out)) != [] ->
+            excludes = Enum.map(empty, &":(exclude,literal)#{&1}")
+
+            git(repo, ["add", "-A", "--", "." | excludes],
+              index: index,
+              stderr: true,
+              env: [{"GIT_LITERAL_PATHSPECS", "0"}]
+            )
+            |> ok()
+
           not String.contains?(out, "index.lock") ->
             File.rm(index)
 
@@ -123,6 +135,11 @@ defmodule Bm.Workspace.Git do
             error
         end
     end
+  end
+
+  defp no_commit_repos(out) do
+    Regex.scan(~r/'([^']+)' does not have a commit checked out/, out, capture: :all_but_first)
+    |> List.flatten()
   end
 
   @doc "`:ok` if `repo` is the top level of a git working tree, `{:error, reason}` otherwise."
@@ -212,13 +229,22 @@ defmodule Bm.Workspace.Git do
   def user_owned(repo) do
     args = ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]
 
-    with {:ok, out} <- git(repo, args) do
+    with {:ok, out} <- git(repo, args),
+         {:ok, staged} <- git(repo, ["ls-files", "-s", "-z"]) do
       paths =
         for record <- String.split(out, <<0>>, trim: true),
             <<_xy::binary-size(2), " ", path::binary>> <- [record],
             do: path
 
-      {:ok, Enum.sort(paths)}
+      # Submodules: a snapshot records only their commit, so what is inside them is the user's
+      # too (plan 36.7). A nested repository shows in the status as `dir/`.
+      gitlinks =
+        for record <- String.split(staged, <<0>>, trim: true),
+            [meta, path] <- [String.split(record, "\t", parts: 2)],
+            String.starts_with?(meta, "160000 "),
+            do: path
+
+      {:ok, Enum.sort(Enum.uniq(paths ++ gitlinks))}
     end
   end
 
