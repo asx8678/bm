@@ -2367,3 +2367,14 @@ Verify: as each step above.
   - A 300 KB `write` in 40-byte deltas: 1,631 ms before, 0 ms after; `add_task` still gives its
     early observation.
   - The file↔directory revert and the recovery check (live group ended) still pass.
+
+**Status 36.11 (2026-10-02).**
+- Every BM agent starts with `--no-skills --no-prompt-templates --no-approve` (pi 0.87.1 has
+  all three), and edits under `.pi/` are refused (36.4).
+- Checked with the real pi and no model call:
+  - `get_commands` in a scratch repository lists the user's 25 skills (`skill:cdp`,
+    `skill:gsearch`, …) without the flags, and none with them;
+  - `Profile.start(:chat)` still passes its fail-closed check in a repository whose
+    `.pi/settings.json` sets `shellCommandPrefix` and whose `.pi/SYSTEM.md` holds a hijack line.
+- Not checked live (it needs a model turn): that the hijack text stays out of the system prompt.
+  pi documents `--no-approve` as "Ignore project-local files for this run".

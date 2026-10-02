@@ -79,9 +79,12 @@ defmodule Bm.Pi.Profile do
         if(spec.fabric?, do: [config[:fabric_extension]], else: []) ++
         Enum.map(spec.extensions, &Path.join(extensions_dir(), "#{&1}.ts"))
 
+    # The user's own pi setup stays out (plan 36.11): their skills and prompt templates
+    # (which would offer scripts to run), and project-local `.pi/` settings (the shell pi
+    # runs, extra system prompts) even in folders they trust.
     command =
       Keyword.get(config, :pi_command, ["pi"]) ++
-        ~w(--mode rpc --no-session --no-extensions) ++
+        ~w(--mode rpc --no-session --no-extensions --no-skills --no-prompt-templates --no-approve) ++
         Enum.flat_map(Enum.reject(extension_paths, &is_nil/1), &["-e", &1]) ++
         ["--tools", Enum.join(spec.tools, ","), "--model", config[:model]] ++
         case spec[:system_prompt] do
