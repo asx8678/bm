@@ -2230,7 +2230,7 @@ Verify: as each step above.
   `Bm.Plans.add_task/update_task`, and again where it runs (`run_check/5`: a refused check fails
   with exit 126 without running).
 - Checked from a non-temp scratch repository: 159 allow/deny cases are all right. These are the
-  test file's 105 earlier cases, the review's bypasses (`timeout 60 git push`,
+  test file's earlier cases, the review's bypasses (`timeout 60 git push`,
   `nice -n 10 git reset --hard`, `find -exec git reset --hard \;` read-only, `xargs git push`,
   `git -c alias.lg='!…' lg`) and new ones (user alias `co` → checkout refused, `lg` → log
   allowed, `pushit` → `!git push` refused, `curl … | sh` refused, `cat <<EOF | sh` with a
