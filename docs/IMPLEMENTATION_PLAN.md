@@ -2436,3 +2436,14 @@ Verify: as each step above.
 - Checked by re-running the scripts of 36.5, 36.6 and 36.8 (all as before) and a goal run to
   completion with the fake pi: a flagged attempt (`undeclared_writes`) is delivered, the
   delivery is marked delivered, the planner closes the plan in wave 2, and the run is `done`.
+
+**Docs (2026-10-02).** ARCHITECTURE has decision rows D32–D35, §8 (guarantees: Commit run, D33,
+D34, the policy's wrapper rule), §11 (recovery before serving) and §13 (five verified facts from
+the review).
+
+**Status: Phase 36 done (2026-10-02)**, on branch `phase-36` (from `review-fixes`; neither
+merged). Every finding of the third review is fixed, except these, which stay open:
+- the network access and interpreter writes the policy can't see (its documented limits);
+- ignored files a command creates (D34);
+- live checks of Stop during a pending chat dialog, of forged page ids and of the `.pi/` hijack
+  text in a model turn.
