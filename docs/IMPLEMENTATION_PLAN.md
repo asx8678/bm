@@ -2215,3 +2215,26 @@ Verify: as each step above.
 - Checked against a server on port 4011: with `Host: evil.example`, `/runs` and `/api/runs`
   return 403; `localhost`, `127.0.0.1` and `app.localhost` return 200. A websocket upgrade with
   Origin `evil.example` gets 403; with `localhost` it gets 101. `mix bm.runs` still lists runs.
+
+**Status 36.4 (2026-10-02).**
+- `Bm.Policy` checks wrappers as what they run. `check_tokens/3` drops each wrapper's options
+  (`timeout` also drops its duration) and checks the inner command, nesting at most 8 deep.
+- `find` with `-delete`, `-fprint` or `-fls` has its targets checked.
+- `git -c alias.*|core.*|include.*`, `--config-env`, `--exec-path=` and `GIT_CONFIG_*`/`GIT_DIR`
+  assignments (also through `export`) are refused.
+- A git subcommand outside the known reads and writes is resolved through
+  `git config --get alias.<sub>` and checked as what it expands to.
+- A shell with neither `-c` nor a script is refused, unless it reads a checked heredoc.
+- Edits under `.pi/` are refused.
+- `Bm.Plan.check_policy/3` puts a `check` through read-only Policy in `Plan.validate`, in
+  `Bm.Plans.add_task/update_task`, and again where it runs (`run_check/5`: a refused check fails
+  with exit 126 without running).
+- Checked from a non-temp scratch repository: 159 allow/deny cases are all right. These are the
+  test file's 105 earlier cases, the review's bypasses (`timeout 60 git push`,
+  `nice -n 10 git reset --hard`, `find -exec git reset --hard \;` read-only, `xargs git push`,
+  `git -c alias.lg='!…' lg`) and new ones (user alias `co` → checkout refused, `lg` → log
+  allowed, `pushit` → `!git push` refused, `curl … | sh` refused, `cat <<EOF | sh` with a
+  harmless body allowed).
+- Plan checks `curl x | sh`, `timeout 5 git push` and `echo x > out.txt` are refused.
+- Still not covered (by design, the moduledoc's safety net): interpreters such as `node -e` and
+  `python -c`, and network access.

@@ -86,6 +86,7 @@ defmodule Bm.Plans do
     tasks = list_tasks(plan)
 
     with :ok <- check_files(plan, attrs["files"]),
+         :ok <- check_check(plan, attrs["check"]),
          :ok <- check_dependencies(tasks, attrs["key"], attrs["depends_on"] || []) do
       Repo.transaction(fn ->
         position = insert_position(plan, tasks, before)
@@ -110,6 +111,7 @@ defmodule Bm.Plans do
 
     with %Task{} = task <- Enum.find(tasks, &(&1.key == key)) || {:error, :no_such_task},
          :ok <- check_files(plan, attrs["files"]),
+         :ok <- check_check(plan, attrs["check"]),
          :ok <- check_dependencies(tasks, key, attrs["depends_on"] || task.depends_on) do
       task
       |> Task.update_changeset(attrs)
@@ -181,6 +183,20 @@ defmodule Bm.Plans do
   end
 
   defp relative_inside?(_path), do: false
+
+  # A check will run as a shell command when the plan runs: read-only policy, as for the planner.
+  defp check_check(_plan, check) when check in [nil, ""], do: :ok
+
+  defp check_check(plan, check) when is_binary(check) do
+    %{workspace: workspace} = Repo.preload(plan, :workspace)
+
+    case Bm.Plan.check_policy(check, workspace.path, []) do
+      :ok -> :ok
+      {:error, sentence} -> {:error, {:check_refused, sentence}}
+    end
+  end
+
+  defp check_check(_plan, _check), do: {:error, {:check_refused, "`check` must be a string."}}
 
   # Every dependency names another task of the plan, and the graph stays acyclic.
   defp check_dependencies(_tasks, _key, deps) when not is_list(deps),

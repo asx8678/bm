@@ -18,6 +18,14 @@ defmodule Bm.Policy do
   `rm`, `mkdir`, `touch`, `chmod` …) and every git write. The snapshot after the session still
   decides: a read-only session that changed files fails.
 
+  **Commands that run commands** (plan 36.4) are checked as what they run: `timeout`, `nice`,
+  `env`, `command`, `exec`, `time`, `stdbuf`, `ionice`, `caffeinate`, `watch`, `xargs` and
+  `find -exec`. git configuration that changes what git runs is refused (`git -c alias.*|core.*|
+  include.*`, `--config-env`, `GIT_CONFIG_*` and `GIT_DIR`-style variables), and a git
+  subcommand BM doesn't know is looked up as one of the user's aliases. A shell reading commands
+  from its input (`curl … | sh`) is refused. Files under `.pi/` (the agents' own settings) are
+  never written.
+
   **Dependencies:** commands that install, add, remove or update dependencies are refused in
   every mode (plan 17.1): they change files git ignores, which BM can neither record nor undo.
 
@@ -95,6 +103,8 @@ defmodule Bm.Policy do
 
   def authorize("bash", %{"command" => command}, ctx) when is_binary(command) do
     {command, shell_inputs} = heredocs(command)
+    # `cat <<EOF | sh`: the shell reads a heredoc that is checked below.
+    ctx = if shell_inputs != [], do: Map.put(ctx, :reads_heredoc, true), else: ctx
 
     checks =
       Enum.map(redirect_targets(command), &{:write_target, &1}) ++
@@ -126,6 +136,11 @@ defmodule Bm.Policy do
 
       inside?(String.downcase(full), String.downcase(Path.join(root, ".git"))) ->
         {:deny, "BM manages git itself; don't change files in .git."}
+
+      # pi reads a project's .pi/ (settings with the shell it runs, system prompts): a change
+      # there would change the next agent (plan 36.4).
+      inside?(String.downcase(full), String.downcase(Path.join(root, ".pi"))) ->
+        {:deny, "Files in .pi/ configure the coding agents; BM doesn't let agents change them."}
 
       # Compared without case: on macOS NOTES.md is the user's notes.md.
       user_owned?(Path.relative_to(full, root), ctx.user_owned) ->
@@ -310,25 +325,176 @@ defmodule Bm.Policy do
     |> Enum.map(fn groups -> Enum.find(groups, "", &(&1 != "")) end)
   end
 
-  defp check_segment(tokens, ctx) do
-    # `env X=1 cmd`, `VAR=1 cmd`, `command cmd`, `exec cmd`, `time cmd`: look at the real command.
-    case Enum.drop_while(tokens, &prefix_word?/1) do
-      [] -> :allow
-      [cmd | args] -> check_command(Path.basename(cmd), args, ctx)
+  # How deep wrappers may nest (`timeout 9 nice xargs env git …`) before BM refuses to guess.
+  @max_depth 8
+
+  defp check_segment(tokens, ctx), do: check_tokens(tokens, ctx, @max_depth)
+
+  defp check_tokens(_tokens, _ctx, 0),
+    do: {:deny, "This command nests too many wrapper commands for BM to check; run it directly."}
+
+  defp check_tokens(tokens, ctx, depth) do
+    {assignments, rest} = Enum.split_while(tokens, &prefix_word?/1)
+
+    with :allow <- check_assignments(assignments) do
+      case rest do
+        [] ->
+          :allow
+
+        [cmd | args] ->
+          name = Path.basename(cmd)
+
+          # Wrappers run their arguments as a command (`timeout 60 git push`, `find -exec`,
+          # `xargs rm`): the command itself is checked, then the one it runs.
+          with :allow <- check_command(name, args, ctx) do
+            name
+            |> inner_commands(args)
+            |> Enum.find_value(:allow, &denied(check_tokens(&1, ctx, depth - 1)))
+          end
+      end
     end
   end
 
-  defp prefix_word?(word),
-    do: word in ~w(env command exec time nice nohup builtin) or word =~ ~r/^[A-Za-z_]\w*=/
+  defp prefix_word?(word), do: word in ~w(nohup builtin) or assignment?(word)
 
-  defp check_command("git", args, _ctx), do: check_git(args)
+  defp assignment?(word), do: word =~ ~r/^[A-Za-z_]\w*=/
+
+  # git reads extra configuration from the environment; `alias.*` there runs any command.
+  @git_env ~w(GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+              GIT_EXEC_PATH GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY)
+
+  defp check_assignments(words) do
+    case Enum.find(words, &git_env?/1) do
+      nil -> :allow
+      word -> {:deny, "Setting #{variable(word)} changes how git works here; leave git to BM."}
+    end
+  end
+
+  defp git_env?(word) do
+    name = variable(word)
+    name in @git_env or String.starts_with?(name, "GIT_CONFIG_KEY_")
+  end
+
+  defp variable(word), do: word |> String.split("=", parts: 2) |> hd()
+
+  ## Commands that run other commands
+
+  # The commands a wrapper runs, as word lists (none for other commands).
+  defp inner_commands("env", args), do: env_command(args)
+  defp inner_commands("nice", args), do: [drop_options(args, ~w(-n --adjustment))]
+  defp inner_commands("nohup", args), do: [args]
+  defp inner_commands("time", args), do: [drop_options(args, ~w(-f --format -o --output))]
+  defp inner_commands("exec", args), do: [drop_options(args, ~w(-a))]
+  defp inner_commands("stdbuf", args), do: [drop_options(args, ~w(-i -o -e))]
+  defp inner_commands("ionice", args), do: [drop_options(args, ~w(-c -n -p -P -u))]
+  defp inner_commands("caffeinate", args), do: [drop_options(args, ~w(-t -w))]
+  defp inner_commands("watch", args), do: [drop_options(args, ~w(-n --interval -d))]
+  defp inner_commands("chronic", args), do: [drop_options(args, [])]
+  defp inner_commands("unbuffer", args), do: [drop_options(args, [])]
+
+  # `timeout [options] DURATION command …`
+  defp inner_commands("timeout", args) do
+    case drop_options(args, ~w(-s --signal -k --kill-after)) do
+      [_duration | command] -> [command]
+      [] -> []
+    end
+  end
+
+  # `command -v x` only prints where x is; `command [-p] x …` runs it.
+  defp inner_commands("command", args) do
+    if Enum.any?(args, &(&1 in ["-v", "-V"])), do: [], else: [drop_options(args, [])]
+  end
+
+  defp inner_commands("xargs", args) do
+    case drop_options(args, ~w(-I -L -n -P -s -d -E -a --max-args --max-lines --max-procs
+                                --delimiter --arg-file --max-chars --replace --process-slot-var)) do
+      [] -> []
+      command -> [command]
+    end
+  end
+
+  # Every `-exec … ;`, `-execdir … +`, `-ok …`, `-okdir …` of a find.
+  defp inner_commands("find", args), do: find_execs(args, [])
+
+  defp inner_commands(_name, _args), do: []
+
+  defp find_execs([action | rest], acc) when action in ~w(-exec -execdir -ok -okdir) do
+    {command, after_command} = Enum.split_while(rest, &(&1 not in [";", "\\;", "+"]))
+    find_execs(Enum.drop(after_command, 1), [command | acc])
+  end
+
+  defp find_execs([_ | rest], acc), do: find_execs(rest, acc)
+  defp find_execs([], acc), do: Enum.reverse(acc)
+
+  # `env [-i] [-u NAME] [-C DIR] [NAME=value]… command …`; `-S "string"` is a command line.
+  defp env_command(args) do
+    case args do
+      [split, line | rest] when split in ["-S", "--split-string"] ->
+        [words(line) ++ rest]
+
+      ["--split-string=" <> line | rest] ->
+        [words(line) ++ rest]
+
+      _ ->
+        [drop_options(args, ~w(-u --unset -C --chdir))]
+    end
+  end
+
+  # Drops leading options (and the values of those in `with_value`) up to the first operand.
+  defp drop_options(["--" | rest], _with_value), do: rest
+
+  defp drop_options(["-" <> _ = option | rest], with_value) do
+    case rest do
+      [_value | after_value] ->
+        if option in with_value,
+          do: drop_options(after_value, with_value),
+          else: drop_options(rest, with_value)
+
+      [] ->
+        []
+    end
+  end
+
+  defp drop_options(rest, _with_value), do: rest
+
+  defp check_command("git", args, ctx), do: check_git(args, ctx, @max_depth)
+
+  defp check_command("export", args, _ctx),
+    do: check_assignments(Enum.filter(args, &assignment?/1))
+
+  # `find -delete` deletes under its starting points; `-fprint` and `-fls` write a file.
+  defp check_command("find", args, ctx) do
+    starts = Enum.take_while(args, &(not String.starts_with?(&1, ["-", "(", "!"])))
+
+    writes =
+      args
+      |> Enum.chunk_every(2, 1)
+      |> Enum.flat_map(fn
+        [option, file] when option in ~w(-fprint -fprint0 -fls -fprintf) -> [file]
+        _ -> []
+      end)
+
+    deletes = if "-delete" in args, do: if(starts == [], do: ["."], else: starts), else: []
+    check_write_targets(writes ++ deletes, ctx)
+  end
 
   # `sh -c "…"` and `eval "…"`: the string is a command of its own (quoted text is otherwise not
   # looked into, see mask_quotes/1).
+  # A shell with neither `-c` nor a script reads its commands from its input (`curl … | sh`),
+  # which BM can't see (a heredoc it reads is checked, see heredocs/1).
   defp check_command(shell, args, ctx) when shell in @shells do
     case Enum.drop_while(args, &(not (&1 =~ ~r/^-[a-zA-Z]*c[a-zA-Z]*$/))) do
-      [_flag, inner | _] -> authorize("bash", %{"command" => inner}, ctx)
-      _ -> :allow
+      [_flag, inner | _] ->
+        authorize("bash", %{"command" => inner}, ctx)
+
+      _ ->
+        if operands(args) == [] and !ctx[:reads_heredoc] and
+             not Enum.any?(args, &(&1 in ["--version", "--help"])),
+           do:
+             {:deny,
+              "#{shell} reading commands from its input can't be checked; run the commands " <>
+                "directly or from a script file."},
+           else: :allow
     end
   end
 
@@ -446,19 +612,87 @@ defmodule Bm.Policy do
   defp subcommand_words(["-" <> _ | rest]), do: subcommand_words(rest)
   defp subcommand_words(words), do: words
 
-  defp check_git(args) do
-    case git_subcommand(args) do
-      {sub, rest} ->
-        if git_write?(sub, rest),
-          do:
-            {:deny,
-             "git #{sub} changes the repository. BM records and checkpoints changes itself; " <>
-               "leave git to BM and only edit files."},
-          else: :allow
+  # git subcommands that only read (anything else may be an alias of the user's).
+  @git_reads ~w(status log diff show grep ls-files ls-tree ls-remote cat-file rev-parse rev-list
+                blame annotate describe shortlog show-ref show-branch for-each-ref name-rev
+                merge-base whatchanged diff-tree diff-files diff-index cherry count-objects var
+                version help check-ignore check-attr check-ref-format verify-commit verify-tag
+                range-diff format-patch archive branch config tag stash)
 
-      nil ->
+  defp check_git(_args, _ctx, 0), do: {:deny, "This git alias nests too deeply for BM to check."}
+
+  defp check_git(args, ctx, depth) do
+    with :allow <- check_git_options(args) do
+      case git_subcommand(args) do
+        {sub, rest} ->
+          cond do
+            git_write?(sub, rest) ->
+              {:deny,
+               "git #{sub} changes the repository. BM records and checkpoints changes itself; " <>
+                 "leave git to BM and only edit files."}
+
+            sub in @git_reads ->
+              :allow
+
+            true ->
+              check_git_alias(sub, rest, ctx, depth)
+          end
+
+        nil ->
+          :allow
+      end
+    end
+  end
+
+  # `git -c alias.x='!cmd' x` runs any command; `core.*` and `include.*` change what git runs
+  # (hooks, pager, fsmonitor) or which configuration it reads.
+  defp check_git_options(args) do
+    args
+    |> Enum.take_while(&String.starts_with?(&1, "-"))
+    |> length()
+    |> then(&Enum.take(args, &1 * 2 + 1))
+    |> Enum.chunk_every(2, 1)
+    |> Enum.find_value(:allow, fn
+      ["-c", setting | _] ->
+        key = setting |> String.split("=", parts: 2) |> hd() |> String.downcase()
+
+        if String.starts_with?(key, ["alias.", "core.", "include.", "includeif."]),
+          do: {:deny, "git -c #{key} changes what git runs; leave git's configuration alone."}
+
+      ["--config-env" <> _ | _] ->
+        {:deny, "git --config-env changes git's configuration; leave it alone."}
+
+      ["--exec-path=" <> _ | _] ->
+        {:deny, "git --exec-path=… changes the programs git runs; leave it alone."}
+
+      _ ->
+        nil
+    end)
+  end
+
+  # An alias in the user's git configuration (`git co` = `git checkout`) is checked as what it
+  # runs: `!…` as a shell command, otherwise as git with those words.
+  defp check_git_alias(sub, rest, ctx, depth) do
+    case System.cmd("git", ["config", "--get", "alias." <> sub],
+           cd: ctx.root,
+           env: [{"GIT_OPTIONAL_LOCKS", "0"}],
+           stderr_to_stdout: true
+         ) do
+      {"!" <> command, 0} ->
+        authorize(
+          "bash",
+          %{"command" => String.trim(command) <> " " <> Enum.join(rest, " ")},
+          ctx
+        )
+
+      {expansion, 0} ->
+        check_git(words(String.trim(expansion)) ++ rest, ctx, depth - 1)
+
+      _ ->
         :allow
     end
+  rescue
+    _ -> :allow
   end
 
   defp git_subcommand([opt, _value | rest]) when opt in @git_options_with_value,

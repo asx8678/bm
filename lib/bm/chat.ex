@@ -354,6 +354,8 @@ defmodule Bm.Chat do
   defp explain({:bad_files, files}),
     do: "files must be relative paths inside the repository: #{inspect(files)}"
 
+  defp explain({:check_refused, sentence}), do: sentence
+
   defp explain(other), do: inspect(other)
 
   @doc "The plan as text for the model: its goal and every task with its key and dependencies."

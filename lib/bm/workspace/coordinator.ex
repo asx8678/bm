@@ -1881,9 +1881,10 @@ defmodule Bm.Workspace.Coordinator do
   defp start_verification(state, :check_only) do
     coordinator = self()
     %{root: root, task: %{check: check}, config: %{verify_timeout: timeout}} = state
+    owned = run_user_owned(state.run)
 
     start_job(state, :verify, fn ->
-      check_result = Bm.Workspace.Verify.run(check, root, timeout, coordinator)
+      check_result = run_check(check, root, owned, timeout, coordinator)
       %{"exit" => 0, "output" => "", "skipped" => "no changes", "check" => check_result}
     end)
   end
@@ -1894,17 +1895,27 @@ defmodule Bm.Workspace.Coordinator do
     command = state.workspace.verify_command
     check = state.task.check
     timeout = state.config.verify_timeout
+    owned = run_user_owned(state.run)
 
     # The task's check (plan 7.7) runs only after the workspace verify command passed.
     start_job(state, :verify, fn ->
       case Bm.Workspace.Verify.run(command, root, timeout, coordinator) do
         %{"exit" => 0} = verify when is_binary(check) ->
-          Map.put(verify, "check", Bm.Workspace.Verify.run(check, root, timeout, coordinator))
+          Map.put(verify, "check", run_check(check, root, owned, timeout, coordinator))
 
         verify ->
           verify
       end
     end)
+  end
+
+  # A task's check is checked again where it runs (plan 36.4): a refused one fails like a
+  # failing check, without running.
+  defp run_check(check, root, owned, timeout, coordinator) do
+    case Bm.Plan.check_policy(check, root, owned) do
+      :ok -> Bm.Workspace.Verify.run(check, root, timeout, coordinator)
+      {:error, sentence} -> %{"exit" => 126, "output" => sentence, "refused" => true}
+    end
   end
 
   defp verified(state, result) do
