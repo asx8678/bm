@@ -2204,3 +2204,14 @@ Verify: as each step above.
   was `failed "interrupted (no changes)"` with a `tree_after` by the time the application had
   started (563 ms). An immediate `ensure_started` left it unchanged, and the group was gone.
   Scratch rows were deleted.
+
+**Status 36.3 (2026-10-02).**
+- `BmWeb.Plugs.LocalHost` runs in the endpoint before the session. Loopback names,
+  `*.localhost` and the configured host pass. Tests add `www.example.com` through
+  `extra_hosts`.
+- Dev `check_origin` allows only those origins.
+- Prod binds 127.0.0.1 unless `BM_BIND_ALL=1` is set.
+- New decision row D32.
+- Checked against a server on port 4011: with `Host: evil.example`, `/runs` and `/api/runs`
+  return 403; `localhost`, `127.0.0.1` and `app.localhost` return 200. A websocket upgrade with
+  Origin `evil.example` gets 403; with `localhost` it gets 101. `mix bm.runs` still lists runs.
